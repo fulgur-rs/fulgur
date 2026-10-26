@@ -73,6 +73,68 @@ pub fn pdf_to_rgba(pdf_path: &Path, dpi: u32, work_dir: &Path) -> anyhow::Result
     Ok(img)
 }
 
+/// Build the `Config` that `render_html_to_pdf` hands the Blitz engine, so
+/// another backend can render a fixture with the same page setup.
+pub fn render_config(spec: RenderSpec<'_>) -> anyhow::Result<fulgur::config::Config> {
+    let mut builder =
+        fulgur::config::Config::builder().page_size(page_size_from_name(spec.page_size)?);
+    if let Some(mpt) = spec.margin_pt {
+        builder = builder.margin(Margin::uniform(mpt));
+    }
+    if spec.bookmarks {
+        builder = builder.bookmarks(true);
+    }
+    Ok(builder.build())
+}
+
+/// Render `html` through the Raikiri backend with the page setup of `spec`.
+#[cfg(feature = "raikiri")]
+pub fn render_html_to_pdf_raikiri(html: &str, spec: RenderSpec<'_>) -> anyhow::Result<Vec<u8>> {
+    let config = render_config(spec)?;
+    let options = fulgur_raikiri::RenderOptions::default();
+    fulgur_raikiri::render_html_with_options(html, None, &config, &options)
+        .map_err(|e| anyhow::anyhow!("fulgur-raikiri render failed: {e}"))
+}
+
+/// Rasterize every page of `pdf_path` via `pdftocairo`, in page order.
+///
+/// Unlike `pdf_to_rgba` this does not pass `-f`/`-l`, so a page-count
+/// difference between two renders stays visible.
+pub fn pdf_to_rgba_pages(
+    pdf_path: &Path,
+    dpi: u32,
+    work_dir: &Path,
+) -> anyhow::Result<Vec<RgbaImage>> {
+    std::fs::create_dir_all(work_dir)?;
+    let prefix = work_dir.join("page");
+    let status = Command::new("pdftocairo")
+        .args(["-png", "-r", &dpi.to_string()])
+        .arg(pdf_path)
+        .arg(&prefix)
+        .status()
+        .map_err(|e| anyhow::anyhow!("failed to spawn pdftocairo: {e}"))?;
+    anyhow::ensure!(status.success(), "pdftocairo exited with {status}");
+
+    // pdftocairo names pages `page-<n>.png`, zero-padding <n> to the width
+    // of the last page number, so a lexical sort is page order.
+    let mut pngs: Vec<_> = std::fs::read_dir(work_dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            name.starts_with("page-") && name.ends_with(".png")
+        })
+        .collect();
+    pngs.sort();
+    anyhow::ensure!(
+        !pngs.is_empty(),
+        "pdftocairo produced no pages for {}",
+        pdf_path.display()
+    );
+    pngs.iter()
+        .map(|p| Ok(image::open(p)?.to_rgba8()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
