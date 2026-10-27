@@ -517,4 +517,117 @@ mod tests {
         }
         assert_eq!(page0_annotation_count(doc), 2);
     }
+
+    // ── wired (tagged) annotation path ───────────────────────────────────
+    //
+    // These tests exercise the `is_wired = true` branch in
+    // `emit_link_annotations` (the `add_tagged_annotation` path) that is
+    // never reached by the `None` tests above.
+
+    #[test]
+    fn wired_occurrence_produces_annotation_id_entry() {
+        // span_ptr present in the wired set → add_tagged_annotation fires,
+        // and the returned Vec contains one entry for that span_ptr.
+        let mut doc = krilla::Document::new();
+        let annot_ids = {
+            let mut page = doc.start_page_with(page_settings());
+            let registry = DestinationRegistry::new();
+            let span_ptr: usize = 42;
+            let mut occ = ext_occ(
+                "https://wired.example",
+                vec![make_quad(0.0, 0.0, 80.0, 12.0)],
+            );
+            occ.span_ptr = span_ptr;
+            let wired: std::collections::BTreeSet<usize> = [span_ptr].into();
+            emit_link_annotations(&mut page, &[occ], &registry, Some(&wired))
+        };
+        // The wired span_ptr must appear in the returned vec.
+        assert_eq!(
+            annot_ids.len(),
+            1,
+            "expected one annot_id entry for the wired occurrence"
+        );
+        assert_eq!(
+            annot_ids[0].0, 42,
+            "annot_ids entry must carry the original span_ptr"
+        );
+        // The annotation was still written to the page.
+        assert_eq!(page0_annotation_count(doc), 1);
+    }
+
+    #[test]
+    fn unwired_occurrence_with_disjoint_wired_set_returns_empty_ids() {
+        // span_ptr NOT in the wired set → falls back to add_annotation (untagged),
+        // so annot_ids stays empty even though the annotation is emitted.
+        let mut doc = krilla::Document::new();
+        let annot_ids = {
+            let mut page = doc.start_page_with(page_settings());
+            let registry = DestinationRegistry::new();
+            let mut occ = ext_occ(
+                "https://unwired.example",
+                vec![make_quad(0.0, 0.0, 80.0, 12.0)],
+            );
+            occ.span_ptr = 99;
+            // Wired set contains 42, not 99.
+            let wired: std::collections::BTreeSet<usize> = [42_usize].into();
+            emit_link_annotations(&mut page, &[occ], &registry, Some(&wired))
+        };
+        assert!(
+            annot_ids.is_empty(),
+            "unwired occurrence must not produce an annot_id entry"
+        );
+        // Annotation was still emitted untagged.
+        assert_eq!(page0_annotation_count(doc), 1);
+    }
+
+    #[test]
+    fn empty_wired_set_emits_annotation_without_id() {
+        // Some(&empty_set): no occurrence is wired, so add_annotation fires for
+        // all, annot_ids stays empty, and the annotation still reaches the page.
+        let mut doc = krilla::Document::new();
+        let annot_ids = {
+            let mut page = doc.start_page_with(page_settings());
+            let registry = DestinationRegistry::new();
+            let occ = ext_occ(
+                "https://empty-set.example",
+                vec![make_quad(0.0, 0.0, 80.0, 12.0)],
+            );
+            let wired: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+            emit_link_annotations(&mut page, &[occ], &registry, Some(&wired))
+        };
+        assert!(annot_ids.is_empty());
+        assert_eq!(page0_annotation_count(doc), 1);
+    }
+
+    #[test]
+    fn mixed_wired_and_unwired_occurrences() {
+        // Two occurrences: one wired (span_ptr in set), one not.
+        // Only the wired one should contribute an annot_id entry.
+        let mut doc = krilla::Document::new();
+        let annot_ids = {
+            let mut page = doc.start_page_with(page_settings());
+            let registry = DestinationRegistry::new();
+            let mut occ_wired =
+                ext_occ("https://w1.example", vec![make_quad(0.0, 0.0, 80.0, 12.0)]);
+            occ_wired.span_ptr = 10;
+            let mut occ_unwired =
+                ext_occ("https://w2.example", vec![make_quad(0.0, 20.0, 80.0, 12.0)]);
+            occ_unwired.span_ptr = 20;
+            let wired: std::collections::BTreeSet<usize> = [10_usize].into();
+            emit_link_annotations(
+                &mut page,
+                &[occ_wired, occ_unwired],
+                &registry,
+                Some(&wired),
+            )
+        };
+        assert_eq!(
+            annot_ids.len(),
+            1,
+            "only the wired occurrence produces an annot_id"
+        );
+        assert_eq!(annot_ids[0].0, 10);
+        // Both occurrences still produce annotations on the page.
+        assert_eq!(page0_annotation_count(doc), 2);
+    }
 }
