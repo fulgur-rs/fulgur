@@ -226,6 +226,9 @@ jobs:
     if: github.event.pull_request.stack == null || github.event.pull_request.stack.base.ref == github.event.pull_request.base.ref || github.event.pull_request.stack.position == github.event.pull_request.stack.size
     name: Visual Regression Tests
     runs-on: ubuntu-latest
+    # A normal run takes a few minutes; without a limit a stalled step holds
+    # the runner until the 6-hour job ceiling.
+    timeout-minutes: 45
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -239,6 +242,7 @@ jobs:
           swap-storage: false
       - uses: actions/checkout@v7
       - name: Install poppler-utils
+        timeout-minutes: 10
         run: sudo apt-get update && sudo apt-get install -y poppler-utils mold
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
