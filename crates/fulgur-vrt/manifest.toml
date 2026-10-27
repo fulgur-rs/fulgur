@@ -195,24 +195,36 @@ margin_pt = 0.0
 
 [[fixture]]
 path = "gcpm/running-element.html"
+# Chromium does not implement running(), element().
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/counter-page-numbers.html"
 
 [[fixture]]
 path = "gcpm/string-set.html"
+# Chromium does not implement string-set.
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/element-policy-first.html"
+# Chromium does not implement running(), element().
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/element-policy-last.html"
+# Chromium does not implement running(), element().
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/element-policy-start.html"
+# Chromium does not implement running(), element().
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/element-policy-first-except.html"
+# Chromium does not implement running(), element().
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/bookmark-outline.html"
@@ -220,6 +232,8 @@ bookmarks = true
 
 [[fixture]]
 path = "gcpm/bookmark-label-counter.html"
+# Chromium does not implement bookmark-*.
+chrome_reference = false
 bookmarks = true
 
 [[fixture]]
@@ -233,17 +247,25 @@ path = "gcpm/page-selector.html"
 
 [[fixture]]
 path = "gcpm/leader-toc.html"
+# Chromium does not implement string-set, leader().
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/toc-target-counter.html"
+# Chromium does not implement leader(), target-counter().
+chrome_reference = false
 
 [[fixture]]
 path = "gcpm/toc-target-counter-literal.html"
+# Chromium does not implement target-counter().
+chrome_reference = false
 
 # fulgur-qgy7: implicit-href plumbing for `target-*(attr(href), ...)`
 # inside `@page` margin boxes.
 [[fixture]]
 path = "gcpm/margin-box-implicit-href.html"
+# Chromium does not implement target-text().
+chrome_reference = false
 
 # fulgur-uebl: CSS Page 3 named-page implicit forced breaks.
 # Three siblings with `page: a`, `page: b`, and an unnamed (auto)

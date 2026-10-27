@@ -42,8 +42,10 @@ FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
 FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
     FULGUR_VRT_UPDATE=failing cargo test -p fulgur-vrt
 
-# Regenerate Chromium goldens (heavy, manual)
-cargo test -p fulgur-vrt --features chrome-golden -- --ignored
+# Regenerate Chromium goldens (needs the pinned Chrome build; see below)
+FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
+    FULGUR_VRT_CHROME=/path/to/chrome-155.0.8059.84 \
+    cargo test -p fulgur-vrt --features chrome-golden --test chrome_golden -- --ignored
 ```
 
 `FONTCONFIG_FILE` pins the bundled Noto Sans set so font selection is
@@ -58,7 +60,9 @@ compares it, page by page, against the committed Blitz goldens. The
 goldens stand in for Blitz output, since the byte-exact run above keeps
 them equal to it. Both PDFs are rasterized with `pdftocairo` at the
 fixture's DPI, every page included, and compared with the fixture's
-`tolerance_chrome` as a provisional threshold.
+`tolerance_chrome` as a provisional threshold. Where a Chromium golden
+exists, both the Blitz golden and the Raikiri render are also compared
+against it, so the report shows the three engines side by side.
 
 ```bash
 FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
@@ -67,7 +71,7 @@ FONTCONFIG_FILE="$PWD/examples/.fontconfig/fonts.conf" \
 
 This is a measurement, not a gate: the test passes whatever the
 differences are, and writes `target/vrt-report/raikiri/report.json`,
-`summary.md` and `diff/<path>.p<N>.diff.png` for pages beyond the
+`summary.md` and `diff/<pair>/<path>.p<N>.diff.png` for pages beyond the
 tolerance. The numbers hold only on a host where the byte-exact run
 passes; elsewhere Blitz itself differs from its goldens. The nightly
 `vrt` job in `.github/workflows/raikiri.yml` runs it and appends the
@@ -89,17 +93,18 @@ summary to the job page.
 ```text
 fixtures/          HTML inputs grouped by category
 goldens/fulgur/    fulgur PDF references (committed, byte-wise compared)
-goldens/chrome/    Chromium screenshot references (manual, follow-up work)
+goldens/chrome/    Chromium print-to-PDF references plus VERSION (manual)
 manifest.toml      fixture list plus chrome tolerance defaults
 src/
   manifest.rs      TOML parser
   diff.rs          PDF byte equality plus failure-path PNG diff writer
   pdf_render.rs    fulgur PDF generation plus pdftocairo rasterizer (failure-only)
-  chrome.rs        chromiumoxide adapter (feature "chrome-golden")
+  chrome.rs        Chromium golden generator (feature "chrome-golden")
   runner.rs        manifest → byte compare → update orchestration
-  engine_compare.rs  another backend vs the Blitz goldens, page by page
+  engine_compare.rs  another backend vs the Blitz and Chromium goldens
 tests/vrt_test.rs  single entrypoint run by `cargo test`
 tests/raikiri_compare.rs  Raikiri comparison (feature "raikiri")
+tests/chrome_golden.rs    Chromium golden generator (ignored, feature "chrome-golden")
 ```
 
 ## Cross-environment determinism
@@ -119,17 +124,35 @@ Two caveats apply when authoring fixtures:
   follow-up work; until that is resolved, italic in fixtures will
   break cross-environment determinism.
 
-## Chrome tolerance (optional, future work)
+## Chromium goldens
 
-The Chromium-comparison path under the `chrome-golden` feature still
-uses pixel tolerance because Chromium and fulgur are different
-renderers. The defaults live in `manifest.toml`:
+`goldens/chrome/<path>.pdf` is each fixture printed to PDF by Chrome for
+Testing at the version pinned in `src/chrome.rs` (`CHROME_VERSION`), and
+`goldens/chrome/VERSION` records the browser that printed them. They are
+PDFs, not screenshots, so paginated fixtures keep their pages and every
+engine goes through the same `pdftocairo` rasterizer; comparing needs no
+browser.
+
+The printer applies the fixture's page size, and its `margin_pt` when
+set, with `!important` `@page` rules as well as the `printToPDF` paper
+and margins, because the VRT renders override the fixture's own `@page`
+size and margin the same way. Backgrounds are printed.
+
+Fixtures built on GCPM constructs Chromium does not implement (running
+elements, `string-set`, `leader()`, `target-counter()`, `target-text()`,
+bookmarks) set `chrome_reference = false` in `manifest.toml` and have no
+Chromium golden.
+
+To regenerate, run the `VRT Chrome Golden Update` workflow
+(`.github/workflows/vrt-chrome-update.yml`), download its `chrome-goldens`
+artifact over `goldens/chrome/`, and commit it. The generator refuses a
+browser other than `CHROME_VERSION`, so bump the constant in the same
+change when moving to a new Chrome.
+
+Chromium and fulgur are different renderers, so comparisons against these
+goldens use pixel tolerance. The defaults live in `manifest.toml`:
 
 ```toml
 [defaults]
 tolerance_chrome = { max_channel_diff = 16, max_diff_pixels_ratio = 0.02 }
 ```
-
-The chromiumoxide integration itself is not wired up end-to-end yet —
-the feature exists so the workflow and `goldens/chrome/` directory have
-a fixed home before the real implementation lands.
