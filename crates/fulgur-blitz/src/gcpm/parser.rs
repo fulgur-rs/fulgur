@@ -4439,4 +4439,107 @@ mod tests {
             "bookmark-level: 0 must not produce a bookmark mapping"
         );
     }
+
+    // ── ImportHrefScanner: unexpected token type (line 1463 catch-all) ──────────
+
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_with_number_token() {
+        // `@import 123;` — cssparser tokenises `123` as Token::Number, which
+        // hits the `_ => return Err(...)` catch-all at line 1463.
+        // The scanner must silently skip this rule and return an empty list.
+        let css = "@import 123;";
+        assert!(
+            extract_top_level_import_hrefs(css).is_empty(),
+            "@import followed by a number token must be ignored"
+        );
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_with_non_url_function() {
+        // `@import notaurl(arg);` — Token::Function("notaurl") doesn't match
+        // the `url` branch, so it falls through to `_ => return Err(...)`.
+        // No href should be produced.
+        let css = r#"@import notaurl(arg);"#;
+        assert!(
+            extract_top_level_import_hrefs(css).is_empty(),
+            "@import with a non-url function token must be ignored"
+        );
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_unquoted_url_empty_is_returned() {
+        // `@import url();` — cssparser tokenises `url()` as
+        // `Token::UnquotedUrl("")`, which matches arm 1 and returns `""` as
+        // the href. The scanner faithfully relays whatever the CSS says.
+        let css = "@import url();";
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["".to_string()],
+            "@import url() must return an empty-string href (UnquotedUrl path)"
+        );
+    }
+
+    // ── TopLevelParser::parse_prelude: leading whitespace in selector (line 134-135) ─
+
+    #[test]
+    fn id_selector_registers_running_element() {
+        // `#id { position: running(name); }` exercises ParsedSelector::Id (line 145)
+        // in the TopLevelParser qualified-rule prelude path.
+        // The running_mappings must record the running element under the given name.
+        let css = "#page-header { position: running(pageHeader); }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "pageHeader"),
+            "ID selector must register a running element"
+        );
+    }
+
+    #[test]
+    fn id_selector_with_string_set_property() {
+        // `#my-title { string-set: chaptertitle content(text); }` via ID selector.
+        // Exercises ParsedSelector::Id for the string-set path.
+        let css = "#my-title { string-set: chaptertitle content(text); }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.string_set_mappings
+                .iter()
+                .any(|m| m.name == "chaptertitle"),
+            "ID selector with string-set must register a string-set mapping"
+        );
+    }
+
+    // ── parse_string_set_value error drain (line 691) ───────────────────────────
+
+    #[test]
+    fn string_set_invalid_content_function_drained() {
+        // `string-set: mytitle bogus(arg);` — cssparser will tokenise `bogus`
+        // as a Function token, which parse_string_set_value doesn't handle,
+        // causing an Err and triggering the drain at line 691.
+        // No string-set mapping should be produced.
+        let css = "h1 { string-set: mytitle bogus(arg); }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            ctx.string_set_mappings.is_empty(),
+            "string-set with unrecognised function must be drained"
+        );
+    }
+
+    // ── Compound / group selectors return None (line 174: _ => return Ok(None)) ─
+
+    #[test]
+    fn compound_selector_is_skipped() {
+        // `h1.title { position: running(name); }` has a compound selector
+        // (tag + class). The extra `.title` token causes line 174 `_ => return Ok(None)`,
+        // so no running mapping should be produced.
+        let css = "h1.title { position: running(compoundRun); }";
+        let ctx = parse_gcpm(css);
+        assert!(
+            !ctx.running_mappings
+                .iter()
+                .any(|m| m.running_name == "compoundRun"),
+            "compound selector must be skipped by the parser"
+        );
+    }
 }
