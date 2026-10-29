@@ -760,8 +760,10 @@ mod tests {
         let rules = vec![PageSettingsRule {
             page_selector: None,
             // CSS declares portrait (is_landscape = false); the config
-            // override must flip this to landscape.
-            size: Some(PageSizeDecl::KeywordWithOrientation("A4".into(), false)),
+            // override must flip this to landscape. Use "letter" so the sheet
+            // geometry is distinct from config.page_size (A4 default),
+            // ensuring the assertion distinguishes CSS keyword from fallback.
+            size: Some(PageSizeDecl::KeywordWithOrientation("letter".into(), false)),
             margin: PartialMargin::default(),
         }];
         let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
@@ -771,7 +773,7 @@ mod tests {
         );
         // The keyword still governs the sheet geometry.
         assert!(
-            (size.width - PageSize::A4.width).abs() < 0.01,
+            (size.width - PageSize::LETTER.width).abs() < 0.01,
             "sheet width must still come from the CSS keyword"
         );
     }
@@ -781,11 +783,15 @@ mod tests {
     /// keyword through the keyword table.
     #[test]
     fn keyword_with_orientation_auto_name_uses_config_page_size() {
-        // Default config (A4, no overrides). "auto" must resolve to
-        // config.page_size (A4) without touching the keyword table; the
-        // orientation comes from CSS (is_landscape=true) because
-        // config.overrides.landscape is false.
-        let config = Config::default();
+        // Config with A3 but no overrides. "auto" must resolve to
+        // config.page_size (A3) without touching the keyword table, proving it
+        // actually uses config.page_size and not a hardcoded default.
+        // Note: Config::builder().page_size(A3) would set overrides.page_size=true
+        // and bypass CSS processing entirely, so we use struct init instead.
+        let config = Config {
+            page_size: PageSize::A3,
+            ..Config::default()
+        };
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::KeywordWithOrientation("auto".into(), true)),
@@ -793,13 +799,13 @@ mod tests {
         }];
         let (size, _, landscape) = resolve_page_settings(&rules, 1, 10, &config, false);
         assert!(
-            (size.width - PageSize::A4.width).abs() < 0.01,
-            "\"auto\" keyword must resolve to config.page_size (A4 width), got {}",
+            (size.width - PageSize::A3.width).abs() < 0.01,
+            "\"auto\" keyword must resolve to config.page_size (A3 width), got {}",
             size.width
         );
         assert!(
-            (size.height - PageSize::A4.height).abs() < 0.01,
-            "\"auto\" keyword must resolve to config.page_size (A4 height), got {}",
+            (size.height - PageSize::A3.height).abs() < 0.01,
+            "\"auto\" keyword must resolve to config.page_size (A3 height), got {}",
             size.height
         );
         // CSS orientation is used because config.overrides.landscape is false.
