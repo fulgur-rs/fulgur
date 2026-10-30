@@ -767,8 +767,11 @@ mod tests {
     #[test]
     fn keyword_with_orientation_auto_name_uses_config_page_size() {
         // Use A3 so the assertion is distinct from the A4 default keyword fallback.
-        let mut config = Config::default(); // overrides all false
-        config.page_size = PageSize::A3;
+        // overrides all false; only page_size differs from default.
+        let config = Config {
+            page_size: PageSize::A3,
+            ..Config::default()
+        };
         let rules = vec![PageSettingsRule {
             page_selector: None,
             size: Some(PageSizeDecl::KeywordWithOrientation("auto".into(), true)),
