@@ -281,7 +281,11 @@ fn with_resources<T>(
 /// the page context and its margin boxes, which inherit from the root
 /// element (CSS Paged Media 3 §6). Every author declaration beats it, and
 /// user-agent rules on descendants such as `pre` still apply to them.
-const DEFAULT_FONT_STYLESHEET: &str = "html { font-family: sans-serif }";
+///
+/// Bundled stylesheets share the user origin, so the rule sits in the first
+/// anonymous layer with zero specificity: any bundled rule for the root,
+/// unlayered or in a later layer, still wins (CSS Cascade 5 §6.4).
+const DEFAULT_FONT_STYLESHEET: &str = "@layer { :where(html) { font-family: sans-serif } }";
 
 /// The configured page size as the page box Raikiri uses wherever CSS leaves
 /// the size to the user agent.

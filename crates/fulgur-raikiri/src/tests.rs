@@ -1927,3 +1927,35 @@ fn author_font_family_beats_the_default() {
     assert_eq!(families(&page, "inherited"), ["serif"]);
     assert_eq!(families(&page, "own"), ["Custom", "monospace"]);
 }
+
+#[test]
+fn bundled_css_beats_the_default_in_a_layer_or_at_zero_specificity() {
+    for css in [
+        "@layer theme { html { font-family: serif } }",
+        ":where(html) { font-family: serif }",
+        "html { font-family: serif }",
+    ] {
+        let (_dir, path) = input("<p id=plain>plain</p>");
+        let mut bundle = fulgur_core::AssetBundle::new();
+        bundle.add_css(css);
+        let options = RenderOptions {
+            assets: Some(&bundle),
+            system_fonts: true,
+            ..Default::default()
+        };
+        let names = with_layout(
+            Source::File(&path),
+            &Config::default(),
+            &options,
+            LayoutConfig::default(),
+            |status, _, _, _| {
+                let LayoutStatus::Completed(result) = status else {
+                    panic!("expected a completed layout");
+                };
+                Ok(families(&result.page(0).unwrap(), "plain"))
+            },
+        )
+        .unwrap();
+        assert_eq!(names, ["serif"], "{css}");
+    }
+}
