@@ -1942,3 +1942,27 @@ fn repeated_gradient_tiles_are_at_least_one_pixel() {
     assert_close(&coords.unwrap(), &[0.0, 5.0, 1.0, 5.0]);
     assert_eq!(tiling_steps(&pdf), [(1.0, 10.0)]);
 }
+
+#[test]
+fn gradient_tile_sizes_resolve_against_the_positioning_area() {
+    // Percentages and `calc()` refer to the 260 x 30 positioning area.
+    for (size, want, step) in [
+        ("25% 50%", [0.0, 7.5, 65.0, 7.5], (65.0, 15.0)),
+        ("calc(10% + 4px) 10px", [0.0, 5.0, 30.0, 5.0], (30.0, 10.0)),
+    ] {
+        let (pdf, _, coords) = gradient_box(&format!(
+            "background-image: linear-gradient(to right, red, blue); background-size: {size}"
+        ));
+        assert_close(&coords.unwrap(), &want);
+        assert_eq!(tiling_steps(&pdf), [step], "{size}");
+    }
+    // A gradient has no ratio to keep, so `contain` and `cover` fill the
+    // area like `auto`.
+    for size in ["contain", "cover"] {
+        let (pdf, _, coords) = gradient_box(&format!(
+            "background-image: linear-gradient(to right, red, blue); background-size: {size}"
+        ));
+        assert_close(&coords.unwrap(), &[20.0, 35.0, 280.0, 35.0]);
+        assert!(tiling_steps(&pdf).is_empty(), "{size}");
+    }
+}
