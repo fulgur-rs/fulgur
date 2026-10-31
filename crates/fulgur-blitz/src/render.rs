@@ -30,7 +30,6 @@ pub fn render_v2(
     font_data: &[Arc<Vec<u8>>],
     system_fonts: bool,
     string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
-    counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
     html_title: Option<String>,
     serialize_settings: SerializeSettings,
     anchor_map: Option<&AnchorMap>,
@@ -131,8 +130,8 @@ pub fn render_v2(
 
     // Build the GCPM margin-box renderer once. Reused across pages so
     // measure / layout / render caches survive between pages and the
-    // pre-computed `string_set_states` / `counter_states` /
-    // `running_states` are paid for once.
+    // pre-computed `string_set_states` / `running_states` are paid for
+    // once.
     let mut margin_box_renderer = MarginBoxRenderer::new(
         gcpm,
         running_store,
@@ -140,7 +139,6 @@ pub fn render_v2(
         system_fonts,
         geometry,
         string_set_by_node,
-        counter_ops_by_node,
         page_count,
         implicit_href_by_page,
     );
@@ -3623,7 +3621,6 @@ pub(crate) struct MarginBoxRenderer<'a> {
     pub margin_css: String,
     pub string_set_states: Vec<BTreeMap<String, crate::pagination_layout::StringSetPageState>>,
     pub running_states: Vec<BTreeMap<String, crate::pagination_layout::PageRunningState>>,
-    pub counter_states: Vec<BTreeMap<String, i32>>,
     pub measure_cache: MeasureCache,
     pub height_cache: HashMap<(String, u32, u32), crate::units::Pt>,
     pub render_cache: RenderCache,
@@ -3634,9 +3631,14 @@ pub(crate) struct MarginBoxRenderer<'a> {
 }
 
 impl<'a> MarginBoxRenderer<'a> {
-    /// Build a renderer from raw inputs. `string_set_by_node` /
-    /// `counter_ops_by_node` are the per-node maps drained out of
-    /// `ConvertContext` before `dom_to_drawables` consumed them.
+    /// Build a renderer from raw inputs. `string_set_by_node` is the
+    /// per-node map drained out of `ConvertContext` before
+    /// `dom_to_drawables` consumed it.
+    ///
+    /// Document counters are deliberately not an input: margin boxes
+    /// resolve `counter()` / `counters()` in the page context, where
+    /// only `page` / `pages` exist (see
+    /// `gcpm::counter::resolve_content_to_html_with_anchor`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         gcpm: &'a GcpmContext,
@@ -3645,7 +3647,6 @@ impl<'a> MarginBoxRenderer<'a> {
         system_fonts: bool,
         pagination_geometry: &crate::pagination_layout::PaginationGeometryTable,
         string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
-        counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
         total_pages: usize,
         implicit_href_by_page: &'a BTreeMap<usize, String>,
     ) -> Self {
@@ -3666,15 +3667,6 @@ impl<'a> MarginBoxRenderer<'a> {
                 running_store,
             )
         };
-        let counter_states =
-            if gcpm.counter_mappings.is_empty() && gcpm.content_counter_mappings.is_empty() {
-                vec![BTreeMap::new(); total_pages]
-            } else {
-                crate::pagination_layout::collect_counter_states(
-                    pagination_geometry,
-                    counter_ops_by_node,
-                )
-            };
         Self {
             gcpm,
             running_store,
@@ -3683,7 +3675,6 @@ impl<'a> MarginBoxRenderer<'a> {
             margin_css: strip_display_none(&gcpm.cleaned_css),
             string_set_states,
             running_states,
-            counter_states,
             measure_cache: HashMap::new(),
             height_cache: HashMap::new(),
             render_cache: HashMap::new(),
@@ -3787,7 +3778,6 @@ impl<'a> MarginBoxRenderer<'a> {
                 page_num,
                 total_pages,
                 page_idx,
-                &self.counter_states[page_idx],
                 anchor_map,
                 implicit_href,
             );
@@ -5939,7 +5929,6 @@ mod tests {
             false,
             &geom,
             &HashMap::new(),
-            &BTreeMap::new(),
             1,
             &implicit,
         );
@@ -5966,37 +5955,6 @@ mod tests {
             false,
             &geom,
             &HashMap::new(),
-            &BTreeMap::new(),
-            1,
-            &implicit,
-        );
-    }
-
-    #[test]
-    fn margin_box_renderer_new_with_counter_mappings_takes_else_branch() {
-        // Non-empty counter_mappings forces the else branch at
-        // `collect_counter_states(pagination_geometry, counter_ops_by_node)`.
-        let gcpm = crate::gcpm::GcpmContext {
-            counter_mappings: vec![crate::gcpm::CounterMapping {
-                parsed: crate::gcpm::ParsedSelector::Tag("h1".to_string()),
-                ops: vec![crate::gcpm::CounterOp::Reset {
-                    name: "chapter".to_string(),
-                    value: 0,
-                }],
-            }],
-            ..Default::default()
-        };
-        let store = RunningElementStore::default();
-        let geom = empty_geometry();
-        let implicit: BTreeMap<usize, String> = BTreeMap::new();
-        let _mbr = MarginBoxRenderer::new(
-            &gcpm,
-            &store,
-            &[],
-            false,
-            &geom,
-            &HashMap::new(),
-            &BTreeMap::new(),
             1,
             &implicit,
         );

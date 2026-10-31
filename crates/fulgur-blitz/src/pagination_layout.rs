@@ -3692,6 +3692,10 @@ pub fn collect_running_element_states(
 /// declarations on descendants of body's direct children are not in
 /// the fragmenter's geometry today and are silently dropped — same
 /// scope limitation as `fragment_pagination_root` itself.
+///
+/// These are document counter values, so `@page` margin boxes do not
+/// read them: margin boxes resolve counters in the page context, which
+/// only has `page` / `pages` (CSS Paged Media 3).
 pub fn collect_counter_states(
     geometry: &PaginationGeometryTable,
     counter_ops_by_node: &BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,

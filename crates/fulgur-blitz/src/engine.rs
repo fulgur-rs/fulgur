@@ -65,7 +65,6 @@ struct LayoutArtifacts {
     gcpm: crate::gcpm::GcpmContext,
     running_store: crate::gcpm::running::RunningElementStore,
     string_set_for_render: HashMap<usize, Vec<(String, String)>>,
-    counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>>,
     html_title: Option<String>,
     html_lang: Option<String>,
     implicit_href_map: BTreeMap<usize, String>,
@@ -707,17 +706,14 @@ impl Engine {
             map
         };
 
-        // PR 8i: `convert::dom_to_drawables` no longer drains
-        // `string_set_by_node` / `counter_ops_by_node`, but we keep the
-        // pre-convert clones for the fragmenter-driven `collect_*_states`
-        // calls in `render_v2` so those side-channel maps remain
-        // explicitly readable after convert returns. Each clone is small
-        // (one `Vec` per node that declares the property).
+        // `convert::dom_to_drawables` no longer drains `string_set_by_node`,
+        // but we keep a pre-convert clone for the fragmenter-driven
+        // `collect_string_set_states` call in `render_v2` so the map remains
+        // explicitly readable after convert returns. The clone is small
+        // (one `Vec` per node that declares the property). Counter ops are
+        // not forwarded: margin boxes resolve counters in the page context,
+        // which does not see document counters.
         let string_set_for_render = string_set_by_node.clone();
-        let counter_ops_for_render: BTreeMap<usize, Vec<crate::gcpm::CounterOp>> = counter_ops_map
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect();
 
         let mut convert_ctx = ConvertContext {
             running_store: &running_store,
@@ -750,7 +746,6 @@ impl Engine {
             gcpm,
             running_store,
             string_set_for_render,
-            counter_ops_for_render,
             html_title,
             html_lang,
             implicit_href_map,
@@ -774,7 +769,6 @@ impl Engine {
             gcpm,
             running_store,
             string_set_for_render,
-            counter_ops_for_render,
             html_title,
             html_lang,
             implicit_href_map,
@@ -818,7 +812,6 @@ impl Engine {
             fonts,
             self.system_fonts,
             &string_set_for_render,
-            &counter_ops_for_render,
             html_title,
             self.serialize_settings.clone(),
             anchor_map,

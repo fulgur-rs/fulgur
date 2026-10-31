@@ -192,3 +192,44 @@ silent, so `size: A5` produced A4 output with no diagnostic anywhere.
 The same table backs the CLI's `--size`, via `PageSize::from_css_keyword`,
 so the two cannot drift apart again. `--size` still takes priority over
 `@page { size }` when both are present.
+
+### Counters in `@page` margin boxes
+
+Margin boxes (`@top-right`, `@bottom-center`, ...) belong to the page
+context, not to the document. CSS Paged Media 3 gives the page context its
+own counters, `page` and `pages`, and document counters are not visible
+there. In margin-box `content`:
+
+- `counter(page)` / `counter(pages)` (and the `counters()` forms) resolve to
+  the current page number and the total page count.
+- Any other name, including a counter the document resets or increments
+  (for example one incremented by every `h2`), resolves to `0`, the same as a
+  counter that does not exist. Chromium renders these the same way.
+- `counter-reset` / `counter-increment` declared on the `@page` rule itself
+  are not supported, so they do not define page-context counters either.
+
+Before this was aligned with the specification, the Blitz backend leaked
+document counter values into margin boxes, so `content: "Ch. "
+counter(chapter)` printed the current chapter number. It now prints
+`Ch. 0`.
+
+To show a chapter number in a page header, carry it into a named string
+with `string-set` and reference it with `string()`:
+
+```css
+h2 { string-set: chapter attr(data-chapter); }
+@page { @top-right { content: "Ch. " string(chapter); } }
+```
+
+```html
+<h2 data-chapter="2">Chapter Beta</h2>
+```
+
+`string-set` also accepts `content()` (the element's text) and quoted
+strings. CSS GCPM 3 additionally allows `counter()` in `string-set`
+(`h2 { string-set: chapter counter(chapter) }`), but the Blitz backend
+does not support that value yet, and `content(before)` does not capture
+generated `::before` text either, so the number has to come from the
+element's text or an attribute for now.
+
+The regression fixture is `crates/fulgur-vrt/fixtures/gcpm/counter-page-numbers.html`.

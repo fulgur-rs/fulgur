@@ -24,18 +24,18 @@ p { margin: 8pt 0; }
 </head>
 <body>
 <h2>Chapter Alpha</h2>
-<p>This fixture exercises <code>counter(page)</code> / <code>counter(pages)</code> in <code>@bottom-center</code> and <code>counter(chapter)</code> in <code>@top-right</code>. The chapter counter increments per <code>h2</code>.</p>
-<div class="box"><p>Page 1 should read "Ch. 1" in the top-right and "Page 1 of N" in the bottom.</p></div>
+<p>This fixture exercises <code>counter(page)</code> / <code>counter(pages)</code> in <code>@bottom-center</code> and <code>counter(chapter)</code> in <code>@top-right</code>. The chapter counter increments per <code>h2</code>, but margin boxes live in the page context, which does not see document counters.</p>
+<div class="box"><p>Page 1 should read "Ch. 0" in the top-right and "Page 1 of N" in the bottom.</p></div>
 <div class="box"><p>Filler 1 to push content past page 1.</p></div>
 <div class="box"><p>Filler 2 — multi-line content<br>extends the height further<br>across more lines<br>so the page boundary lands<br>well inside the body content.</p></div>
-<div class="box"><p>Filler 3 — additional text to make sure Chapter Alpha overflows page 1 and the counter values for page 2 are exercised under "Ch. 1" since the next h2 has not appeared yet.</p></div>
-<div class="box"><p>Filler 4 — even more content. The chapter counter should still be 1 on page 2 because <code>counter-increment</code> only fires when a new <code>h2</code> is encountered.</p></div>
+<div class="box"><p>Filler 3 — additional text to make sure Chapter Alpha overflows page 1 and the counter values for page 2 are exercised under "Ch. 0" too.</p></div>
+<div class="box"><p>Filler 4 — even more content. The top-right should still read 0 on page 2 because the page context only has <code>page</code> and <code>pages</code>.</p></div>
 <div class="box"><p>Filler 5.</p></div>
 <div class="box"><p>Filler 6.</p></div>
 <div class="box"><p>Filler 7.</p></div>
 <h2 style="page-break-before: always">Chapter Beta</h2>
-<p>Chapter Beta starts on a new page. <code>counter(chapter)</code> must read "2" here.</p>
-<div class="box"><p>Top-right should read "Ch. 2" on this page.</p></div>
+<p>Chapter Beta starts on a new page. <code>counter(chapter)</code> in the margin box still reads "0" here.</p>
+<div class="box"><p>Top-right should read "Ch. 0" on this page.</p></div>
 <div class="box"><p>Bottom-center should read "Page N of N".</p></div>
 </body>
 </html>
