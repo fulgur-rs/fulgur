@@ -251,6 +251,25 @@ mod tests {
         assert_eq!(section.children[1].label, "Sub B");
     }
 
+    // Exercises walk_mut with non-zero indices at both levels (path [1, 1]).
+    // A bug that always returned roots[0].children[0] would fail this test.
+    #[test]
+    fn deep_path_uses_nonzero_parent_indexes() {
+        let entries = vec![
+            entry(0, 10.0.as_pt(), 1, "Chapter 1"),
+            entry(0, 20.0.as_pt(), 1, "Chapter 2"),
+            entry(0, 30.0.as_pt(), 2, "Section 2.1"),
+            entry(0, 40.0.as_pt(), 2, "Section 2.2"),
+            entry(0, 50.0.as_pt(), 3, "Subsection 2.2.1"),
+        ];
+        let tree = build_tree(&entries);
+        assert_eq!(tree.len(), 2);
+        assert!(tree[0].children.is_empty());
+        assert_eq!(tree[1].children.len(), 2);
+        assert!(tree[1].children[0].children.is_empty());
+        assert_eq!(tree[1].children[1].children[0].label, "Subsection 2.2.1");
+    }
+
     // `build_outline` (not just `build_tree`) must complete without panicking for
     // a 3-level hierarchy, exercising the recursive `to_krilla_node` conversion.
     #[test]
