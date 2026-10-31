@@ -197,4 +197,88 @@ mod tests {
         let tree = build_tree(&[]);
         assert!(tree.is_empty());
     }
+
+    // Three-level nesting (H1 > H2 > H3): when H3 is added, `walk_mut` is
+    // called with a 2-element path [0, 0], causing its for-loop body to execute.
+    // The existing tests only use 2-level nesting, where `walk_mut` always
+    // receives a 1-element path and the loop body is never entered.
+    #[test]
+    fn three_level_nesting_exercises_walk_mut_deep_path() {
+        let entries = vec![
+            entry(0, 10.0.as_pt(), 1, "Chapter"),
+            entry(0, 50.0.as_pt(), 2, "Section"),
+            entry(0, 90.0.as_pt(), 3, "Subsection"),
+        ];
+        let tree = build_tree(&entries);
+        let debug: Vec<_> = tree.iter().map(to_debug).collect();
+        assert_eq!(
+            debug,
+            vec![DebugNode {
+                label: "Chapter".into(),
+                level: 1,
+                page: 0,
+                children: vec![DebugNode {
+                    label: "Section".into(),
+                    level: 2,
+                    page: 0,
+                    children: vec![DebugNode {
+                        label: "Subsection".into(),
+                        level: 3,
+                        page: 0,
+                        children: vec![],
+                    }],
+                }],
+            }]
+        );
+    }
+
+    // Two H3 siblings under the same H2: verifies the second grandchild also
+    // finds the correct parent via walk_mut after the first grandchild was added.
+    #[test]
+    fn two_siblings_at_depth_three() {
+        let entries = vec![
+            entry(0, 10.0.as_pt(), 1, "Chapter"),
+            entry(0, 50.0.as_pt(), 2, "Section"),
+            entry(0, 90.0.as_pt(), 3, "Sub A"),
+            entry(0, 130.0.as_pt(), 3, "Sub B"),
+        ];
+        let tree = build_tree(&entries);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children.len(), 1);
+        let section = &tree[0].children[0];
+        assert_eq!(section.children.len(), 2);
+        assert_eq!(section.children[0].label, "Sub A");
+        assert_eq!(section.children[1].label, "Sub B");
+    }
+
+    // Exercises walk_mut with non-zero indices at both levels (path [1, 1]).
+    // A bug that always returned roots[0].children[0] would fail this test.
+    #[test]
+    fn deep_path_uses_nonzero_parent_indexes() {
+        let entries = vec![
+            entry(0, 10.0.as_pt(), 1, "Chapter 1"),
+            entry(0, 20.0.as_pt(), 1, "Chapter 2"),
+            entry(0, 30.0.as_pt(), 2, "Section 2.1"),
+            entry(0, 40.0.as_pt(), 2, "Section 2.2"),
+            entry(0, 50.0.as_pt(), 3, "Subsection 2.2.1"),
+        ];
+        let tree = build_tree(&entries);
+        assert_eq!(tree.len(), 2);
+        assert!(tree[0].children.is_empty());
+        assert_eq!(tree[1].children.len(), 2);
+        assert!(tree[1].children[0].children.is_empty());
+        assert_eq!(tree[1].children[1].children[0].label, "Subsection 2.2.1");
+    }
+
+    // `build_outline` (not just `build_tree`) must complete without panicking for
+    // a 3-level hierarchy, exercising the recursive `to_krilla_node` conversion.
+    #[test]
+    fn build_outline_three_levels_does_not_panic() {
+        let entries = vec![
+            entry(0, 10.0.as_pt(), 1, "Chapter"),
+            entry(0, 50.0.as_pt(), 2, "Section"),
+            entry(0, 90.0.as_pt(), 3, "Subsection"),
+        ];
+        let _outline = build_outline(&entries);
+    }
 }
