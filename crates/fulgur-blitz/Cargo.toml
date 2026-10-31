@@ -1,6 +1,6 @@
 [package]
 name = "fulgur-blitz"
-version = "0.40.0"
+version = "0.41.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ categories = ["text-processing"]
 parallel = ["dep:rayon"]
 
 [dependencies]
-fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
+fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
 rayon = { version = "1", optional = true }
 cssparser = "0.37"
 krilla = "0.7.0"
