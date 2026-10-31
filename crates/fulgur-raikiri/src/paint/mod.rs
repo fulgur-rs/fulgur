@@ -22,6 +22,7 @@ mod shape;
 pub(crate) mod surface;
 mod svg;
 mod text_clip;
+mod tiling;
 mod transform;
 
 use crate::orientation::Rotations;
@@ -1258,29 +1259,27 @@ fn paint_background(
     for layer in painted.iter().rev() {
         let positioning_area =
             positioning.map_or_else(|| visual_box(layer.origin), |position| position(layer));
+        // Tiles cover the clip box; `border-area` and `text` clip inside the
+        // border box.
+        let painting = match layer.clip {
+            ComputedVisualBox::BorderArea | ComputedVisualBox::Text => *border_box,
+            visual => visual_box(visual),
+        };
         match &layer.image {
-            // The gradient covers the positioning area and its end colors
-            // extend to the rest of the painting area.
             ComputedBackgroundImage::Gradient(gradient) => {
-                if let Some(paint) = gradient::paint(gradient, &positioning_area, style.color) {
-                    with_area(layer.clip, &mut |area, rule| {
-                        surface.set_fill(Some(Fill {
-                            paint: paint.clone(),
-                            opacity: NormalizedF32::ONE,
-                            rule,
-                        }));
-                        surface.draw_path(area);
-                        Ok(())
-                    })?;
-                }
+                with_area(layer.clip, &mut |area, rule| {
+                    gradient::paint_layer(
+                        surface,
+                        gradient,
+                        layer,
+                        (positioning_area.bounds(), painting.bounds()),
+                        style.color,
+                        (area, rule),
+                    );
+                    Ok(())
+                })?;
             }
             ComputedBackgroundImage::Url(url) => {
-                // Tiles cover the clip box; `border-area` and `text` clip
-                // inside the border box.
-                let painting = match layer.clip {
-                    ComputedVisualBox::BorderArea | ComputedVisualBox::Text => *border_box,
-                    visual => visual_box(visual),
-                };
                 let image = raster::BackgroundLayer {
                     url,
                     size: &layer.size,
