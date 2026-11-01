@@ -6,7 +6,7 @@ version-specific limitations.
 fulgur has two layout engines: **Blitz**, the default engine used by the
 published crates, CLI and bindings, and **Raikiri**, which is under
 development in the unpublished `fulgur-raikiri` crate and can be selected
-with `fulgur-dev --engine raikiri`. The two tables below compare them
+with `fulgur-dev render input.html --engine raikiri -o output.pdf`. The two tables below compare them
 feature by feature. The per-property sections after them describe the Blitz
 engine unless they name an engine.
 
@@ -33,7 +33,7 @@ engine.
 |---|---|---|---|---|
 | GCPM: margin boxes, `counter(page)` / `counter(pages)` | yes | Supported | Partial | Raikiri draws margin-box backgrounds, solid borders and text, but not text decorations inside margin boxes, which Blitz lays out like page content. (Raikiri also does not yet draw vertical-writing text in margin boxes; Blitz has no vertical writing at all.) Counters other than `page` / `pages` resolve to `0` in both engines (see [Counters in `@page` margin boxes](#counters-in-page-margin-boxes)). |
 | GCPM: running elements (`position: running()` / `element()`) | yes | Partial | Supported | Blitz also paints the running element in the page body; Raikiri shows it only in the margin box (see [Intentional differences](#intentional-differences)). |
-| GCPM: named strings (`string-set` / `string()`) | yes | Partial | Partial | Blitz does not accept `counter()` in `string-set`. At the pinned revision Raikiri shows the document's last `string-set` value on every page instead of the value for each page; fixed in Raikiri, pending a pin update. |
+| GCPM: named strings (`string-set` / `string()`) | yes | Partial | Supported | Blitz does not accept `counter()` in `string-set`. Raikiri resolves `string()` to the value for each page. |
 | GCPM: `target-counter()` / `leader()` tables of contents | yes | Supported | Supported | |
 | GCPM: page selectors (`:first`, `:left`, `:right`) and named pages | yes | Partial | Supported | Blitz places `:right` page margin boxes incorrectly (see [Intentional differences](#intentional-differences)). |
 | PDF bookmarks (outline from headings, `bookmark-level` / `bookmark-label`) | yes | Supported | Supported | Raikiri also honours `bookmark-state`; Blitz ignores it (see [Intentional differences](#intentional-differences)). Raikiri does not resolve page counters in bookmark labels. |
@@ -42,15 +42,15 @@ engine.
 | Images (`<img>`, `url()` backgrounds) | yes | Supported | Supported | Blitz: PNG / JPEG / GIF. Raikiri: PNG / JPEG verified; its image resolver also decodes GIF and WebP. |
 | SVG vector rendering (inline SVG) | yes | Supported | Supported | Raikiri draws inline SVG as PDF vector content and falls back to Krilla SVG for masks, patterns and other content outside its scene model. |
 | Fonts (bundled TTF / OTF / TTC / WOFF2, system fallback) | yes | Supported | Supported | Both engines register every face of a TTC / OTC collection. Both start from `sans-serif` when the document sets no `font-family`. |
-| Shadows (`box-shadow`, `text-shadow`) | yes | Partial | Supported | Blitz skips `inset` box shadows, does not paint shadows on generic inline-level boxes, and does not paint `text-shadow` (see [`box-shadow`](#box-shadow-v045)). Neither engine draws shadows in page-margin boxes. |
+| Shadows (`box-shadow`, `text-shadow`) | yes | Partial | Partial | Blitz skips `inset` box shadows, does not paint shadows on generic inline-level boxes, and does not paint `text-shadow` (see [`box-shadow`](#box-shadow-v045)). Neither engine draws shadows in page-margin boxes. |
 | `transform` | yes | Supported | Supported | |
-| Gradients (linear, radial, conic, repeating) | yes | Supported | Partial | Gradient background tiling (`background-size` / `-position` / `-repeat`) matches Blitz. At the pinned revision Raikiri drops a gradient that has a color transition hint; fixed in Raikiri, pending a pin update. |
-| Table header repeat across pages | yes | Supported | Supported | Raikiri also repeats headers over anonymous rows and cells. Repeating `table-footer-group` has landed in Raikiri after the pinned revision. |
+| Gradients (linear, radial, conic, repeating) | yes | Supported | Partial | Gradient background tiling (`background-size` / `-position` / `-repeat`) matches Blitz. Raikiri draws gradients with color transition hints, but their colors still differ from Blitz. |
+| Table header repeat across pages | yes | Supported | Supported | Raikiri also repeats headers over anonymous rows and cells, and repeats `table-footer-group` as well; Blitz repeats headers only. |
 | Multi-column layout (`column-count`, `column-width`, `column-span`, `column-rule`) | yes | Supported | Supported | |
-| Pagination (`break-*`, orphans / widows, `@page` size and margins) | yes | Supported | Supported | |
+| Pagination (`break-*`, orphans / widows, `@page` size and margins) | yes | Supported | Partial | Raikiri can move a padded, bordered box whose last line still fits at the end of a page to the next page, adding a page that Blitz and Chromium do not. |
 | Templates (`render_template`, MiniJinja + JSON) | no | Supported | Unsupported | Not yet wired to the Raikiri engine. |
 | Batch rendering (`render_batch`) and `Engine::layout` | no | Supported | Unsupported | Not yet wired to the Raikiri engine. |
-| Streaming (paint each page while the input is still being read) | no | Unsupported | Supported | Raikiri only (`fulgur_raikiri::render_streaming`, `fulgur-dev --stream`). See the `fulgur-raikiri` README for its limits. |
+| Streaming (paint each page while the input is still being read) | no | Unsupported | Supported | Raikiri only (`fulgur_raikiri::render_streaming`, `fulgur-dev render input.html --engine raikiri --stream -o output.pdf`). See the `fulgur-raikiri` README for its limits. |
 
 ## Intentional differences
 
