@@ -14,7 +14,7 @@ categories = ["text-processing"]
 [dependencies]
 krilla = "0.7.0"
 tiny-skia = "0.12"
-skrifa = "0.47"
+skrifa = "0.48"
 fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
 raikiri-html = "0.0.6"
 raikiri-net = "0.0.6"
