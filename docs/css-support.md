@@ -47,7 +47,7 @@ engine.
 | Gradients (linear, radial, conic, repeating) | yes | Supported | Partial | Gradient background tiling (`background-size` / `-position` / `-repeat`) matches Blitz. Raikiri draws gradients with color transition hints, but their colors still differ from Blitz. |
 | Table header repeat across pages | yes | Supported | Supported | Raikiri also repeats headers over anonymous rows and cells, and repeats `table-footer-group` as well; Blitz repeats headers only. |
 | Multi-column layout (`column-count`, `column-width`, `column-span`, `column-rule`) | yes | Supported | Supported | |
-| Pagination (`break-*`, orphans / widows, `@page` size and margins) | yes | Supported | Partial | Raikiri can move a padded, bordered box whose last line still fits at the end of a page to the next page, adding a page that Blitz and Chromium do not. |
+| Pagination (`break-*`, orphans / widows, `@page` size and margins) | yes | Supported | Supported | Border widths snap to whole CSS pixels as in Chromium's print layout, so boxes take the same height and break at the same place. |
 | Templates (`render_template`, MiniJinja + JSON) | no | Supported | Unsupported | Not yet wired to the Raikiri engine. |
 | Batch rendering (`render_batch`) and `Engine::layout` | no | Supported | Unsupported | Not yet wired to the Raikiri engine. |
 | Streaming (paint each page while the input is still being read) | no | Unsupported | Supported | Raikiri only (`fulgur_raikiri::render_streaming`, `fulgur-dev render input.html --engine raikiri --stream -o output.pdf`). See the `fulgur-raikiri` README for its limits. |
