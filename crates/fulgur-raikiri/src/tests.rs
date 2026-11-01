@@ -1685,10 +1685,11 @@ fn a_corner_with_one_zero_inner_radius_is_square() {
 fn background_clip_text_paints_inside_the_glyphs() {
     let (pdf, text_ops) = operations(&format!(
         "{CSS}<p style=\"background-image: linear-gradient(red, blue); \
-         background-clip: text; color: transparent\">Hi</p>"
+         background-clip: text; color: transparent\">Ho</p>"
     ));
     assert!(has_shading(&pdf, 2));
-    // The gradient fills glyph outlines (curves), not the 260 x 30 box.
+    // The gradient fills glyph outlines (the curves of the `o` in any
+    // typeface), not the 260 x 30 box.
     let fill = text_ops.iter().position(|op| op.operator == "f").unwrap();
     let path = &text_ops[..fill];
     let start = path.iter().position(|op| op.operator == "m").unwrap();
@@ -1876,6 +1877,87 @@ fn rotated_boxes_draw_their_background_and_text_turned() {
     assert!(texts.iter().copied().any(turned), "{texts:?}");
     let text = pdf.extract_text(&[1]).unwrap();
     assert!(text.contains("turned"), "{text}");
+}
+
+/// The `font-family` list of the element with `id`, as written in CSS.
+fn families(page: &raikiri_html::Page<'_>, id: &str) -> Vec<String> {
+    let node = page
+        .fragments()
+        .map(|f| f.node())
+        .find(|&node| page.dom().attr(node, "id") == Some(id))
+        .unwrap_or_else(|| panic!("no fragment for #{id}"));
+    let computed = page.computed(node).expect("computed values");
+    computed.font_family.iter().map(|f| f.to_string()).collect()
+}
+
+#[test]
+fn unstyled_text_and_margin_boxes_default_to_sans_serif() {
+    let (_dir, path) = input(
+        "<style>@page { size: 300px 200px; margin: 40px; @top-center { content: 'Head' } } \
+         body { margin: 0 }</style>\
+         <p id=plain>plain</p><pre id=code>code</pre>",
+    );
+    let result = completed(&path);
+    let page = result.page(0).unwrap();
+    assert_eq!(families(&page, "plain"), ["sans-serif"]);
+    // The user agent's own rules on descendants still apply.
+    assert_eq!(families(&page, "code"), ["monospace"]);
+    // Margin boxes inherit from the page context, which inherits from the
+    // root element.
+    let style = page.page_style();
+    let rule = style.margin_boxes().first().expect("a margin box rule");
+    let margin_box = style.margin_box_style(rule, None);
+    let names: Vec<String> = margin_box
+        .font_family
+        .iter()
+        .map(|f| f.to_string())
+        .collect();
+    assert_eq!(names, ["sans-serif"]);
+}
+
+#[test]
+fn author_font_family_beats_the_default() {
+    let (_dir, path) = input(
+        "<style>html { font-family: serif } body { margin: 0 } \
+         #own { font-family: 'Custom', monospace }</style>\
+         <p id=inherited>a</p><p id=own>b</p>",
+    );
+    let result = completed(&path);
+    let page = result.page(0).unwrap();
+    assert_eq!(families(&page, "inherited"), ["serif"]);
+    assert_eq!(families(&page, "own"), ["Custom", "monospace"]);
+}
+
+#[test]
+fn bundled_css_beats_the_default_in_a_layer_or_at_zero_specificity() {
+    for css in [
+        "@layer theme { html { font-family: serif } }",
+        ":where(html) { font-family: serif }",
+        "html { font-family: serif }",
+    ] {
+        let (_dir, path) = input("<p id=plain>plain</p>");
+        let mut bundle = fulgur_core::AssetBundle::new();
+        bundle.add_css(css);
+        let options = RenderOptions {
+            assets: Some(&bundle),
+            system_fonts: true,
+            ..Default::default()
+        };
+        let names = with_layout(
+            Source::File(&path),
+            &Config::default(),
+            &options,
+            LayoutConfig::default(),
+            |status, _, _, _| {
+                let LayoutStatus::Completed(result) = status else {
+                    panic!("expected a completed layout");
+                };
+                Ok(families(&result.page(0).unwrap(), "plain"))
+            },
+        )
+        .unwrap();
+        assert_eq!(names, ["serif"], "{css}");
+    }
 }
 
 /// The `(XStep, YStep)` of every tiling pattern (`PatternType 1`) in `pdf`.
