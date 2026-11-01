@@ -358,13 +358,26 @@ fn inline_svg_with_stroked_glyphs_off_a_similarity_is_drawn_as_pixels() {
     assert_eq!(image_objects(&pdf), 0);
 }
 
-const FILTERED_SVG: &str = "<svg width='20' height='20'><filter id='f'><feGaussianBlur stdDeviation='1'/></filter>\
-     <rect width='20' height='20' fill='red' filter='url(#f)'/></svg>";
+#[test]
+fn a_filtered_inline_svg_is_drawn_as_pixels() {
+    // Raikiri rasterizes an SVG with a filter, filter included, instead of
+    // rejecting it.
+    let filtered = "<svg width='20' height='20'><filter id='f'><feGaussianBlur stdDeviation='1'/></filter>\
+        <rect width='20' height='20' fill='red' filter='url(#f)'/></svg>";
+    let pdf = render_svg_page(filtered, "");
+    assert!(image_objects(&pdf) >= 1);
+}
+
+/// An SVG root Raikiri rejects: a fixed box placed through `right` and
+/// `bottom`, whose paint placement the fragment projection does not
+/// represent.
+const REJECTED_SVG: &str = "<svg width='20' height='20' style='position:fixed;right:0;bottom:0'>\
+     <rect width='20' height='20' fill='red'/></svg>";
 
 /// Asserts that rendering `html` fails with the error of the SVG that cannot
 /// be drawn, where it used to panic as Krilla dropped a surface with pushes
 /// still open.
-fn assert_rejects_the_filtered_svg(html: &str) {
+fn assert_rejects_the_svg(html: &str) {
     match render_html_with_font(html, |_| {}) {
         Err(fulgur_core::Error::Layout(message)) => {
             assert!(message.starts_with("inline SVG: "), "{message}");
@@ -375,24 +388,24 @@ fn assert_rejects_the_filtered_svg(html: &str) {
 
 #[test]
 fn an_inline_svg_that_cannot_be_drawn_fails_the_render() {
-    assert_rejects_the_filtered_svg(&format!(
-        "<style>@page{{size:200px 100px;margin:0}}</style>{FILTERED_SVG}"
+    assert_rejects_the_svg(&format!(
+        "<style>@page{{size:200px 100px;margin:0}}</style>{REJECTED_SVG}"
     ));
 }
 
 #[test]
 fn the_error_of_an_inline_svg_unwinds_the_clips_groups_and_transforms_around_it() {
-    assert_rejects_the_filtered_svg(&format!(
+    assert_rejects_the_svg(&format!(
         "<style>@page{{size:200px 100px;margin:0}}</style>\
          <div style='overflow:hidden;opacity:.5;transform:translate(5px,5px)'>\
-         <div style='overflow:hidden;opacity:.8'>{FILTERED_SVG}</div></div>"
+         <div style='overflow:hidden;opacity:.8'>{REJECTED_SVG}</div></div>"
     ));
 }
 
 #[test]
 fn the_error_of_an_inline_svg_in_a_running_element_unwinds_its_margin_box() {
-    assert_rejects_the_filtered_svg(&format!(
+    assert_rejects_the_svg(&format!(
         "<style>@page{{size:200px 100px;margin:20px;@top-center{{content:element(head)}}}}\
-         .head{{position:running(head)}}</style><div class=head>{FILTERED_SVG}</div><p>Body</p>"
+         .head{{position:running(head)}}</style><div class=head>{REJECTED_SVG}</div><p>Body</p>"
     ));
 }
