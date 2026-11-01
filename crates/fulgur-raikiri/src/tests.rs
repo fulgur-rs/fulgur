@@ -72,6 +72,85 @@ fn explicit_break_creates_second_page() {
 }
 
 #[test]
+fn border_widths_snap_to_whole_css_pixels() {
+    // Browsers floor a used border width to whole CSS pixels and keep one pixel
+    // for any visible border, so `1pt` (1.333px) is `1px`, `0.5pt` is `1px`,
+    // `1.5pt` (2px) is `2px`, `thin` is `1px` and `2.4px` is `2px`.
+    let cases = [
+        ("a", "border:1pt solid", 12.0),
+        ("b", "border:0.5pt solid", 12.0),
+        ("c", "border:1.5pt solid", 14.0),
+        ("d", "border:thin solid", 12.0),
+        ("e", "border:2.4px solid", 14.0),
+        // A sub-pixel width still shows one pixel, but no border style or a
+        // zero width leaves nothing to snap.
+        ("f", "border:0.1px solid", 12.0),
+        ("g", "border:0 solid", 10.0),
+        ("h", "border:5px none", 10.0),
+    ];
+    let boxes: String = cases
+        .iter()
+        .map(|(id, border, _)| {
+            format!("<div id={id} style='{border}; width:10px; height:10px'></div>")
+        })
+        .collect();
+    let (_dir, path) = input(&format!("{CSS}{boxes}"));
+    let result = completed(&path);
+    let page = result.page(0).unwrap();
+    for (id, border, outer) in cases {
+        let fragment = page
+            .fragments()
+            .find(|f| page.dom().attr(f.node(), "id") == Some(id))
+            .unwrap_or_else(|| panic!("no fragment for #{id}"));
+        let rect = fragment.rect();
+        assert_eq!((rect.width, rect.height), (outer, outer), "{border}");
+    }
+}
+
+/// Three cards of 53px (a 21px line, 15px padding above and below, and `1pt`
+/// borders that snap to 1px) end at 159px of the 160px page content, and a
+/// heading forces a second page. With the fractional 1.333px borders the cards
+/// would be 53.67px high and end at 161px, so the third would not fit and
+/// would move to a second page of its own, leaving the heading on a third.
+fn bordered_cards() -> String {
+    let cards: String = (1..=3)
+        .map(|n| format!("<div class=card><p>Card {n}</p></div>"))
+        .collect();
+    format!(
+        "{CSS}<style>\
+         .card {{ border: 1pt solid; padding: 15px 0 }}\
+         .card p {{ height: auto; line-height: 21px }}\
+         h2 {{ margin: 0; break-before: page }}\
+         </style>{cards}<h2>Next</h2>"
+    )
+}
+
+#[test]
+fn bordered_cards_break_pages_like_a_browser() {
+    let (_dir, path) = input(&bordered_cards());
+    let result = completed(&path);
+    assert_eq!(result.page_count(), 2);
+    let page = result.page(0).unwrap();
+    let cards_on_first_page = page
+        .fragments()
+        .filter(|f| page.dom().attr(f.node(), "class") == Some("card"))
+        .count();
+    assert_eq!(cards_on_first_page, 3);
+}
+
+#[test]
+fn bordered_cards_make_the_same_pdf_pages_when_batched_and_streamed() {
+    let (_dir, path) = input(&bordered_cards());
+    let batch = render(&path, &Config::default()).expect("batch PDF");
+    let streamed = render_streaming(&path, &Config::default(), &RenderOptions::default())
+        .expect("streamed PDF");
+    for pdf in [batch, streamed] {
+        let pdf = lopdf::Document::load_mem(&pdf).expect("a readable PDF");
+        assert_eq!(pdf.get_pages().len(), 2);
+    }
+}
+
+#[test]
 fn hidden_element_has_no_fragment() {
     let (_dir, path) = input("<div id=hidden style='display:none'>Hidden</div><p>Visible</p>");
     let result = completed(&path);
