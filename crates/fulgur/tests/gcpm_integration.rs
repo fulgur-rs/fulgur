@@ -3,8 +3,9 @@ use fulgur::engine::Engine;
 
 #[test]
 fn test_counter_margin_box_values_correct() {
-    // Verify that counter values actually reach margin boxes correctly
-    // by generating a document with counter-increment on visible elements.
+    // A document counter referenced from a margin box must not break the
+    // render. Its value there is 0, like Chromium and the Raikiri backend;
+    // `margin_box_document_counter_resolves_to_zero` pins that.
     let mut assets = AssetBundle::new();
     assets.add_css(
         r#"
@@ -510,4 +511,89 @@ fn running_element_style_child_survives_serialization() {
         with_style, without_style,
         "<style> inside a running element stopped applying — CSS was corrupted by escaping"
     );
+}
+
+/// Render a two-chapter, single-page document whose only variable part is
+/// the `@top-right` margin-box `content` value.
+fn render_with_top_right(content: &str) -> Vec<u8> {
+    let mut assets = AssetBundle::new();
+    assets.add_css(format!(
+        r#"
+        body {{ counter-reset: chapter; }}
+        h2 {{ counter-increment: chapter; }}
+        @page {{ @top-right {{ content: {content}; }} }}
+    "#
+    ));
+    Engine::builder()
+        .assets(assets)
+        .build()
+        .render("<h2>One</h2><p>text</p><h2>Two</h2><p>text</p>")
+        .expect("render must succeed")
+}
+
+/// Margin boxes resolve a document counter to 0 however many `h2`s precede
+/// the page, like Chromium and the Raikiri backend. CSS Paged Media 3 §6.1
+/// would give it the value at the start of the page instead. Text extraction cannot recover margin-box glyphs
+/// (see `running_element_escaped_text_does_not_become_margin_box_markup`),
+/// so the check compares against the same document with the expected text
+/// written as a literal.
+#[test]
+fn margin_box_document_counter_resolves_to_zero() {
+    let via_counter = render_with_top_right(r#""Ch. " counter(chapter)"#);
+    let via_counters = render_with_top_right(r#""Ch. " counters(chapter, ".")"#);
+    let literal_zero = render_with_top_right(r#""Ch. 0""#);
+    let literal_two = render_with_top_right(r#""Ch. 2""#);
+    assert_eq!(
+        via_counter, literal_zero,
+        "margin-box counter(chapter) must render as 0"
+    );
+    assert_eq!(
+        via_counters, literal_zero,
+        "margin-box counters(chapter) must render as 0"
+    );
+    assert_ne!(
+        via_counter, literal_two,
+        "margin-box counter(chapter) must not see the document value"
+    );
+}
+
+/// Margin boxes keep `page` / `pages`, also next to a document counter in
+/// the same content list.
+#[test]
+fn margin_box_page_counters_resolve_next_to_document_counter() {
+    let via_counter = render_with_top_right(
+        r#""Page " counter(page) " of " counter(pages) " Ch. " counter(chapter)"#,
+    );
+    let literal = render_with_top_right(r#""Page 1 of 1 Ch. 0""#);
+    let wrong_page = render_with_top_right(r#""Page 0 of 0 Ch. 0""#);
+    assert_eq!(via_counter, literal, "page / pages must still resolve");
+    assert_ne!(via_counter, wrong_page);
+}
+
+/// The documented way to show a chapter number in a page header: carry the
+/// number into a named string and reference it with `string()`.
+#[test]
+fn margin_box_chapter_number_via_string_set() {
+    let render = |top_right: &str| {
+        let mut assets = AssetBundle::new();
+        assets.add_css(format!(
+            r#"
+            h2 {{ string-set: chapter attr(data-chapter); }}
+            @page {{ @top-right {{ content: {top_right}; }} }}
+        "#
+        ));
+        Engine::builder()
+            .assets(assets)
+            .build()
+            .render(r#"<h2 data-chapter="5">Five</h2><p>text</p>"#)
+            .expect("render must succeed")
+    };
+    let via_string = render(r#""Ch. " string(chapter)"#);
+    let literal = render(r#""Ch. 5""#);
+    let literal_zero = render(r#""Ch. 0""#);
+    assert_eq!(
+        via_string, literal,
+        "string(chapter) must carry the chapter number"
+    );
+    assert_ne!(via_string, literal_zero);
 }

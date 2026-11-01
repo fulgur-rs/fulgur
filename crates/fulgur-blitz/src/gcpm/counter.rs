@@ -26,17 +26,8 @@ pub fn resolve_content_to_string(
     string_set_states: &BTreeMap<String, StringSetPageState>,
     page: usize,
     total_pages: usize,
-    custom_counters: &BTreeMap<String, i32>,
 ) -> String {
-    resolve_content_to_string_with_anchor(
-        items,
-        string_set_states,
-        page,
-        total_pages,
-        custom_counters,
-        None,
-        None,
-    )
+    resolve_content_to_string_with_anchor(items, string_set_states, page, total_pages, None, None)
 }
 
 /// Like [`resolve_content_to_string`], but also resolves
@@ -51,13 +42,11 @@ pub fn resolve_content_to_string(
 /// `::before` / `::after` placeholder injection that *does* affect
 /// pass-1 layout lives at the parser/serializer level (see
 /// `blitz_adapter::CounterPass::resolve_content`).
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_content_to_string_with_anchor(
     items: &[ContentItem],
     string_set_states: &BTreeMap<String, StringSetPageState>,
     page: usize,
     total_pages: usize,
-    custom_counters: &BTreeMap<String, i32>,
     anchor_map: Option<&AnchorMap>,
     implicit_href: Option<&str>,
 ) -> String {
@@ -71,14 +60,9 @@ pub fn resolve_content_to_string_with_anchor(
         }
         match item {
             ContentItem::String(s) => out.push_str(s),
-            ContentItem::Counter { name, style } => match name.as_str() {
-                "page" => out.push_str(&format_counter(page as i32, *style)),
-                "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
-                _ => {
-                    let value = custom_counters.get(name.as_str()).copied().unwrap_or(0);
-                    out.push_str(&format_counter(value, *style));
-                }
-            },
+            ContentItem::Counter { name, style } => {
+                out.push_str(&resolve_margin_box_counter(name, *style, page, total_pages))
+            }
             ContentItem::Element { .. } => {}
             ContentItem::StringRef { name, policy } => {
                 if let Some(state) = string_set_states.get(name) {
@@ -95,13 +79,7 @@ pub fn resolve_content_to_string_with_anchor(
                 name,
                 separator: _,
                 style,
-            } => out.push_str(&resolve_counters_margin_box(
-                name,
-                *style,
-                page,
-                total_pages,
-                custom_counters,
-            )),
+            } => out.push_str(&resolve_margin_box_counter(name, *style, page, total_pages)),
             ContentItem::TargetCounter {
                 url,
                 counter_name,
@@ -172,7 +150,6 @@ pub fn resolve_content_to_string_with_anchor(
 /// flex-container mode: every item is wrapped in a `<span>`, and the leader
 /// becomes a `flex:1; overflow:hidden` span filled with repeated characters
 /// so that it expands to fill the available line width.
-#[allow(clippy::too_many_arguments)]
 pub fn resolve_content_to_html(
     items: &[ContentItem],
     store: &RunningElementStore,
@@ -181,7 +158,6 @@ pub fn resolve_content_to_html(
     page_num: usize,
     total_pages: usize,
     page_idx: usize,
-    custom_counters: &BTreeMap<String, i32>,
 ) -> String {
     resolve_content_to_html_with_anchor(
         items,
@@ -191,7 +167,6 @@ pub fn resolve_content_to_html(
         page_num,
         total_pages,
         page_idx,
-        custom_counters,
         None,
         None,
     )
@@ -212,7 +187,6 @@ pub fn resolve_content_to_html_with_anchor(
     page_num: usize,
     total_pages: usize,
     page_idx: usize,
-    custom_counters: &BTreeMap<String, i32>,
     anchor_map: Option<&AnchorMap>,
     implicit_href: Option<&str>,
 ) -> String {
@@ -230,14 +204,12 @@ pub fn resolve_content_to_html_with_anchor(
             }
             match item {
                 ContentItem::String(s) => push_escaped_html_text(&mut out, s),
-                ContentItem::Counter { name, style } => match name.as_str() {
-                    "page" => out.push_str(&format_counter(page_num as i32, *style)),
-                    "pages" => out.push_str(&format_counter(total_pages as i32, *style)),
-                    _ => {
-                        let value = custom_counters.get(name.as_str()).copied().unwrap_or(0);
-                        out.push_str(&format_counter(value, *style));
-                    }
-                },
+                ContentItem::Counter { name, style } => out.push_str(&resolve_margin_box_counter(
+                    name,
+                    *style,
+                    page_num,
+                    total_pages,
+                )),
                 ContentItem::Element { name, policy } => {
                     if let Some(html) =
                         resolve_element_policy(name, *policy, page_idx, running_states, store)
@@ -254,12 +226,11 @@ pub fn resolve_content_to_html_with_anchor(
                     name,
                     separator: _,
                     style,
-                } => out.push_str(&resolve_counters_margin_box(
+                } => out.push_str(&resolve_margin_box_counter(
                     name,
                     *style,
                     page_num,
                     total_pages,
-                    custom_counters,
                 )),
                 ContentItem::TargetCounter {
                     url,
@@ -356,14 +327,9 @@ pub fn resolve_content_to_html_with_anchor(
                 let mut inner = String::new();
                 match other {
                     ContentItem::String(s) => push_escaped_html_text(&mut inner, s),
-                    ContentItem::Counter { name, style } => match name.as_str() {
-                        "page" => inner.push_str(&format_counter(page_num as i32, *style)),
-                        "pages" => inner.push_str(&format_counter(total_pages as i32, *style)),
-                        _ => {
-                            let value = custom_counters.get(name.as_str()).copied().unwrap_or(0);
-                            inner.push_str(&format_counter(value, *style));
-                        }
-                    },
+                    ContentItem::Counter { name, style } => inner.push_str(
+                        &resolve_margin_box_counter(name, *style, page_num, total_pages),
+                    ),
                     ContentItem::Element { name, policy } => {
                         if let Some(html) =
                             resolve_element_policy(name, *policy, page_idx, running_states, store)
@@ -383,12 +349,11 @@ pub fn resolve_content_to_html_with_anchor(
                         name,
                         separator: _,
                         style,
-                    } => inner.push_str(&resolve_counters_margin_box(
+                    } => inner.push_str(&resolve_margin_box_counter(
                         name,
                         *style,
                         page_num,
                         total_pages,
-                        custom_counters,
                     )),
                     ContentItem::TargetCounter {
                         url,
@@ -592,28 +557,38 @@ pub fn format_counter_chain(values: &[i32], separator: &str, style: CounterStyle
     out
 }
 
-/// Resolve a `counters(name, sep, style)` reference in a margin-box
-/// context where there is no DOM tree and only flat per-page counter
-/// snapshots are available. Built-in `page` / `pages` use the page
-/// scalars; custom names degrade to a single-value chain (equivalent
-/// to `counter()`) because `custom_counters` only holds innermost
-/// values. The separator is unused — single-element chains have
-/// nowhere to insert it.
-fn resolve_counters_margin_box(
+/// Resolve a `counter(name, style)` or `counters(name, sep, style)`
+/// reference in a margin box.
+///
+/// Only `page` / `pages` resolve to real values; every other name
+/// resolves to 0, the value of a counter that does not exist (CSS
+/// Lists 3). Counters set on the `@page` rule itself (`counter-reset` /
+/// `counter-increment`) are not supported, so they also resolve to 0.
+///
+/// This deliberately departs from CSS Paged Media 3 §6.1, under which a
+/// counter the page and margin contexts neither reset nor increment
+/// takes its value as if the margin box were an element at the start of
+/// the page, so a document counter such as one incremented by `h2`
+/// would show its value there. Chromium and the Raikiri backend do not
+/// implement that rule and print 0; this backend matches them so that
+/// switching engines does not change the output.
+///
+/// Each of these counters has a single instance, so `counters()`
+/// formats a one-element chain and its separator is never inserted.
+/// A document value can be carried into a margin box through a named
+/// string instead (`string-set` plus `string()`).
+fn resolve_margin_box_counter(
     name: &str,
     style: CounterStyle,
     page: usize,
     total_pages: usize,
-    custom_counters: &BTreeMap<String, i32>,
 ) -> String {
-    match name {
-        "page" => format_counter(page as i32, style),
-        "pages" => format_counter(total_pages as i32, style),
-        _ => custom_counters
-            .get(name)
-            .map(|v| format_counter(*v, style))
-            .unwrap_or_default(),
-    }
+    let value = match name {
+        "page" => page as i32,
+        "pages" => total_pages as i32,
+        _ => 0,
+    };
+    format_counter(value, style)
 }
 
 /// Format a counter value according to the given [`CounterStyle`].
@@ -751,7 +726,7 @@ impl CounterState {
     }
 
     /// Flat snapshot mapping each name to its innermost value.
-    /// Used by margin-box rendering via `collect_counter_states`.
+    /// Used by `pagination_layout::collect_counter_states`.
     pub fn snapshot(&self) -> BTreeMap<String, i32> {
         self.stacks
             .iter()
@@ -877,7 +852,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            resolve_content_to_string(&items, &BTreeMap::new(), 3, 10, &BTreeMap::new()),
+            resolve_content_to_string(&items, &BTreeMap::new(), 3, 10),
             "Page 3 of 10"
         );
     }
@@ -909,7 +884,7 @@ mod tests {
             ContentItem::String("After".into()),
         ];
         assert_eq!(
-            resolve_content_to_string(&items, &BTreeMap::new(), 1, 5, &BTreeMap::new()),
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 5),
             "BeforeAfter"
         );
     }
@@ -922,16 +897,7 @@ mod tests {
         }];
         let (store, states) = single_page_store("hdr", "<b>Header</b>");
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &store,
-                &states,
-                &BTreeMap::new(),
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 1, 1, 0),
             "<b>Header</b>"
         );
     }
@@ -972,16 +938,7 @@ mod tests {
 
         // page_num=2 (1-based), page_idx=1 (0-based) → must pick P2.
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &store,
-                &states,
-                &BTreeMap::new(),
-                2,
-                3,
-                1,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 2, 3, 1),
             "<span>P2</span> - Page 2/3"
         );
     }
@@ -996,16 +953,7 @@ mod tests {
         let store = RunningElementStore::new();
         let states: Vec<BTreeMap<String, PageRunningState>> = vec![BTreeMap::new()];
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &store,
-                &states,
-                &BTreeMap::new(),
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &store, &states, &BTreeMap::new(), 1, 1, 0),
             "A &amp; B &lt;script&gt;"
         );
     }
@@ -1026,16 +974,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &RunningElementStore::new(),
-                &[],
-                &state,
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Current"
         );
     }
@@ -1056,16 +995,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &RunningElementStore::new(),
-                &[],
-                &state,
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Inherited"
         );
     }
@@ -1086,16 +1016,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &RunningElementStore::new(),
-                &[],
-                &state,
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Start Value"
         );
     }
@@ -1116,16 +1037,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &RunningElementStore::new(),
-                &[],
-                &state,
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Last"
         );
     }
@@ -1146,16 +1058,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &RunningElementStore::new(),
-                &[],
-                &state,
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             ""
         );
     }
@@ -1176,16 +1079,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &RunningElementStore::new(),
-                &[],
-                &state,
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "Inherited"
         );
     }
@@ -1205,7 +1099,6 @@ mod tests {
                 1,
                 1,
                 0,
-                &BTreeMap::new(),
             ),
             ""
         );
@@ -1227,16 +1120,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_html(
-                &items,
-                &RunningElementStore::new(),
-                &[],
-                &state,
-                1,
-                1,
-                0,
-                &BTreeMap::new()
-            ),
+            resolve_content_to_html(&items, &RunningElementStore::new(), &[], &state, 1, 1, 0),
             "A &amp; B &lt;script&gt;"
         );
     }
@@ -1406,7 +1290,11 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_custom_counter() {
+    fn test_resolve_custom_counter_is_zero_in_page_context() {
+        // Margin boxes resolve a document counter to 0 (see
+        // `resolve_margin_box_counter`), so `counter(chapter)` formats 0.
+        // Upper-roman has no representation for 0 and falls back to
+        // decimal.
         let items = vec![
             ContentItem::String("Chapter ".into()),
             ContentItem::Counter {
@@ -1414,11 +1302,48 @@ mod tests {
                 style: CounterStyle::UpperRoman,
             },
         ];
-        let mut custom_counters = BTreeMap::new();
-        custom_counters.insert("chapter".to_string(), 4);
         assert_eq!(
-            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &custom_counters),
-            "Chapter IV"
+            resolve_content_to_string(&items, &BTreeMap::new(), 3, 9),
+            "Chapter 0"
+        );
+    }
+
+    #[test]
+    fn test_margin_box_document_counter_is_zero_while_page_counters_resolve() {
+        // One content list mixing a document counter with the page
+        // counters: only `page` / `pages` carry values, in both the
+        // `counter()` and `counters()` forms and in both output modes.
+        let items = vec![
+            ContentItem::String("Ch. ".into()),
+            ContentItem::Counter {
+                name: "chapter".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::String(" / ".into()),
+            ContentItem::Counters {
+                name: "chapter".into(),
+                separator: ".".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::String(" | Page ".into()),
+            ContentItem::Counter {
+                name: "page".into(),
+                style: CounterStyle::Decimal,
+            },
+            ContentItem::String(" of ".into()),
+            ContentItem::Counter {
+                name: "pages".into(),
+                style: CounterStyle::Decimal,
+            },
+        ];
+        assert_eq!(
+            resolve_content_to_string(&items, &BTreeMap::new(), 2, 5),
+            "Ch. 0 / 0 | Page 2 of 5"
+        );
+        let store = RunningElementStore::new();
+        assert_eq!(
+            resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 2, 5, 1),
+            "Ch. 0 / 0 | Page 2 of 5"
         );
     }
 
@@ -1482,16 +1407,7 @@ mod tests {
             },
         ];
         let store = RunningElementStore::new();
-        let html = resolve_content_to_html(
-            &items,
-            &store,
-            &[],
-            &BTreeMap::new(),
-            1,
-            5,
-            0,
-            &BTreeMap::new(),
-        );
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 5, 0);
 
         assert!(
             html.contains("display:flex"),
@@ -1523,16 +1439,7 @@ mod tests {
             },
         ];
         let store = RunningElementStore::new();
-        let html = resolve_content_to_html(
-            &items,
-            &store,
-            &[],
-            &BTreeMap::new(),
-            3,
-            10,
-            2,
-            &BTreeMap::new(),
-        );
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 3, 10, 2);
 
         assert!(
             !html.contains("display:flex"),
@@ -1561,7 +1468,7 @@ mod tests {
             },
         );
         assert_eq!(
-            resolve_content_to_string(&items, &states, 1, 5, &BTreeMap::new()),
+            resolve_content_to_string(&items, &states, 1, 5),
             "Ch: Introduction"
         );
     }
@@ -1578,7 +1485,7 @@ mod tests {
             ContentItem::String("B".into()),
         ];
         assert_eq!(
-            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &BTreeMap::new()),
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1),
             "AB"
         );
     }
@@ -1596,21 +1503,17 @@ mod tests {
                 style: CounterStyle::Decimal,
             },
         ];
-        let mut custom = BTreeMap::new();
-        custom.insert("section".to_string(), 7_i32);
         let store = RunningElementStore::new();
-        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0);
 
         assert!(!html.contains("display:flex"), "unexpected flex: {html}");
-        assert!(html.contains('7'), "expected section 7, got: {html}");
+        assert_eq!(html, "§0", "document counter must resolve to 0");
     }
 
     #[test]
     fn test_resolve_content_to_html_flex_pages_and_custom_counter() {
         use crate::gcpm::{ContentItem, CounterStyle, LeaderStyle};
 
-        let mut custom = BTreeMap::new();
-        custom.insert("ch".to_string(), 3_i32);
         let items = vec![
             ContentItem::Counter {
                 name: "ch".into(),
@@ -1625,11 +1528,17 @@ mod tests {
             },
         ];
         let store = RunningElementStore::new();
-        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 7, 0, &custom);
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 7, 0);
 
         assert!(html.contains("display:flex"), "expected flex: {html}");
-        assert!(html.contains('3'), "expected ch=3, got: {html}");
-        assert!(html.contains('7'), "expected total pages=7, got: {html}");
+        assert!(
+            html.contains("<span>0</span>"),
+            "expected document counter ch=0, got: {html}"
+        );
+        assert!(
+            html.contains("<span>7</span>"),
+            "expected total pages=7, got: {html}"
+        );
     }
 
     #[test]
@@ -1661,16 +1570,7 @@ mod tests {
                 policy: StringPolicy::First,
             },
         ];
-        let html = resolve_content_to_html(
-            &items,
-            &store,
-            &states,
-            &str_states,
-            1,
-            1,
-            0,
-            &BTreeMap::new(),
-        );
+        let html = resolve_content_to_html(&items, &store, &states, &str_states, 1, 1, 0);
 
         assert!(html.contains("display:flex"), "expected flex: {html}");
         assert!(
@@ -1693,16 +1593,7 @@ mod tests {
             },
         ];
         let store = RunningElementStore::new();
-        let html = resolve_content_to_html(
-            &items,
-            &store,
-            &[],
-            &BTreeMap::new(),
-            1,
-            1,
-            0,
-            &BTreeMap::new(),
-        );
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0);
 
         assert!(html.contains("display:flex"), "expected flex: {html}");
         // ContentText and Attr produce no output, so no inner <span> should appear
@@ -1723,16 +1614,7 @@ mod tests {
             ContentItem::Attr("href".into()),
         ];
         let store = RunningElementStore::new();
-        let html = resolve_content_to_html(
-            &items,
-            &store,
-            &[],
-            &BTreeMap::new(),
-            1,
-            1,
-            0,
-            &BTreeMap::new(),
-        );
+        let html = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0);
 
         assert!(!html.contains("display:flex"), "unexpected flex: {html}");
         assert_eq!(html, "", "expected empty output, got: {html}");
@@ -1909,25 +1791,23 @@ mod tests {
 
     #[test]
     fn test_resolve_counters_in_margin_box_falls_back_to_single() {
-        // Margin-box `counters()` only sees flat custom_counters; the
-        // resolver degrades to single-value chain (equivalent to counter()).
+        // Margin-box `counters()` resolves a document counter like a
+        // counter that does not exist: a single-value chain at 0.
         let items = vec![ContentItem::Counters {
             name: "chapter".into(),
             separator: ".".into(),
             style: CounterStyle::Decimal,
         }];
-        let mut custom = BTreeMap::new();
-        custom.insert("chapter".to_string(), 7);
         assert_eq!(
-            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &custom),
-            "7"
+            resolve_content_to_string(&items, &BTreeMap::new(), 1, 1),
+            "0"
         );
     }
 
     #[test]
     fn test_resolve_counters_margin_box_page_and_pages() {
         // Built-in `page` / `pages` route through the page-scalar branch,
-        // bypassing custom_counters entirely.
+        // the only counters margin boxes resolve to real values.
         let page_item = vec![ContentItem::Counters {
             name: "page".into(),
             separator: ".".into(),
@@ -1939,11 +1819,11 @@ mod tests {
             style: CounterStyle::UpperRoman,
         }];
         assert_eq!(
-            resolve_content_to_string(&page_item, &BTreeMap::new(), 5, 12, &BTreeMap::new()),
+            resolve_content_to_string(&page_item, &BTreeMap::new(), 5, 12),
             "5"
         );
         assert_eq!(
-            resolve_content_to_string(&pages_item, &BTreeMap::new(), 5, 12, &BTreeMap::new()),
+            resolve_content_to_string(&pages_item, &BTreeMap::new(), 5, 12),
             "XII"
         );
     }
@@ -1972,12 +1852,9 @@ mod tests {
             separator: ".".into(),
             style: CounterStyle::Decimal,
         }];
-        let mut custom = BTreeMap::new();
-        custom.insert("chapter".to_string(), 3);
         let store = RunningElementStore::new();
-        let result =
-            resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
-        assert_eq!(result, "3");
+        let result = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0);
+        assert_eq!(result, "0");
     }
 
     #[test]
@@ -2002,16 +1879,8 @@ mod tests {
             style: CounterStyle::Decimal,
         }];
         let states = BTreeMap::new();
-        let custom = BTreeMap::new();
-        let out = resolve_content_to_string_with_anchor(
-            &items,
-            &states,
-            1,
-            10,
-            &custom,
-            Some(&map),
-            Some("#x"),
-        );
+        let out =
+            resolve_content_to_string_with_anchor(&items, &states, 1, 10, Some(&map), Some("#x"));
         assert_eq!(out, "5");
     }
 
@@ -2047,7 +1916,6 @@ mod tests {
             &BTreeMap::new(),
             1,
             10,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2066,7 +1934,6 @@ mod tests {
             &BTreeMap::new(),
             1,
             10,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2086,7 +1953,6 @@ mod tests {
             &BTreeMap::new(),
             1,
             10,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2106,7 +1972,6 @@ mod tests {
             &BTreeMap::new(),
             1,
             10,
-            &BTreeMap::new(),
             Some(&map),
             None,
         );
@@ -2130,7 +1995,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2155,7 +2019,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2178,7 +2041,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2203,7 +2065,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             None,
         );
@@ -2239,7 +2100,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2271,7 +2131,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2304,7 +2163,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2337,7 +2195,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             None,
         );
@@ -2368,7 +2225,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2413,7 +2269,6 @@ mod tests {
             1,
             10,
             0,
-            &BTreeMap::new(),
             Some(&map),
             Some("#sec"),
         );
@@ -2439,7 +2294,6 @@ mod tests {
             &BTreeMap::new(),
             1,
             10,
-            &BTreeMap::new(),
             None,
             Some("#sec"),
         );
@@ -2459,7 +2313,6 @@ mod tests {
             &BTreeMap::new(),
             1,
             10,
-            &BTreeMap::new(),
             Some(&map),
             None,
         );
@@ -2480,13 +2333,10 @@ mod tests {
                 style: super::super::LeaderStyle::Dotted,
             },
         ];
-        let mut custom = BTreeMap::new();
-        custom.insert("chapter".to_string(), 7);
         let store = RunningElementStore::new();
-        let result =
-            resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0, &custom);
+        let result = resolve_content_to_html(&items, &store, &[], &BTreeMap::new(), 1, 1, 0);
         assert!(
-            result.contains("<span>7</span>"),
+            result.contains("<span>0</span>"),
             "expected flex-mode counters() output to wrap value in <span>, got {result:?}"
         );
     }
