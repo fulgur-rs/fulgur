@@ -5,7 +5,7 @@ version-specific limitations.
 
 fulgur has two layout engines: **Blitz**, the default engine used by the
 published crates, CLI and bindings, and **Raikiri**, which is under
-development in the unpublished `fulgur-raikiri` crate and can be selected
+development in the `fulgur-raikiri` crate and can be selected
 with `fulgur-dev render input.html --engine raikiri -o output.pdf`. The two tables below compare them
 feature by feature. The per-property sections after them describe the Blitz
 engine unless they name an engine.

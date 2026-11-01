@@ -121,13 +121,16 @@ name = "fulgur-wpt"
 release = false
 publish = false
 
-# Unpublished Raikiri backend and development CLI: excluded like the
-# test/fixture crates above, and versioned 0.0.0 with path-only dependencies
-# so core releases never have to touch them.
+# The Raikiri backend is published with the core group. It depends on the
+# crates.io releases of the raikiri-* crates only.
 [[package]]
 name = "fulgur-raikiri"
-release = false
-publish = false
+version_group = "core"
+publish = true
+
+# Unpublished development CLI: excluded like the test/fixture crates above,
+# and versioned 0.0.0 with path-only dependencies so core releases never have
+# to touch it.
 
 [[package]]
 name = "fulgur-dev"

@@ -1285,7 +1285,7 @@ dependencies = [
 
 [[package]]
 name = "fulgur-raikiri"
-version = "0.0.0"
+version = "0.40.0"
 dependencies = [
  "flpdf",
  "fulgur-core",
@@ -1756,7 +1756,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -3023,8 +3023,9 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "raikiri-dom"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89f478f33026197839da058694aef46f1a58b1652d92f208b738911e8893b720"
 dependencies = [
  "bitflags 2.13.2",
  "cssparser 0.37.0",
@@ -3045,8 +3046,9 @@ dependencies = [
 
 [[package]]
 name = "raikiri-html"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a9c871beef4c3c86236686c32ca8afc161f01332181318c8bff59738b282c6c"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3067,13 +3069,15 @@ dependencies = [
 
 [[package]]
 name = "raikiri-layout-geometry"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b56ec7ee923ce2a4b6f47db0ad86b8973f3e0bb2155520ed136dee11e08b868"
 
 [[package]]
 name = "raikiri-layout-style"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baeb3afad2282ba44ee330c3a13397635e007f81df1f498bb7a8fdd8acc372db"
 dependencies = [
  "raikiri-layout-geometry",
  "raikiri-style",
@@ -3082,8 +3086,9 @@ dependencies = [
 
 [[package]]
 name = "raikiri-net"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daad756605e420a8c9a667950459a19cabedcdf7a0a7bf64ccad4d09e59b0855"
 dependencies = [
  "data-url",
  "image",
@@ -3094,8 +3099,9 @@ dependencies = [
 
 [[package]]
 name = "raikiri-style"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45318a861688e8b892e9ec31ab0dc8c6573f5643f55cf8e137ec7f44ef90f0a3"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3107,8 +3113,9 @@ dependencies = [
 
 [[package]]
 name = "raikiri-svg"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15569d3c5b1facddc55272de0cf99b4c1df9a33a54626e15a4c67df76baf1edb"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3122,8 +3129,9 @@ dependencies = [
 
 [[package]]
 name = "raikiri-traits"
-version = "0.0.4"
-source = "git+https://github.com/fulgur-rs/raikiri?rev=26a0b32fa279c30a660383012a5f9fda155428f3#26a0b32fa279c30a660383012a5f9fda155428f3"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57aa0959a592132d9d41bd7cc3f0143a17f636097f6b7d0548587f5c3dda0854"
 dependencies = [
  "bytes",
  "libc",
