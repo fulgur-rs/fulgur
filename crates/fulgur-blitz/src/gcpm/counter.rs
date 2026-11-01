@@ -2490,4 +2490,174 @@ mod tests {
             "expected flex-mode counters() output to wrap value in <span>, got {result:?}"
         );
     }
+
+    // ── 境界条件テスト: 未カバーのキャップ・フォールバック経路 ────────────────
+
+    #[test]
+    fn resolve_content_to_string_cap_break_at_max_bytes() {
+        // After the first 1MB ContentItem::String, out.len() >= MAX_RESOLVED_CONTENT_BYTES.
+        // The second iteration hits the cap check (line 69-70) and breaks without
+        // appending "extra".
+        let big = "a".repeat(crate::MAX_RESOLVED_CONTENT_BYTES);
+        let items = vec![
+            ContentItem::String(big),
+            ContentItem::String("extra".into()),
+        ];
+        let out = resolve_content_to_string(&items, &BTreeMap::new(), 1, 1, &BTreeMap::new());
+        assert!(out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES);
+        assert!(
+            !out.ends_with("extra"),
+            "cap break must suppress the second item"
+        );
+    }
+
+    #[test]
+    fn target_counters_non_href_attr_skips_in_string_mode() {
+        // TargetCounters with url=Attr("data-ref") → target_href returns None
+        // → the `let Some(href) = ... else { continue }` at lines 129-130 fires.
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetCounters {
+            url: TargetUrl::Attr("data-ref".into()),
+            counter_name: "section".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn target_text_non_href_attr_skips_in_string_mode() {
+        // TargetText with url=Attr("data-ref") → target_href returns None
+        // → the `let Some(href) = ... else { continue }` at lines 143-144 fires.
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetText {
+            url: TargetUrl::Attr("data-ref".into()),
+            kind: TargetTextKind::Content,
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            &BTreeMap::new(),
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn resolve_content_to_html_flat_mode_cap_break() {
+        // Flat mode (no Leader): after the 1MB String item, out.len() >= MAX,
+        // so the second item triggers the line-229 cap break.
+        let big = "a".repeat(crate::MAX_RESOLVED_CONTENT_BYTES);
+        let items = vec![
+            ContentItem::String(big),
+            ContentItem::String("extra".into()),
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            1,
+            0,
+            &BTreeMap::new(),
+        );
+        assert!(out.len() >= crate::MAX_RESOLVED_CONTENT_BYTES);
+        assert!(
+            !out.contains("extra"),
+            "flat-mode cap break must suppress the second item"
+        );
+    }
+
+    #[test]
+    fn resolve_content_to_html_flex_mode_cap_break() {
+        // Flex mode (Leader present): after a 1MB String item parts_bytes >= MAX,
+        // so the next item triggers the line-335 cap break.
+        let big = "a".repeat(crate::MAX_RESOLVED_CONTENT_BYTES);
+        let items = vec![
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+            ContentItem::String(big),
+            ContentItem::String("extra".into()),
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            1,
+            0,
+            &BTreeMap::new(),
+        );
+        assert!(
+            !out.contains("extra"),
+            "flex-mode cap break must suppress the third item"
+        );
+    }
+
+    #[test]
+    fn resolve_element_policy_fallback_to_preceding_page() {
+        // Covers the fallback scan (lines 542-546): when the current page has no
+        // assignment the resolver walks backwards and returns the last instance
+        // from the nearest preceding page that had one.
+        let mut store = RunningElementStore::new();
+        let id = store.register(1, "header".into(), "<h1>Hello</h1>".into());
+
+        // Page 0 has "header" assigned; page 1 does not.
+        let mut state_p0: BTreeMap<String, PageRunningState> = BTreeMap::new();
+        state_p0.insert(
+            "header".into(),
+            PageRunningState {
+                instance_ids: vec![id],
+            },
+        );
+        let state_p1: BTreeMap<String, PageRunningState> = BTreeMap::new();
+        let page_states = vec![state_p0, state_p1];
+
+        // Policy=First on page_idx=1: current is None → chosen_id is None → fallback.
+        let result =
+            resolve_element_policy("header", ElementPolicy::First, 1, &page_states, &store);
+        assert_eq!(result, Some("<h1>Hello</h1>"));
+    }
+
+    #[test]
+    fn format_counter_chain_value_itself_exceeds_remaining_cap() {
+        // The separator fits but the subsequent counter value string is longer
+        // than the remaining capacity → push_bounded returns false for the
+        // value → line-589 break fires (distinct from the line-586 separator break).
+        //
+        // Layout: values=[1, 1_000_000_000], separator="x"*4090.
+        // After i=0: out="1" (1 B).  After separator at i=1: out.len()=4091.
+        // Value "1000000000" (10 B) needs 5 B remaining → truncation → break.
+        let values = vec![1_i32, 1_000_000_000_i32];
+        let separator = "x".repeat(4090);
+        let out = format_counter_chain(&values, &separator, CounterStyle::Decimal);
+        assert!(
+            out.len() <= crate::MAX_COUNTER_CHAIN_BYTES,
+            "output {} exceeded cap {}",
+            out.len(),
+            crate::MAX_COUNTER_CHAIN_BYTES
+        );
+        assert!(out.starts_with('1'), "first value must be present");
+        assert!(
+            !out.contains("1000000000"),
+            "second value must be truncated/absent, got {out:?}"
+        );
+    }
 }
