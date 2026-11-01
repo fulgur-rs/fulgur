@@ -98,3 +98,88 @@ fn insert_block_entry(
         },
     );
 }
+
+#[cfg(test)]
+mod block_tests {
+    use crate::units::F32Units;
+    use std::ops::DerefMut;
+
+    fn build_drawables(html: &str) -> crate::drawables::Drawables {
+        let mut doc = crate::blitz_adapter::parse_and_layout(
+            html,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let column_styles = crate::blitz_adapter::extract_column_style_table(&doc, &[]);
+        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let pagination_geometry = crate::pagination_layout::run_pass(doc.deref_mut(), 842.0);
+        let running_store = crate::gcpm::running::RunningElementStore::new();
+        let mut ctx = crate::convert::ConvertContext {
+            running_store: &running_store,
+            assets: None,
+            font_cache: Default::default(),
+            string_set_by_node: Default::default(),
+            counter_ops_by_node: Default::default(),
+            bookmark_by_node: Default::default(),
+            column_styles,
+            multicol_geometry,
+            pagination_geometry,
+            link_cache: Default::default(),
+            viewport_size_px: Some((595.0, 842.0)),
+        };
+        crate::convert::dom_to_drawables(&doc, &mut ctx)
+    }
+
+    // Covers the opacity_descendants path (block.rs line ~71):
+    // a block with fractional opacity and no overflow:hidden must populate
+    // `opacity_descendants` with its descendant node IDs.
+    #[test]
+    fn block_with_fractional_opacity_no_clip_populates_opacity_descendants() {
+        let html = "<!DOCTYPE html><html><body>\
+            <div style=\"opacity: 0.5; width: 200px;\">\
+                <p style=\"width: 100px; height: 20px;\">text</p>\
+            </div>\
+            </body></html>";
+        let d = build_drawables(html);
+        let has_opacity_descendants = d
+            .block_styles
+            .values()
+            .any(|e| !e.opacity_descendants.is_empty());
+        assert!(
+            has_opacity_descendants,
+            "a block with opacity<1 and no overflow:hidden must have non-empty opacity_descendants"
+        );
+    }
+
+    // Complementary: when both opacity<1 AND overflow:hidden, the clip path
+    // takes precedence — clip_descendants is populated, opacity_descendants
+    // stays empty for that entry.
+    #[test]
+    fn block_with_clip_and_opacity_uses_clip_path_not_opacity_path() {
+        let html = "<!DOCTYPE html><html><body>\
+            <div style=\"opacity: 0.5; overflow: hidden; width: 200px;\">\
+                <p style=\"width: 100px; height: 20px;\">text</p>\
+            </div>\
+            </body></html>";
+        let d = build_drawables(html);
+        let has_clip_descendants = d
+            .block_styles
+            .values()
+            .any(|e| !e.clip_descendants.is_empty());
+        assert!(
+            has_clip_descendants,
+            "a block with overflow:hidden must have non-empty clip_descendants"
+        );
+        // The entry that clips must NOT also record opacity_descendants.
+        let clipping_entry_has_opacity = d
+            .block_styles
+            .values()
+            .any(|e| !e.clip_descendants.is_empty() && !e.opacity_descendants.is_empty());
+        assert!(
+            !clipping_entry_has_opacity,
+            "an entry that clips must not also populate opacity_descendants"
+        );
+    }
+}
