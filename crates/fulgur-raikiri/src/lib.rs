@@ -256,7 +256,15 @@ fn with_resources<T>(
         .stylesheet(DEFAULT_FONT_STYLESHEET)
         .stylesheet(page_stylesheet(config))
         .network_provider(&network)
-        .base_url(document_url.clone());
+        .base_url(document_url.clone())
+        // Browsers snap a used border width to whole CSS pixels (CSS Values 4,
+        // "snap a length as a border width"): `1pt` is `1px`, and `thin` is
+        // `1px`. Without a scale Raikiri keeps the fractional width, which makes
+        // every bordered box slightly taller than in Chromium and moves page
+        // breaks. The scale is 1.0 because Chromium's print layout uses one
+        // device pixel per CSS pixel; layout, painting and streaming all build
+        // their resources here, so they agree on the snapped widths.
+        .border_width_device_scale(Some(1.0));
     if config.effective_bookmarks() {
         resources = resources.stylesheet(bookmarks::heading_stylesheet());
     }
