@@ -344,6 +344,17 @@ jobs:
           shared-key: ubuntu-latest-fulgur
           save-if: false
 
+      # cargo publish verifies each package by building it on its own, outside
+      # the workspace's feature unification. fulgur-raikiri then reaches
+      # yeslogic-fontconfig-sys through the raikiri crates, and its build
+      # script needs the fontconfig development files, which ubuntu-latest
+      # does not ship.
+      - name: Install system dependencies
+        run: |
+          apt_options=(-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20)
+          sudo timeout --kill-after=10s 180s apt-get "${apt_options[@]}" --error-on=any update
+          sudo timeout --kill-after=10s 180s apt-get "${apt_options[@]}" install -y libfontconfig1-dev pkg-config
+
       # GITHUB_TOKEN's tag push / GH Release creation would not trigger the
       # build-binaries/release/publish-npm jobs in release.yml (GITHUB_TOKEN-
       # authored events don't fire other workflows). Use the same App token
