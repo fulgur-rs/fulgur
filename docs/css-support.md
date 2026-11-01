@@ -195,10 +195,7 @@ so the two cannot drift apart again. `--size` still takes priority over
 
 ### Counters in `@page` margin boxes
 
-Margin boxes (`@top-right`, `@bottom-center`, ...) belong to the page
-context, not to the document. CSS Paged Media 3 gives the page context its
-own counters, `page` and `pages`, and document counters are not visible
-there. In margin-box `content`:
+In margin-box `content` (`@top-right`, `@bottom-center`, ...):
 
 - `counter(page)` / `counter(pages)` (and the `counters()` forms) resolve to
   the current page number and the total page count.
@@ -208,10 +205,14 @@ there. In margin-box `content`:
 - `counter-reset` / `counter-increment` declared on the `@page` rule itself
   are not supported, so they do not define page-context counters either.
 
-Before this was aligned with the specification, the Blitz backend leaked
-document counter values into margin boxes, so `content: "Ch. "
-counter(chapter)` printed the current chapter number. It now prints
-`Ch. 0`.
+This is a deliberate difference from CSS Paged Media 3 §6.1, under which
+a counter that the page and margin contexts neither reset nor increment
+takes its value at the start of the page, so a document counter would show
+there. Chromium and the Raikiri backend do not implement that rule and
+print `0`, and both Fulgur engines now do the same, so switching engines
+does not change the output. Earlier releases of the Blitz backend printed
+the document counter value, so `content: "Ch. " counter(chapter)` showed
+the current chapter number; it now prints `Ch. 0`.
 
 To show a chapter number in a page header, carry it into a named string
 with `string-set` and reference it with `string()`:

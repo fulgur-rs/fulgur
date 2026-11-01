@@ -560,15 +560,18 @@ pub fn format_counter_chain(values: &[i32], separator: &str, style: CounterStyle
 /// Resolve a `counter(name, style)` or `counters(name, sep, style)`
 /// reference in a margin box.
 ///
-/// Margin boxes take their counters from the page context, not from the
-/// document: CSS Paged Media 3 ("Page-Based Counters") places the
-/// `page` and `pages` counters in the page context, and document
-/// counters such as one incremented by `h2` are not visible there.
-/// Only `page` / `pages` therefore resolve to real values; every other
-/// name refers to a counter that does not exist in the page context
-/// and is instantiated at 0 (CSS Lists 3). Counters set on the
-/// `@page` rule itself (`counter-reset` / `counter-increment`) are not
-/// supported, so they also resolve to 0.
+/// Only `page` / `pages` resolve to real values; every other name
+/// resolves to 0, the value of a counter that does not exist (CSS
+/// Lists 3). Counters set on the `@page` rule itself (`counter-reset` /
+/// `counter-increment`) are not supported, so they also resolve to 0.
+///
+/// This deliberately departs from CSS Paged Media 3 §6.1, under which a
+/// counter the page and margin contexts neither reset nor increment
+/// takes its value as if the margin box were an element at the start of
+/// the page, so a document counter such as one incremented by `h2`
+/// would show its value there. Chromium and the Raikiri backend do not
+/// implement that rule and print 0; this backend matches them so that
+/// switching engines does not change the output.
 ///
 /// Each of these counters has a single instance, so `counters()`
 /// formats a one-element chain and its separator is never inserted.
@@ -1288,8 +1291,8 @@ mod tests {
 
     #[test]
     fn test_resolve_custom_counter_is_zero_in_page_context() {
-        // A document counter is not visible in the page context, so a
-        // margin-box `counter(chapter)` formats the implicit value 0.
+        // Margin boxes resolve a document counter to 0 (see
+        // `resolve_margin_box_counter`), so `counter(chapter)` formats 0.
         // Upper-roman has no representation for 0 and falls back to
         // decimal.
         let items = vec![
@@ -1788,8 +1791,8 @@ mod tests {
 
     #[test]
     fn test_resolve_counters_in_margin_box_falls_back_to_single() {
-        // Margin-box `counters()` resolves in the page context, where a
-        // document counter does not exist: a single-value chain at 0.
+        // Margin-box `counters()` resolves a document counter like a
+        // counter that does not exist: a single-value chain at 0.
         let items = vec![ContentItem::Counters {
             name: "chapter".into(),
             separator: ".".into(),
@@ -1804,7 +1807,7 @@ mod tests {
     #[test]
     fn test_resolve_counters_margin_box_page_and_pages() {
         // Built-in `page` / `pages` route through the page-scalar branch,
-        // the only counters the page context provides.
+        // the only counters margin boxes resolve to real values.
         let page_item = vec![ContentItem::Counters {
             name: "page".into(),
             separator: ".".into(),

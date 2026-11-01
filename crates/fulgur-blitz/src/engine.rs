@@ -711,8 +711,8 @@ impl Engine {
         // `collect_string_set_states` call in `render_v2` so the map remains
         // explicitly readable after convert returns. The clone is small
         // (one `Vec` per node that declares the property). Counter ops are
-        // not forwarded: margin boxes resolve counters in the page context,
-        // which does not see document counters.
+        // not forwarded: margin boxes resolve only `page` / `pages` and
+        // every other counter to 0.
         let string_set_for_render = string_set_by_node.clone();
 
         let mut convert_ctx = ConvertContext {

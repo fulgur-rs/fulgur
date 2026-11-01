@@ -3636,9 +3636,8 @@ impl<'a> MarginBoxRenderer<'a> {
     /// `dom_to_drawables` consumed it.
     ///
     /// Document counters are deliberately not an input: margin boxes
-    /// resolve `counter()` / `counters()` in the page context, where
-    /// only `page` / `pages` exist (see
-    /// `gcpm::counter::resolve_content_to_html_with_anchor`).
+    /// resolve only `page` / `pages` in `counter()` / `counters()` and
+    /// every other name to 0 (see `gcpm::counter::resolve_margin_box_counter`).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         gcpm: &'a GcpmContext,

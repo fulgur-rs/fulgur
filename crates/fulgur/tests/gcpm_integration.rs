@@ -4,8 +4,8 @@ use fulgur::engine::Engine;
 #[test]
 fn test_counter_margin_box_values_correct() {
     // A document counter referenced from a margin box must not break the
-    // render. Its value there is 0 (the page context does not see document
-    // counters); `margin_box_document_counter_resolves_to_zero` pins that.
+    // render. Its value there is 0, like Chromium and the Raikiri backend;
+    // `margin_box_document_counter_resolves_to_zero` pins that.
     let mut assets = AssetBundle::new();
     assets.add_css(
         r#"
@@ -531,9 +531,9 @@ fn render_with_top_right(content: &str) -> Vec<u8> {
         .expect("render must succeed")
 }
 
-/// CSS Paged Media 3: margin boxes belong to the page context, which does
-/// not see document counters, so `counter(chapter)` there is 0 however many
-/// `h2`s precede the page. Text extraction cannot recover margin-box glyphs
+/// Margin boxes resolve a document counter to 0 however many `h2`s precede
+/// the page, like Chromium and the Raikiri backend. CSS Paged Media 3 §6.1
+/// would give it the value at the start of the page instead. Text extraction cannot recover margin-box glyphs
 /// (see `running_element_escaped_text_does_not_become_margin_box_markup`),
 /// so the check compares against the same document with the expected text
 /// written as a literal.
@@ -557,8 +557,8 @@ fn margin_box_document_counter_resolves_to_zero() {
     );
 }
 
-/// The page context keeps `page` / `pages`, also next to a document counter
-/// in the same content list.
+/// Margin boxes keep `page` / `pages`, also next to a document counter in
+/// the same content list.
 #[test]
 fn margin_box_page_counters_resolve_next_to_document_counter() {
     let via_counter = render_with_top_right(

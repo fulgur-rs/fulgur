@@ -24,12 +24,12 @@ p { margin: 8pt 0; }
 </head>
 <body>
 <h2>Chapter Alpha</h2>
-<p>This fixture exercises <code>counter(page)</code> / <code>counter(pages)</code> in <code>@bottom-center</code> and <code>counter(chapter)</code> in <code>@top-right</code>. The chapter counter increments per <code>h2</code>, but margin boxes live in the page context, which does not see document counters.</p>
+<p>This fixture exercises <code>counter(page)</code> / <code>counter(pages)</code> in <code>@bottom-center</code> and <code>counter(chapter)</code> in <code>@top-right</code>. The chapter counter increments per <code>h2</code>, but Fulgur, like Chromium, resolves document counters in margin boxes to 0.</p>
 <div class="box"><p>Page 1 should read "Ch. 0" in the top-right and "Page 1 of N" in the bottom.</p></div>
 <div class="box"><p>Filler 1 to push content past page 1.</p></div>
 <div class="box"><p>Filler 2 — multi-line content<br>extends the height further<br>across more lines<br>so the page boundary lands<br>well inside the body content.</p></div>
 <div class="box"><p>Filler 3 — additional text to make sure Chapter Alpha overflows page 1 and the counter values for page 2 are exercised under "Ch. 0" too.</p></div>
-<div class="box"><p>Filler 4 — even more content. The top-right should still read 0 on page 2 because the page context only has <code>page</code> and <code>pages</code>.</p></div>
+<div class="box"><p>Filler 4 — even more content. The top-right should still read 0 on page 2 because margin boxes only resolve <code>page</code> and <code>pages</code>.</p></div>
 <div class="box"><p>Filler 5.</p></div>
 <div class="box"><p>Filler 6.</p></div>
 <div class="box"><p>Filler 7.</p></div>
