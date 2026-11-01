@@ -253,6 +253,7 @@ fn with_resources<T>(
     let mut resources = RenderResources::new()
         .replaced_resolver(&resolver)
         .image_pixel_source(&images)
+        .stylesheet(DEFAULT_FONT_STYLESHEET)
         .stylesheet(page_stylesheet(config))
         .network_provider(&network)
         .base_url(document_url.clone());
@@ -269,6 +270,22 @@ fn with_resources<T>(
     }
     consume(&resources, &document_url)
 }
+
+/// Fulgur's default typeface, the generic `sans-serif` family, as a
+/// user-origin rule on the root element.
+///
+/// The initial `font-family` is up to the user agent (CSS Fonts 4 §2.1).
+/// Raikiri starts from `serif` like browsers do, while the Blitz backend
+/// starts from `sans-serif`; this keeps text the document does not style
+/// in the same family with either engine. Set on the root, it also reaches
+/// the page context and its margin boxes, which inherit from the root
+/// element (CSS Paged Media 3 §6). Every author declaration beats it, and
+/// user-agent rules on descendants such as `pre` still apply to them.
+///
+/// Bundled stylesheets share the user origin, so the rule sits in the first
+/// anonymous layer with zero specificity: any bundled rule for the root,
+/// unlayered or in a later layer, still wins (CSS Cascade 5 §6.4).
+const DEFAULT_FONT_STYLESHEET: &str = "@layer { :where(html) { font-family: sans-serif } }";
 
 /// The configured page size as the page box Raikiri uses wherever CSS leaves
 /// the size to the user agent.
