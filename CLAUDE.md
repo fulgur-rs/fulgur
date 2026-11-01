@@ -44,8 +44,10 @@ HTML string → Blitz (parse/style/layout) → Drawables / PaginationGeometryTab
 - `crates/fulgur-core/` — Backend-independent parts: `config`, `asset`, `units`, `error`, `image`, `inspect`. Must not depend on Blitz, Stylo, Taffy, Parley, or Raikiri
 - `crates/fulgur-blitz/` — The current Blitz-based pipeline (parse, layout, pagination, drawables, PDF rendering, GCPM, templates)
 - `crates/fulgur-cli/` — CLI binary using clap
+- `crates/fulgur-raikiri/` — The Raikiri backend. Published in the `core` version group, and depends on the crates.io releases of `raikiri-html`, `raikiri-net` and `raikiri-traits` (no git, path or `[patch]` dependency on Raikiri). Nothing else that is published depends on it yet; the facade, CLI and bindings still use Blitz only
+- `crates/fulgur-dev/` — Unpublished development CLI that can select either backend (`--engine raikiri`)
 
-The contract between layout backends is "HTML + assets + config → PDF bytes"; backends do not share an intermediate representation. A Raikiri backend will be added later as an unpublished crate, so published crates must not depend on Raikiri.
+The contract between layout backends is "HTML + assets + config → PDF bytes"; backends do not share an intermediate representation. `fulgur-core` stays backend-independent. A Raikiri update is an ordinary dependency bump of the `raikiri-*` version requirements in `crates/fulgur-raikiri/Cargo.toml`.
 
 ### Key Modules (fulgur-blitz unless noted)
 

@@ -1,6 +1,6 @@
 # fulgur-raikiri
 
-Unpublished Raikiri backend for Fulgur development.
+Raikiri backend for Fulgur, under development.
 
 The backend accepts an HTML file path, or an HTML string with an optional base
 directory, and a `fulgur_core::Config`, and returns
@@ -56,8 +56,9 @@ under the original page and removed. Delivered pages never change, so
 element that starts after the first page was painted. The development CLI
 selects it with `--engine raikiri --stream`.
 
-Raikiri is a Git dependency pinned to a specific revision. This crate is not
-used by Fulgur's published facade, CLI, or bindings.
+Raikiri comes from its crates.io releases (`raikiri-html`, `raikiri-net`,
+`raikiri-traits`). This crate is published, but Fulgur's facade, CLI, and
+bindings do not use it yet.
 
 PDF metadata supports title, repeated authors and keywords, description,
 language, creator, producer, and creation date. The development CLI exposes
