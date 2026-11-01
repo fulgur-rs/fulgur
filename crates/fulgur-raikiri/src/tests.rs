@@ -1959,3 +1959,92 @@ fn bundled_css_beats_the_default_in_a_layer_or_at_zero_specificity() {
         assert_eq!(names, ["serif"], "{css}");
     }
 }
+
+/// The `(XStep, YStep)` of every tiling pattern (`PatternType 1`) in `pdf`.
+fn tiling_steps(pdf: &lopdf::Document) -> Vec<(f32, f32)> {
+    pdf.objects
+        .values()
+        .filter_map(|object| object.as_stream().ok())
+        .filter(|stream| {
+            stream
+                .dict
+                .get(b"PatternType")
+                .is_ok_and(|kind| kind.as_i64().is_ok_and(|kind| kind == 1))
+        })
+        .map(|stream| {
+            let step = |key: &[u8]| stream.dict.get(key).unwrap().as_float().unwrap();
+            (step(b"XStep"), step(b"YStep"))
+        })
+        .collect()
+}
+
+#[test]
+fn gradient_layers_tile_at_their_background_size() {
+    // One gradient per 20 x 10 tile, repeated through a tiling pattern
+    // instead of being stretched over the 260 x 30 box.
+    let (pdf, _, coords) = gradient_box(
+        "background-image: linear-gradient(to right, red, blue); background-size: 20px 10px",
+    );
+    assert_close(&coords.unwrap(), &[0.0, 5.0, 20.0, 5.0]);
+    assert_eq!(tiling_steps(&pdf), [(20.0, 10.0)]);
+    // `space` leaves a gap between tiles, which the pattern cell holds:
+    // five 50px tiles in 260px are 52.5px apart.
+    let (pdf, _, _) = gradient_box(
+        "background-image: linear-gradient(red, blue); background-size: 50px 30px; \
+         background-repeat: space no-repeat",
+    );
+    assert_eq!(tiling_steps(&pdf), [(52.5, 30.0)]);
+}
+
+#[test]
+fn a_gradient_tile_that_does_not_repeat_keeps_its_place() {
+    let (pdf, operations, coords) = gradient_box(
+        "background-image: linear-gradient(to right, red, blue); background-size: 50px 10px; \
+         background-position: 100px 10px; background-repeat: no-repeat",
+    );
+    // The box is at (20, 20); the tile at (120, 30) is 50 x 10.
+    assert_close(&coords.unwrap(), &[120.0, 35.0, 170.0, 35.0]);
+    assert!(tiling_steps(&pdf).is_empty());
+    // The box clips the tile, which is filled instead of the whole box.
+    let clips = clip_bounds(&operations);
+    assert!(
+        clips.iter().any(|clip| clip
+            .iter()
+            .zip([20.0, 20.0, 280.0, 50.0])
+            .all(|(a, b)| (a - b).abs() < 0.01)),
+        "{clips:?}"
+    );
+}
+
+#[test]
+fn repeated_gradient_tiles_are_at_least_one_pixel() {
+    let (pdf, _, coords) = gradient_box(
+        "background-image: linear-gradient(to right, red, blue); background-size: 0.25px 10px",
+    );
+    assert_close(&coords.unwrap(), &[0.0, 5.0, 1.0, 5.0]);
+    assert_eq!(tiling_steps(&pdf), [(1.0, 10.0)]);
+}
+
+#[test]
+fn gradient_tile_sizes_resolve_against_the_positioning_area() {
+    // Percentages and `calc()` refer to the 260 x 30 positioning area.
+    for (size, want, step) in [
+        ("25% 50%", [0.0, 7.5, 65.0, 7.5], (65.0, 15.0)),
+        ("calc(10% + 4px) 10px", [0.0, 5.0, 30.0, 5.0], (30.0, 10.0)),
+    ] {
+        let (pdf, _, coords) = gradient_box(&format!(
+            "background-image: linear-gradient(to right, red, blue); background-size: {size}"
+        ));
+        assert_close(&coords.unwrap(), &want);
+        assert_eq!(tiling_steps(&pdf), [step], "{size}");
+    }
+    // A gradient has no ratio to keep, so `contain` and `cover` fill the
+    // area like `auto`.
+    for size in ["contain", "cover"] {
+        let (pdf, _, coords) = gradient_box(&format!(
+            "background-image: linear-gradient(to right, red, blue); background-size: {size}"
+        ));
+        assert_close(&coords.unwrap(), &[20.0, 35.0, 280.0, 35.0]);
+        assert!(tiling_steps(&pdf).is_empty(), "{size}");
+    }
+}

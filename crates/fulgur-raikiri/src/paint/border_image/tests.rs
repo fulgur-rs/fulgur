@@ -217,10 +217,3 @@ fn spaced_gradient_tiles_fill_a_pattern_with_gaps() {
     assert!(drawn);
     assert!(count(&parsed, b"Pattern") > 0);
 }
-
-#[test]
-fn uniform_steps_need_evenly_spaced_edges() {
-    assert_eq!(uniform_step(&[5.0]), Some(0.0));
-    assert_eq!(uniform_step(&[0.0, 2.0, 4.0]), Some(2.0));
-    assert_eq!(uniform_step(&[0.0, 2.0, 5.0]), None);
-}

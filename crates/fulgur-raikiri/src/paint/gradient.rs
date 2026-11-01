@@ -1,23 +1,158 @@
 //! Gradient background images (CSS Images 3 §3) as Krilla shadings.
 //!
-//! The gradient box is the background positioning area. Colors are
+//! A gradient has no natural size, so a background layer sizes, places and
+//! repeats it in tiles like any other image (CSS Backgrounds 3 §2); the
+//! gradient box is one tile. Colors are
 //! interpolated in sRGB, the PDF shading's color space; the
 //! `<color-interpolation-method>` of CSS Images 4 is not applied.
 
 use super::shape::RoundedRect;
+use super::surface::Surface;
+use super::tiling;
 use krilla::color::rgb;
-use krilla::geom::Transform;
+use krilla::geom::{Path, Transform};
 use krilla::num::NormalizedF32;
 use krilla::paint::{
-    LinearGradient as KrillaLinear, Paint, RadialGradient as KrillaRadial, SpreadMethod, Stop,
-    SweepGradient,
+    Fill, FillRule, LinearGradient as KrillaLinear, Paint, RadialGradient as KrillaRadial,
+    SpreadMethod, Stop, SweepGradient,
 };
+use raikiri_html::PaintRect;
 use raikiri_html::computed::{
-    AnglePercentage, AngularColorStop, ComputedGradient, ConicGradient, CssColor, CssPosition,
+    AnglePercentage, AngularColorStop, ComputedBackgroundLayer, ComputedBackgroundSize,
+    ComputedGradient, ComputedLengthPercentageOrAuto, ConicGradient, CssColor, CssPosition,
     CssPositionOffset, GradientColorStop, GradientStopColor, HorizontalSide, Length,
     LengthPercentageOrCalc, LinearGradient, LinearGradientDirection, RadialExtent, RadialGradient,
     RadialShape, RadialSize, VerticalSide,
 };
+use raikiri_html::image_geometry::background_tiles;
+
+/// Draw the gradient `gradient` of the background layer `layer`.
+///
+/// `positioning` is the `background-origin` box that the size and position
+/// resolve against; tiles cover `painting`, the bounds of the
+/// `background-clip` area, and are clipped to `area`. Tiles use the same
+/// geometry as `url()` layers and as Raikiri's own painter. `current`
+/// resolves `currentcolor` stops.
+pub(super) fn paint_layer(
+    surface: &mut Surface<'_>,
+    gradient: &ComputedGradient,
+    layer: &ComputedBackgroundLayer,
+    (positioning, painting): (PaintRect, PaintRect),
+    current: CssColor,
+    (path, rule): (&Path, FillRule),
+) {
+    let Some(size) = tile_size(&layer.size, positioning) else {
+        return;
+    };
+    let rect = |rect: PaintRect| {
+        (
+            f64::from(rect.x),
+            f64::from(rect.y),
+            f64::from(rect.width),
+            f64::from(rect.height),
+        )
+    };
+    let place = |size| {
+        background_tiles(
+            rect(positioning),
+            rect(painting),
+            size,
+            &layer.position,
+            &layer.repeat,
+        )
+    };
+    let Some(mut tiles) = place(size) else {
+        return;
+    };
+    // Repeated tiles below one pixel cannot be drawn without coverage gaps;
+    // like browsers and Raikiri's own painter, such an axis repeats the
+    // gradient in one-pixel tiles. An axis with a single tile keeps its size.
+    let widen = |count: usize, used: f64, size: f64| {
+        if count > 1 && used < 1.0 { 1.0 } else { size }
+    };
+    let widened = (
+        widen(tiles.x.len(), tiles.width, size.0),
+        widen(tiles.y.len(), tiles.height, size.1),
+    );
+    if widened != size {
+        let Some(wider) = place(widened) else {
+            return;
+        };
+        tiles = wider;
+    }
+    let (width, height) = (tiles.width as f32, tiles.height as f32);
+    let fill_with = |paint: &Paint, rule: FillRule| {
+        Some(Fill {
+            paint: paint.clone(),
+            opacity: NormalizedF32::ONE,
+            rule,
+        })
+    };
+    // A single tile is built where it is drawn. When it covers the painting
+    // area, as the default `auto` size and `padding-box` origin do for a box
+    // without borders, the area is filled directly.
+    if let ([x], [y]) = (tiles.x.as_slice(), tiles.y.as_slice()) {
+        let tile = RoundedRect::rect(*x as f32, *y as f32, width, height);
+        let (Some(fill), Some(cell)) = (paint(gradient, &tile, current), tile.path()) else {
+            return;
+        };
+        let covers = tile.x <= painting.x
+            && tile.y <= painting.y
+            && tile.x + tile.width >= painting.x + painting.width
+            && tile.y + tile.height >= painting.y + painting.height;
+        if covers {
+            surface.set_fill(fill_with(&fill, rule));
+            surface.draw_path(path);
+        } else {
+            surface.push_clip_path(path, &rule);
+            surface.set_fill(fill_with(&fill, FillRule::NonZero));
+            surface.draw_path(&cell);
+            surface.pop();
+        }
+        return;
+    }
+    // `round` rescales the tile, so the gradient is built for the used size.
+    let tile = RoundedRect::rect(0.0, 0.0, width, height);
+    let (Some(fill), Some(cell)) = (paint(gradient, &tile, current), tile.path()) else {
+        return;
+    };
+    surface.push_clip_path(path, &rule);
+    tiling::draw(
+        surface,
+        (&tiles.x, &tiles.y),
+        (tiles.width, tiles.height),
+        &mut |tile| {
+            tile.set_fill(fill_with(&fill, FillRule::NonZero));
+            tile.draw_path(&cell);
+        },
+    );
+    surface.pop();
+}
+
+/// The used size of a gradient tile (CSS Backgrounds 3 §3.9), before
+/// `round` rescales it.
+///
+/// A gradient has no natural dimensions or ratio, so `auto`, `contain` and
+/// `cover` all take the size of the positioning area on that axis.
+fn tile_size(size: &ComputedBackgroundSize, area: PaintRect) -> Option<(f64, f64)> {
+    let (area_w, area_h) = (f64::from(area.width), f64::from(area.height));
+    let resolve = |value: ComputedLengthPercentageOrAuto, basis: f64| match value {
+        ComputedLengthPercentageOrAuto::Px(px) => f64::from(px),
+        ComputedLengthPercentageOrAuto::Percent(percent) => basis * f64::from(percent) / 100.0,
+        ComputedLengthPercentageOrAuto::Calc(calc) => {
+            basis * f64::from(calc.percent) / 100.0 + f64::from(calc.px)
+        }
+        _ => basis,
+    };
+    let (width, height) = match size {
+        ComputedBackgroundSize::Explicit { width, height } => {
+            (resolve(*width, area_w), resolve(*height, area_h))
+        }
+        _ => (area_w, area_h),
+    };
+    (width.is_finite() && height.is_finite() && width > 0.0 && height > 0.0)
+        .then_some((width, height))
+}
 
 /// A Krilla paint for `gradient` drawn in `area` (the gradient box), or
 /// `None` when there is nothing to draw. `current` resolves
