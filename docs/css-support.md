@@ -3,6 +3,78 @@
 This document tracks fulgur's CSS property support status and any
 version-specific limitations.
 
+fulgur has two layout engines: **Blitz**, the default engine used by the
+published crates, CLI and bindings, and **Raikiri**, which is under
+development in the unpublished `fulgur-raikiri` crate and can be selected
+with `fulgur-dev --engine raikiri`. The two tables below compare them
+feature by feature. The per-property sections after them describe the Blitz
+engine unless they name an engine.
+
+Status values:
+
+- **Supported**: works for the cases fulgur documents and tests.
+- **Partial**: works with a known gap, described in the notes.
+- **Unsupported**: not available in that engine.
+- **Intentional difference**: the engines differ on purpose; see
+  [Intentional differences](#intentional-differences).
+- **Unverified**: not yet checked for that engine.
+
+The Raikiri column describes the Raikiri revision that `fulgur-raikiri`
+pins in its `Cargo.toml`. A fix that has landed in Raikiri but not in that
+revision is listed as a gap until the pin is updated.
+
+## Feature parity by engine
+
+Rows marked **yes** in the *Required* column must be Supported or an
+Intentional difference in Raikiri before Raikiri can become the default
+engine.
+
+| Feature | Required | Blitz | Raikiri | Notes |
+|---|---|---|---|---|
+| GCPM: margin boxes, `counter(page)` / `counter(pages)` | yes | Supported | Partial | Raikiri draws margin-box backgrounds, solid borders and text, but not text decorations inside margin boxes, which Blitz lays out like page content. (Raikiri also does not yet draw vertical-writing text in margin boxes; Blitz has no vertical writing at all.) Counters other than `page` / `pages` resolve to `0` in both engines (see [Counters in `@page` margin boxes](#counters-in-page-margin-boxes)). |
+| GCPM: running elements (`position: running()` / `element()`) | yes | Partial | Supported | Blitz also paints the running element in the page body; Raikiri shows it only in the margin box (see [Intentional differences](#intentional-differences)). |
+| GCPM: named strings (`string-set` / `string()`) | yes | Partial | Partial | Blitz does not accept `counter()` in `string-set`. At the pinned revision Raikiri shows the document's last `string-set` value on every page instead of the value for each page; fixed in Raikiri, pending a pin update. |
+| GCPM: `target-counter()` / `leader()` tables of contents | yes | Supported | Supported | |
+| GCPM: page selectors (`:first`, `:left`, `:right`) and named pages | yes | Partial | Supported | Blitz places `:right` page margin boxes incorrectly (see [Intentional differences](#intentional-differences)). |
+| PDF bookmarks (outline from headings, `bookmark-level` / `bookmark-label`) | yes | Supported | Supported | Raikiri also honours `bookmark-state`; Blitz ignores it (see [Intentional differences](#intentional-differences)). Raikiri does not resolve page counters in bookmark labels. |
+| Links (`<a href>` annotations, internal destinations) | yes | Supported | Supported | |
+| Tagged PDF / PDF/UA-1 | yes | Supported | Supported | Both engines use the same HTML-to-structure mapping (`fulgur_core::tagging`). |
+| Images (`<img>`, `url()` backgrounds) | yes | Supported | Supported | Blitz: PNG / JPEG / GIF. Raikiri: PNG / JPEG verified; its image resolver also decodes GIF and WebP. |
+| SVG vector rendering (inline SVG) | yes | Supported | Supported | Raikiri draws inline SVG as PDF vector content and falls back to Krilla SVG for masks, patterns and other content outside its scene model. |
+| Fonts (bundled TTF / OTF / TTC / WOFF2, system fallback) | yes | Supported | Supported | Both engines register every face of a TTC / OTC collection. Both start from `sans-serif` when the document sets no `font-family`. |
+| Shadows (`box-shadow`, `text-shadow`) | yes | Partial | Supported | Blitz skips `inset` box shadows, does not paint shadows on generic inline-level boxes, and does not paint `text-shadow` (see [`box-shadow`](#box-shadow-v045)). Neither engine draws shadows in page-margin boxes. |
+| `transform` | yes | Supported | Supported | |
+| Gradients (linear, radial, conic, repeating) | yes | Supported | Partial | Gradient background tiling (`background-size` / `-position` / `-repeat`) matches Blitz. At the pinned revision Raikiri drops a gradient that has a color transition hint; fixed in Raikiri, pending a pin update. |
+| Table header repeat across pages | yes | Supported | Supported | Raikiri also repeats headers over anonymous rows and cells. Repeating `table-footer-group` has landed in Raikiri after the pinned revision. |
+| Multi-column layout (`column-count`, `column-width`, `column-span`, `column-rule`) | yes | Supported | Supported | |
+| Pagination (`break-*`, orphans / widows, `@page` size and margins) | yes | Supported | Supported | |
+| Templates (`render_template`, MiniJinja + JSON) | no | Supported | Unsupported | Not yet wired to the Raikiri engine. |
+| Batch rendering (`render_batch`) and `Engine::layout` | no | Supported | Unsupported | Not yet wired to the Raikiri engine. |
+| Streaming (paint each page while the input is still being read) | no | Unsupported | Supported | Raikiri only (`fulgur_raikiri::render_streaming`, `fulgur-dev --stream`). See the `fulgur-raikiri` README for its limits. |
+
+## Intentional differences
+
+Places where the engines differ on purpose: features Blitz does not have,
+Blitz behaviour that Raikiri does not reproduce, and deliberate departures
+from a specification that both engines share.
+
+| Area | Blitz | Raikiri | Why |
+|---|---|---|---|
+| [Document counters in `@page` margin boxes](#counters-in-page-margin-boxes) | Resolves to `0` | Resolves to `0` | Deliberate difference from CSS Paged Media 3 §6.1, shared by both engines and Chromium, so switching engines does not change the output. |
+| Running elements | Paints the element in the page body as well as in the margin box | Shows it only in the margin box | Blitz bug: CSS GCPM 3 removes a running element from the normal flow. Raikiri does not reproduce it. |
+| `@page :right` margin boxes | Places them incorrectly; on the first page, `@top-right` content appears at the top left | Places them per CSS Paged Media 3 | Blitz bug that Raikiri does not reproduce. |
+| `bookmark-state` | Ignored; the outline always starts collapsed | `open` (the CSS GCPM 3 initial value) or `closed` per entry | Raikiri follows CSS GCPM 3. |
+| `box-shadow: inset` | Skipped with a warning | Painted inside the padding box | Feature Blitz does not have. |
+| `text-shadow` | Not painted | Painted | Feature Blitz does not have. |
+| Vertical writing (`writing-mode: vertical-rl` / `vertical-lr`) | Not supported | Supported in the page body; not yet drawn in page-margin boxes | Feature Blitz does not have. |
+| Ruby (`<ruby>` / `<rt>` annotations) | Not laid out as ruby | Laid out as ruby | Feature Blitz does not have. |
+
+Output differences that are still under investigation are not listed here.
+In the visual regression comparison of the two engines, for example, some
+multi-column fixtures and `svg/shapes.html` render differently in the two
+engines, with Raikiri's output closer to Chromium's; until the cause is
+known, those are not treated as intentional.
+
 ## Colors
 
 Supported:
@@ -47,7 +119,8 @@ Supported:
 - Negative `spread-radius` (corners clamp sharp per CSS spec)
 - Gaussian `blur-radius > 0` (gradient-based 9-slice approximation)
 
-Not yet supported:
+Not yet supported (Blitz engine; Raikiri paints both, see
+[Feature parity by engine](#feature-parity-by-engine)):
 
 - `inset` shadows: skipped with a `log::warn!` diagnostic.
 - `box-shadow` on inline-level elements: shadow drawing currently dispatches
