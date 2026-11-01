@@ -1,6 +1,6 @@
 [package]
 name = "fulgur"
-version = "0.40.0"
+version = "0.41.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -18,10 +18,10 @@ parallel = ["fulgur-blitz/parallel"]
 # The facade re-exports the Blitz backend and the backend-independent core.
 # Keep it free of layout logic of its own.
 [dependencies]
-fulgur-blitz = { version = "0.40.0", path = "../fulgur-blitz" }
+fulgur-blitz = { version = "0.41.0", path = "../fulgur-blitz" }
 
 [dev-dependencies]
-fulgur-core = { version = "0.40.0", path = "../fulgur-core" }
+fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
 tempfile = "3.27.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 toml = "1.1"
