@@ -106,7 +106,9 @@ fn wide_pdf_rule_obeys_the_owner_overflow_clip() {
 fn pdf_rule_covers_the_full_height_of_a_short_last_column() {
     compare(
         "<div class=mc>A<br>B<br>C<br>D</div>",
-        ".mc{height:60px;column-rule:2px solid red}",
+        // `column-fill: auto` fills the columns in turn, so the last one is
+        // short; the initial `balance` would even them out.
+        ".mc{height:60px;column-fill:auto;column-rule:2px solid red}",
         "<div style='position:absolute;left:49px;top:0;width:2px;height:60px;background:red'></div><div style='position:absolute;left:0;top:0'>A<br>B<br>C</div><div style='position:absolute;left:60px;top:0'>D</div>",
         "ABCD",
     );
