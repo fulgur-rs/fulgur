@@ -293,7 +293,7 @@ fn paragraph_bottom_margins_participate_in_balancing_in_pdf() {
     compare(
         "<div class=mc><p>A<br>B<br>C<br>D</p><p>E<br>F</p></div><p>G</p>",
         ".mc p{margin-bottom:8px}",
-        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:28px'>E<br>F</div><div style='position:absolute;left:0;top:76px'>G</div>",
+        "<div style='position:absolute;left:0;top:0'>A<br>B<br>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:28px'>E<br>F</div><div style='position:absolute;left:0;top:68px'>G</div>",
         "ABCDEFG",
     );
 }
@@ -303,7 +303,7 @@ fn adjoining_paragraph_margins_collapse_within_a_column_in_pdf() {
     compare(
         "<div class=mc><p>A<br>B</p><p>C<br>D</p><p>E<br>F</p></div><p>G</p>",
         ".mc p{margin-bottom:8px}.mc p+p{margin-top:12px}",
-        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:52px'>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:80px'>G</div>",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:52px'>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:76px'>G</div>",
         "ABCDEFG",
     );
 }
@@ -333,7 +333,7 @@ fn mid_column_paragraph_continuations_keep_wide_pdf_line_clips() {
     compare(
         "<div class=mc><p>ABCDEFGH<br>IJKLMNOP</p><p>QRSTUVWX<br>abcdefgh</p><p>ijklmnop<br>qrstuvwx</p></div><p>Y</p>",
         ".mc p{white-space:pre;overflow:hidden;margin-bottom:8px}.mc p+p{margin-top:12px}",
-        "<div style='position:absolute;left:0;top:0;width:40px;height:40px;white-space:pre;overflow:hidden'>ABCDEFGH<br>IJKLMNOP</div><div style='position:absolute;left:0;top:52px;width:40px;height:28px;white-space:pre;overflow:hidden'>QRSTUVWX</div><div style='position:absolute;left:60px;top:0;width:40px;height:20px;white-space:pre;overflow:hidden'>abcdefgh</div><div style='position:absolute;left:60px;top:32px;width:40px;height:40px;white-space:pre;overflow:hidden'>ijklmnop<br>qrstuvwx</div><div style='position:absolute;left:0;top:80px'>Y</div>",
+        "<div style='position:absolute;left:0;top:0;width:40px;height:40px;white-space:pre;overflow:hidden'>ABCDEFGH<br>IJKLMNOP</div><div style='position:absolute;left:0;top:52px;width:40px;height:24px;white-space:pre;overflow:hidden'>QRSTUVWX</div><div style='position:absolute;left:60px;top:0;width:40px;height:20px;white-space:pre;overflow:hidden'>abcdefgh</div><div style='position:absolute;left:60px;top:32px;width:40px;height:40px;white-space:pre;overflow:hidden'>ijklmnop<br>qrstuvwx</div><div style='position:absolute;left:0;top:76px'>Y</div>",
         "ABCDEFGHIJKLMNOPQRSTUVWXYabcdefghijklmnopqrstuvwx",
     );
 }
@@ -363,7 +363,7 @@ fn an_inline_background_moves_with_its_continuation_glyphs_in_pdf() {
     compare(
         "<div class=mc><p>A<br>B</p><p><span style='background:lime'>C<br>D</span></p><p>E<br>F</p></div><p>G</p>",
         ".mc p{margin-bottom:8px}.mc p+p{margin-top:12px}",
-        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:52px'><span style='background:lime'>C</span></div><div style='position:absolute;left:60px;top:0'><span style='background:lime'>D</span></div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:80px'>G</div>",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:52px'><span style='background:lime'>C</span></div><div style='position:absolute;left:60px;top:0'><span style='background:lime'>D</span></div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:76px'>G</div>",
         "ABCDEFG",
     );
 }
@@ -383,7 +383,7 @@ fn empty_paragraph_margin_chains_keep_both_signed_extrema_in_pdf() {
     compare(
         "<div class=mc><p>A<br>B</p><p class=empty></p><p class=later>C<br>D</p><p class=last>E<br>F</p></div><p>G</p>",
         ".mc p{margin-bottom:8px}.mc .empty{margin-top:12px;margin-bottom:-4px}.mc .later{margin-top:20px}.mc .last{margin-top:12px}",
-        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:56px'>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:80px'>G</div>",
+        "<div style='position:absolute;left:0;top:0'>A<br>B</div><div style='position:absolute;left:0;top:56px'>C</div><div style='position:absolute;left:60px;top:0'>D</div><div style='position:absolute;left:60px;top:32px'>E<br>F</div><div style='position:absolute;left:0;top:78px'>G</div>",
         "ABCDEFG",
     );
 }
@@ -405,7 +405,7 @@ fn a_nonfinal_background_fills_only_the_remaining_mid_column_extent_in_pdf() {
     compare(
         "<div class=mc><p>A<br>B</p><p style='background:lime'>C<br>D</p><p>E<br>F</p></div><p>G</p>",
         "body{color:transparent}.mc p{margin-bottom:8px}.mc p+p{margin-top:12px}",
-        "<div style='position:absolute;left:0;top:52px;width:40px;height:28px;background:lime'></div><div style='position:absolute;left:60px;top:0;width:40px;height:20px;background:lime'></div>",
+        "<div style='position:absolute;left:0;top:52px;width:40px;height:24px;background:lime'></div><div style='position:absolute;left:60px;top:0;width:40px;height:20px;background:lime'></div>",
         "",
     );
 }
