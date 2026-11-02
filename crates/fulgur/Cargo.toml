@@ -14,11 +14,20 @@ categories = ["text-processing", "command-line-utilities"]
 [features]
 ## Enable rayon-based thread parallelism in `Engine::render_batch`.
 parallel = ["fulgur-blitz/parallel"]
+## Make the Raikiri layout backend available through `Backend::Raikiri`.
+raikiri = ["dep:fulgur-raikiri", "dep:fontique"]
 
 # The facade re-exports the Blitz backend and the backend-independent core.
 # Keep it free of layout logic of its own.
 [dependencies]
 fulgur-blitz = { version = "0.41.0", path = "../fulgur-blitz" }
+fulgur-raikiri = { version = "0.41.0", path = "../fulgur-raikiri", optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+# Same pin as fulgur-dev: Blitz enables dynamic loading in the shared
+# fontconfig-sys dependency, so Raikiri's newer font stack must select the
+# matching API when both backends link.
+fontique = { version = "0.11.1", default-features = false, features = ["fontconfig-dlopen"], optional = true }
 
 [dev-dependencies]
 fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
