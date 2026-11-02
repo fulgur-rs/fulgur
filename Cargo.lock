@@ -1196,8 +1196,10 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 name = "fulgur"
 version = "0.41.0"
 dependencies = [
+ "fontique 0.11.1",
  "fulgur-blitz",
  "fulgur-core",
+ "fulgur-raikiri",
  "image",
  "krilla",
  "lopdf",

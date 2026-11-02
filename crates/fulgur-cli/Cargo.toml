@@ -15,6 +15,9 @@ categories = ["command-line-utilities"]
 name = "fulgur"
 path = "src/main.rs"
 
+[features]
+raikiri = ["fulgur/raikiri"]
+
 [dependencies]
 fulgur = { version = "0.41.0", path = "../fulgur" }
 clap = { version = "4", features = ["derive"] }

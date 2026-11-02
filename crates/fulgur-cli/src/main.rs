@@ -1,11 +1,22 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use fulgur::asset::AssetBundle;
 use fulgur::config::{Margin, PageSize};
 use fulgur::engine::Engine;
+use fulgur::{Backend, EngineExt};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 mod plugin;
+
+/// Layout engine selectable with `fulgur render --engine`.
+///
+/// Both values exist in every build so the flag always parses; selecting
+/// `raikiri` in a build without the feature is rejected at run time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum EngineChoice {
+    Blitz,
+    Raikiri,
+}
 
 /// Forwards `log::warn!` / `log::error!` from `fulgur` (e.g. the unknown
 /// CSS page-size keyword diagnostic in `gcpm::page_settings`) to stderr.
@@ -268,6 +279,10 @@ enum Commands {
         #[arg(long = "data", short = 'd')]
         data: Option<PathBuf>,
 
+        /// Layout engine (raikiri requires a build with the raikiri feature and does not support --data)
+        #[arg(long, value_enum, default_value = "blitz")]
+        engine: EngineChoice,
+
         /// Generate PDF bookmarks (outline) from h1-h6 headings.
         #[arg(long)]
         bookmarks: bool,
@@ -508,10 +523,32 @@ fn main() {
             css_files,
             images,
             data,
+            engine: engine_choice,
             bookmarks,
             tagged,
             pdf_ua,
         } => {
+            // Validate the engine choice before reading input or rendering.
+            if engine_choice == EngineChoice::Raikiri {
+                if cfg!(not(feature = "raikiri")) {
+                    eprintln!(
+                        "Error: --engine raikiri is not available in this build; install with `cargo install fulgur-cli --features raikiri`"
+                    );
+                    std::process::exit(1);
+                }
+                if data.is_some() {
+                    eprintln!("Error: --data (template rendering) requires --engine blitz for now");
+                    std::process::exit(1);
+                }
+            }
+            let backend = match engine_choice {
+                EngineChoice::Blitz => Backend::Blitz,
+                #[cfg(feature = "raikiri")]
+                EngineChoice::Raikiri => Backend::Raikiri,
+                #[cfg(not(feature = "raikiri"))]
+                EngineChoice::Raikiri => unreachable!("rejected above"),
+            };
+
             if stdin && data.as_ref().is_some_and(|p| p.as_os_str() == "-") {
                 eprintln!("Error: cannot use --stdin and --data - together (both read stdin)");
                 std::process::exit(1);
@@ -694,7 +731,7 @@ fn main() {
             let pdf = if data.is_some() {
                 engine.render_template()
             } else {
-                engine.render(&input_content)
+                engine.render_html_with(backend, &input_content)
             }
             .unwrap_or_else(|e| {
                 eprintln!("Error: {e}");
