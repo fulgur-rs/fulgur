@@ -27,7 +27,7 @@ on:
       - "crates/fulgur-wpt/**"
       # Engine selection: the `raikiri` feature of fulgur and fulgur-cli.
       - "crates/fulgur/Cargo.toml"
-      - "crates/fulgur/src/backend.rs"
+      - "crates/fulgur/src/**"
       - "crates/fulgur/tests/backend_selection.rs"
       - "crates/fulgur-cli/**"
       - "crates/fulgur-blitz/src/engine.rs"
@@ -55,7 +55,7 @@ on:
       - "crates/fulgur-wpt/**"
       # Engine selection: the `raikiri` feature of fulgur and fulgur-cli.
       - "crates/fulgur/Cargo.toml"
-      - "crates/fulgur/src/backend.rs"
+      - "crates/fulgur/src/**"
       - "crates/fulgur/tests/backend_selection.rs"
       - "crates/fulgur-cli/**"
       - "crates/fulgur-blitz/src/engine.rs"

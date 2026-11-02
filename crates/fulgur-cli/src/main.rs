@@ -279,7 +279,7 @@ enum Commands {
         #[arg(long = "data", short = 'd')]
         data: Option<PathBuf>,
 
-        /// Layout engine (raikiri requires a build with the raikiri feature)
+        /// Layout engine (raikiri requires a build with the raikiri feature and does not support --data)
         #[arg(long, value_enum, default_value = "blitz")]
         engine: EngineChoice,
 

@@ -189,8 +189,47 @@ mod raikiri {
         assert!(out.status.success(), "CLI failed: {stderr}");
         let bytes = std::fs::read(&pdf).unwrap();
         assert!(
-            String::from_utf8_lossy(&bytes).contains("/Image"),
+            String::from_utf8_lossy(&bytes).contains("/Subtype /Image"),
             "no image XObject in PDF"
+        );
+    }
+
+    #[test]
+    fn engine_raikiri_bookmarks_produce_outline() {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let dir = TempDir::new().expect("create temp dir");
+        let pdf = dir.path().join("out.pdf");
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fulgur"))
+            .current_dir(dir.path())
+            .args([
+                "render",
+                "--stdin",
+                "-o",
+                pdf.to_str().unwrap(),
+                "--engine",
+                "raikiri",
+                "--bookmarks",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn fulgur");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"<html><body><h1>Title</h1><p>a</p><h2>Sub</h2><p>b</p></body></html>")
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "CLI failed: {stderr}");
+        let bytes = std::fs::read(&pdf).unwrap();
+        assert!(
+            String::from_utf8_lossy(&bytes).contains("/Outlines"),
+            "no outline in PDF"
         );
     }
 }

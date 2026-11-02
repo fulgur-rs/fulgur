@@ -36,7 +36,9 @@ pub trait EngineExt: sealed::Sealed {
     ///   path, asset bundle and system-font setting. It refuses, with an
     ///   `Error::Other`, an engine that has a template registered (Raikiri
     ///   does not render templates yet) or custom serialize settings (Raikiri
-    ///   does not accept them). The template check comes first.
+    ///   does not accept them). The template check comes first. With
+    ///   `system_fonts(false)` and no bundled font, the Raikiri backend
+    ///   returns an error, while Blitz renders.
     fn render_html_with(&self, backend: Backend, html: &str) -> Result<Vec<u8>>;
 }
 

@@ -51,4 +51,17 @@ mod raikiri {
             "the Raikiri backend does not accept custom serialize settings; use Backend::Blitz"
         );
     }
+
+    #[test]
+    fn raikiri_reports_template_before_serialize_settings() {
+        let engine = Engine::builder()
+            .template("t.html", "<p>{{ x }}</p>")
+            .serialize_settings(Default::default())
+            .build();
+        let err = engine.render_html_with(Backend::Raikiri, HTML).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "the Raikiri backend does not render templates yet; use Backend::Blitz"
+        );
+    }
 }
