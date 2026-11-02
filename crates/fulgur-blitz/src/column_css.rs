@@ -2724,4 +2724,56 @@ mod tests {
             "the selector before a trailing comma must be returned"
         );
     }
+
+    // -------- parse_hsl_args: error paths (wrong token types) --------
+
+    /// Hue must be a `Number` token. When an `Ident` is supplied instead
+    /// (`hsl(blue, 50%, 50%)`), `parse_hsl_args` hits the `_ => return Err`
+    /// arm at the hue match (line 367). The declaration is silently dropped.
+    #[test]
+    fn parse_hsl_args_non_number_hue_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: hsl(blue, 50%, 50%);");
+        assert!(
+            props.rule.is_none(),
+            "non-number hue in hsl() must drop the declaration"
+        );
+    }
+
+    /// Saturation must be a `Percentage` token. When a bare number is supplied
+    /// (`hsl(120, 50, 50%)`), `parse_hsl_args` hits the `_ => return Err` arm
+    /// at the saturation match (line 372). The declaration is silently dropped.
+    #[test]
+    fn parse_hsl_args_non_percentage_saturation_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: hsl(120, 50, 50%);");
+        assert!(
+            props.rule.is_none(),
+            "non-percentage saturation in hsl() must drop the declaration"
+        );
+    }
+
+    /// Lightness must be a `Percentage` token. When a bare number is supplied
+    /// (`hsl(120, 50%, 50)`), `parse_hsl_args` hits the `_ => return Err` arm
+    /// at the lightness match (line 377). The declaration is silently dropped.
+    #[test]
+    fn parse_hsl_args_non_percentage_lightness_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: hsl(120, 50%, 50);");
+        assert!(
+            props.rule.is_none(),
+            "non-percentage lightness in hsl() must drop the declaration"
+        );
+    }
+
+    // -------- parse_rgb_channel: wrong token type --------
+
+    /// `parse_rgb_channel` accepts only `Number` or `Percentage` tokens.
+    /// Supplying an ident (`rgb(red, 0, 0)`) causes it to hit the `_ => Err`
+    /// arm (line 325). The declaration is silently dropped.
+    #[test]
+    fn parse_rgb_channel_wrong_token_type_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: rgb(red, 0, 0);");
+        assert!(
+            props.rule.is_none(),
+            "ident in rgb() channel position must drop the declaration"
+        );
+    }
 }
