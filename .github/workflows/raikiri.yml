@@ -25,6 +25,12 @@ on:
       - "crates/fulgur-raikiri/**"
       - "crates/fulgur-dev/**"
       - "crates/fulgur-wpt/**"
+      # Engine selection: the `raikiri` feature of fulgur and fulgur-cli.
+      - "crates/fulgur/Cargo.toml"
+      - "crates/fulgur/src/backend.rs"
+      - "crates/fulgur/tests/backend_selection.rs"
+      - "crates/fulgur-cli/**"
+      - "crates/fulgur-blitz/src/engine.rs"
       # Only the files that can break the fulgur-vrt `raikiri` feature build;
       # Blitz golden and fixture updates do not need this workflow.
       - "crates/fulgur-vrt/Cargo.toml"
@@ -47,6 +53,12 @@ on:
       - "crates/fulgur-raikiri/**"
       - "crates/fulgur-dev/**"
       - "crates/fulgur-wpt/**"
+      # Engine selection: the `raikiri` feature of fulgur and fulgur-cli.
+      - "crates/fulgur/Cargo.toml"
+      - "crates/fulgur/src/backend.rs"
+      - "crates/fulgur/tests/backend_selection.rs"
+      - "crates/fulgur-cli/**"
+      - "crates/fulgur-blitz/src/engine.rs"
       # Only the files that can break the fulgur-vrt `raikiri` feature build;
       # Blitz golden and fixture updates do not need this workflow.
       - "crates/fulgur-vrt/Cargo.toml"
@@ -122,7 +134,7 @@ jobs:
       - name: Rustfmt
         run: cargo fmt --check -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt
       - name: Clippy
-        run: cargo clippy -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt --features fulgur-wpt/raikiri,fulgur-vrt/raikiri --all-targets -- -D warnings
+        run: cargo clippy -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt -p fulgur -p fulgur-cli --features fulgur-wpt/raikiri,fulgur-vrt/raikiri,fulgur/raikiri,fulgur-cli/raikiri --all-targets -- -D warnings
       # Run the tests under coverage so Codecov patch coverage keeps working
       # on Raikiri PRs now that ci.yml excludes these crates. The upload is
       # flagged `raikiri` and carried forward (codecov.yml) on commits where
@@ -134,6 +146,10 @@ jobs:
           # fulgur-vrt unit tests only: vrt_test needs the pinned font set,
           # and ci.yml does not collect coverage for fulgur-vrt.
           cargo llvm-cov nextest -p fulgur-vrt --features fulgur-vrt/raikiri --lib --profile ci --no-report
+          # Engine selection tests, one invocation per package because each
+          # package owns only one of the two test targets.
+          cargo llvm-cov nextest -p fulgur --features fulgur/raikiri --test backend_selection --profile ci --no-report
+          cargo llvm-cov nextest -p fulgur-cli --features fulgur-cli/raikiri --test engine_cli --profile ci --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
