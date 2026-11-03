@@ -10556,4 +10556,140 @@ h2 { string-set: chapter-title content(text); }
             "store-only node (not in geom) must not produce a state entry"
         );
     }
+
+    // ── would_split_block_subtree ─────────────────────────────────────────────
+
+    /// `would_split_block_subtree` returns false immediately when called with
+    /// `depth >= MAX_DOM_DEPTH`, covering the early-return guard (line 1359).
+    #[test]
+    fn would_split_block_subtree_depth_guard_returns_false() {
+        let doc = parse(
+            "<html><body style=\"margin:0\"><div style=\"height:100px\"></div></body></html>",
+            600.0,
+        );
+        let body_id = super::find_body_id(&doc).expect("body must exist");
+        let result =
+            super::would_split_block_subtree(&doc, body_id, 100.0, 800.0, crate::MAX_DOM_DEPTH);
+        assert!(
+            !result,
+            "depth guard must short-circuit and return false at depth=MAX_DOM_DEPTH"
+        );
+    }
+
+    /// `would_split_block_subtree` returns true when a child's height exceeds
+    /// `page_h_px` even if it fits within `available_h`, exercising the
+    /// grandchild-oversized path (line 1411).
+    #[test]
+    fn would_split_block_subtree_child_taller_than_page_returns_true() {
+        let doc = parse(
+            "<html><body style=\"margin:0\"><div style=\"height:500px\"></div></body></html>",
+            600.0,
+        );
+        let body_id = super::find_body_id(&doc).expect("body must exist");
+        // page_h_px=100 < child_h≈500 → grandchild-oversized path returns true.
+        let result = super::would_split_block_subtree(&doc, body_id, 1000.0, 100.0, 0);
+        assert!(
+            result,
+            "child taller than page_h_px must cause would_split_block_subtree to return true"
+        );
+    }
+
+    // ── has_forced_break_below ────────────────────────────────────────────────
+
+    /// `has_forced_break_below` returns false when the given `node_id` is absent
+    /// from the document, covering the defensive None guard (line 1482).
+    #[test]
+    fn has_forced_break_below_missing_node_returns_false() {
+        let doc = parse("<html><body></body></html>", 600.0);
+        let table = crate::column_css::ColumnStyleTable::new();
+        // node_id 99999 does not exist in the small document.
+        let result = super::has_forced_break_below(&doc, 99999, Some(&table), 0);
+        assert!(
+            !result,
+            "has_forced_break_below must return false for a missing node_id"
+        );
+    }
+
+    // ── has_page_name_change_below ────────────────────────────────────────────
+
+    /// `has_page_name_change_below` returns false immediately when called with
+    /// `depth >= MAX_DOM_DEPTH`, covering the early-return guard (line 1528).
+    #[test]
+    fn has_page_name_change_below_depth_guard_returns_false() {
+        let doc = parse("<html><body></body></html>", 600.0);
+        let body_id = super::find_body_id(&doc).expect("body must exist");
+        let table = blitz_adapter::UsedPageNameTable::new();
+        let result =
+            super::has_page_name_change_below(&doc, body_id, Some(&table), crate::MAX_DOM_DEPTH);
+        assert!(
+            !result,
+            "depth guard must short-circuit and return false at depth=MAX_DOM_DEPTH"
+        );
+    }
+
+    // ── header_band_is_repeatable ─────────────────────────────────────────────
+
+    /// A repeating table header band with no forced breaks and no
+    /// `used_page_names` table is repeatable — `header_band_is_repeatable`
+    /// returns true (line 1469).
+    #[test]
+    fn header_band_is_repeatable_no_breaks_returns_true() {
+        let doc = parse(
+            "<html><body style=\"margin:0\">
+               <table><thead><tr><th style=\"height:30px\">H</th></tr></thead>
+               <tbody><tr><td style=\"height:50px\">B</td></tr></tbody></table>
+             </body></html>",
+            600.0,
+        );
+        let th_id =
+            find_node_by_local_name(&doc, "th").expect("fixture must contain a <th> element");
+        let header = super::RepeatingTableHeader {
+            table_id: 0,
+            header_cell_ids: vec![th_id],
+            body_cell_ids: vec![],
+            body_origin_px: 30.0,
+            band_height_px: 30.0,
+            first_body_lead_px: 10.0,
+        };
+        // No column styles, no page names → no forced breaks detected → repeatable.
+        let result = super::header_band_is_repeatable(&doc, &header, None, None, 0);
+        assert!(result, "header band with no breaks must be repeatable");
+    }
+
+    /// A repeating table header band whose header cell is marked with
+    /// `break-after: page` in the column-style table must be flagged as
+    /// non-repeatable — `header_band_is_repeatable` returns false (line 1461).
+    #[test]
+    fn header_band_is_repeatable_break_after_on_cell_returns_false() {
+        let doc = parse(
+            "<html><body style=\"margin:0\">
+               <table><thead><tr><th style=\"height:30px\">H</th></tr></thead>
+               <tbody><tr><td style=\"height:50px\">B</td></tr></tbody></table>
+             </body></html>",
+            600.0,
+        );
+        let th_id =
+            find_node_by_local_name(&doc, "th").expect("fixture must contain a <th> element");
+        let mut column_styles = crate::column_css::ColumnStyleTable::new();
+        column_styles.insert(
+            th_id,
+            crate::column_css::ColumnStyleProps {
+                break_after: Some(crate::draw_primitives::BreakAfter::Page),
+                ..Default::default()
+            },
+        );
+        let header = super::RepeatingTableHeader {
+            table_id: 0,
+            header_cell_ids: vec![th_id],
+            body_cell_ids: vec![],
+            body_origin_px: 30.0,
+            band_height_px: 30.0,
+            first_body_lead_px: 10.0,
+        };
+        let result = super::header_band_is_repeatable(&doc, &header, Some(&column_styles), None, 0);
+        assert!(
+            !result,
+            "header band with break-after: page on a header cell must not be repeatable"
+        );
+    }
 }
