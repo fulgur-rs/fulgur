@@ -10561,6 +10561,8 @@ h2 { string-set: chapter-title content(text); }
 
     /// `would_split_block_subtree` returns false immediately when called with
     /// `depth >= MAX_DOM_DEPTH`, covering the early-return guard (line 1359).
+    /// Uses `available_h=50 < child_h≈100` so that depth=0 returns true
+    /// (child overflows), confirming the depth guard is what makes it false.
     #[test]
     fn would_split_block_subtree_depth_guard_returns_false() {
         let doc = parse(
@@ -10568,10 +10570,14 @@ h2 { string-set: chapter-title content(text); }
             600.0,
         );
         let body_id = super::find_body_id(&doc).expect("body must exist");
-        let result =
-            super::would_split_block_subtree(&doc, body_id, 100.0, 800.0, crate::MAX_DOM_DEPTH);
+        // depth=0: available_h=50 < child_h≈100 → child overflows → true
         assert!(
-            !result,
+            super::would_split_block_subtree(&doc, body_id, 50.0, 800.0, 0),
+            "at depth=0, child overflowing available_h must return true"
+        );
+        // depth=MAX_DOM_DEPTH: depth guard fires first → false
+        assert!(
+            !super::would_split_block_subtree(&doc, body_id, 50.0, 800.0, crate::MAX_DOM_DEPTH),
             "depth guard must short-circuit and return false at depth=MAX_DOM_DEPTH"
         );
     }
@@ -10614,15 +10620,40 @@ h2 { string-set: chapter-title content(text); }
 
     /// `has_page_name_change_below` returns false immediately when called with
     /// `depth >= MAX_DOM_DEPTH`, covering the early-return guard (line 1528).
+    /// Uses two sibling divs with differing page names so depth=0 returns true
+    /// (page-name change detected), confirming the depth guard is what makes it false.
     #[test]
     fn has_page_name_change_below_depth_guard_returns_false() {
-        let doc = parse("<html><body></body></html>", 600.0);
+        let doc = parse(
+            "<html><body style=\"margin:0\"><div>A</div><div>B</div></body></html>",
+            600.0,
+        );
         let body_id = super::find_body_id(&doc).expect("body must exist");
-        let table = blitz_adapter::UsedPageNameTable::new();
-        let result =
-            super::has_page_name_change_below(&doc, body_id, Some(&table), crate::MAX_DOM_DEPTH);
+        // Collect element children of body to obtain stable node IDs at runtime.
+        let body_node = doc.get_node(body_id).expect("body node must exist");
+        let elem_children: Vec<usize> = body_node
+            .children
+            .iter()
+            .filter(|&&id| doc.get_node(id).and_then(|n| n.element_data()).is_some())
+            .copied()
+            .collect();
         assert!(
-            !result,
+            elem_children.len() >= 2,
+            "fixture must contain two div children"
+        );
+        let (div_a, div_b) = (elem_children[0], elem_children[1]);
+        // div_a ends on "page-a"; div_b starts on "page-b" → sibling names differ → change.
+        let mut table = blitz_adapter::UsedPageNameTable::new();
+        table.insert(div_a, (None, Some("page-a".to_string())));
+        table.insert(div_b, (Some("page-b".to_string()), None));
+        // depth=0: page-name change is detected → true
+        assert!(
+            super::has_page_name_change_below(&doc, body_id, Some(&table), 0),
+            "at depth=0, differing sibling page names must return true"
+        );
+        // depth=MAX_DOM_DEPTH: depth guard fires first → false
+        assert!(
+            !super::has_page_name_change_below(&doc, body_id, Some(&table), crate::MAX_DOM_DEPTH),
             "depth guard must short-circuit and return false at depth=MAX_DOM_DEPTH"
         );
     }
