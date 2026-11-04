@@ -2724,4 +2724,240 @@ mod tests {
             "the selector before a trailing comma must be returned"
         );
     }
+
+    // -------- parse_rgb_args: mid-channel and second-comma error paths --------
+
+    /// Cover the `?` on `let g = parse_rgb_channel(input)?` (line ~349).
+    /// The first channel and first comma are valid; the second channel is
+    /// an ident, so `parse_rgb_channel` returns `Err` and the `?` propagates it.
+    #[test]
+    fn parse_rgb_second_channel_ident_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: rgb(255, red, 0);");
+        assert!(
+            props.rule.is_none(),
+            "ident g-channel in rgb must drop the declaration"
+        );
+    }
+
+    /// Cover the `?` on `input.expect_comma()?` between g and b (line ~350).
+    /// g is successfully parsed but the second comma is absent (a space-separated
+    /// third token follows instead), so `expect_comma` returns `Err`.
+    #[test]
+    fn parse_rgb_missing_second_comma_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: rgb(255, 0 0);");
+        assert!(
+            props.rule.is_none(),
+            "missing comma before b-channel in rgb must drop the declaration"
+        );
+    }
+
+    /// Cover the `?` on `let b = parse_rgb_channel(input)?` (line ~351).
+    /// Both preceding channels and their commas are valid; the b slot receives
+    /// an ident, so `parse_rgb_channel` returns `Err`.
+    #[test]
+    fn parse_rgb_third_channel_ident_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: rgb(255, 0, red);");
+        assert!(
+            props.rule.is_none(),
+            "ident b-channel in rgb must drop the declaration"
+        );
+    }
+
+    // -------- parse_hsl_args: missing-comma and extra-token error paths --------
+
+    /// Cover the `?` on `input.expect_comma()?` after the hue (line ~369).
+    /// hue is a valid number; the first comma is absent (space-separated form
+    /// is CSS Color 4 and not supported here), so `expect_comma` returns `Err`.
+    #[test]
+    fn parse_hsl_missing_first_comma_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: hsl(0 100% 50%);");
+        assert!(
+            props.rule.is_none(),
+            "missing comma after hue in hsl must drop the declaration"
+        );
+    }
+
+    /// Cover the `?` on `input.expect_comma()?` after saturation (line ~374).
+    /// hue and saturation are valid; the second comma is absent.
+    #[test]
+    fn parse_hsl_missing_second_comma_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: hsl(0, 100% 50%);");
+        assert!(
+            props.rule.is_none(),
+            "missing comma after saturation in hsl must drop the declaration"
+        );
+    }
+
+    /// Cover the `?` on `input.expect_exhausted()?` in `parse_hsl_args` (line ~384).
+    /// All four arguments are valid, but a fifth token makes the input non-exhausted.
+    #[test]
+    fn parse_hsla_extra_token_after_alpha_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: hsla(0, 100%, 50%, 1 1);");
+        assert!(
+            props.rule.is_none(),
+            "extra token after alpha in hsla must drop the declaration"
+        );
+    }
+
+    // -------- Non-ident tokens for declarations that require an ident --------
+
+    /// `column-fill: 123` — `input.expect_ident()` sees a Number token and
+    /// returns `Err`; the `?` in `parse_column_fill_value` propagates it,
+    /// dropping the declaration silently (line ~453).
+    #[test]
+    fn parse_column_fill_number_token_drops_declaration() {
+        let props = parse_declaration_block("column-fill: 123;");
+        assert!(
+            props.fill.is_none(),
+            "non-ident token in column-fill must drop the declaration"
+        );
+    }
+
+    /// `break-inside: 123` — `input.expect_ident()` sees a Number token (line ~470).
+    #[test]
+    fn parse_break_inside_number_token_drops_declaration() {
+        let props = parse_declaration_block("break-inside: 123;");
+        assert!(
+            props.break_inside.is_none(),
+            "non-ident token in break-inside must drop the declaration"
+        );
+    }
+
+    /// `break-after: 123` — `input.expect_ident()` sees a Number token (line ~481).
+    #[test]
+    fn parse_break_after_number_token_drops_declaration() {
+        let props = parse_declaration_block("break-after: 123;");
+        assert!(
+            props.break_after.is_none(),
+            "non-ident token in break-after must drop the declaration"
+        );
+    }
+
+    /// `break-before: 123` — `input.expect_ident()` sees a Number token (line ~492).
+    #[test]
+    fn parse_break_before_number_token_drops_declaration() {
+        let props = parse_declaration_block("break-before: 123;");
+        assert!(
+            props.break_before.is_none(),
+            "non-ident token in break-before must drop the declaration"
+        );
+    }
+
+    // -------- parse_column_rule_shorthand: style slot skipped --------
+
+    /// When only width and color are provided (no style ident), the style slot
+    /// in `parse_column_rule_shorthand` stays `None`, exercising the false branch
+    /// of `if let Some(s) = style` (line ~737). The returned spec keeps the
+    /// default `ColumnRuleStyle::None`.
+    #[test]
+    fn column_rule_shorthand_width_and_color_only_style_defaults_to_none() {
+        let props = parse_declaration_block("column-rule: 2pt red;");
+        let rule = props.rule.expect("rule spec");
+        assert!(
+            (rule.width.to_f32() - 2.0).abs() < 0.01,
+            "width: {}",
+            rule.width.to_f32()
+        );
+        assert_eq!(rule.color, [255, 0, 0, 255], "color");
+        assert_eq!(
+            rule.style,
+            ColumnRuleStyle::None,
+            "style must default to None"
+        );
+    }
+
+    /// When the style slot is attempted with a hash-color token (`#ff0000`),
+    /// `input.expect_ident()` inside the style `try_parse` block returns `Err`
+    /// (line ~703); `try_parse` backtracks. The color branch then picks up `#ff0000`.
+    /// The returned spec has no style (None), confirming the `expect_ident ?` path.
+    #[test]
+    fn column_rule_shorthand_hash_color_skips_style_slot() {
+        let props = parse_declaration_block("column-rule: 1pt #ff0000;");
+        let rule = props.rule.expect("rule spec");
+        assert_eq!(rule.color, [255, 0, 0, 255], "color");
+        assert_eq!(
+            rule.style,
+            ColumnRuleStyle::None,
+            "style must be None when no ident is in that slot"
+        );
+    }
+
+    // -------- matches_compound: guard-clause edge cases --------
+
+    /// An empty `CompoundSelector` (no parts) must return false immediately
+    /// (line ~860), regardless of which node is tested.
+    #[test]
+    fn matches_compound_empty_parts_returns_false() {
+        let doc = build_doc("<html><body><div></div></body></html>");
+        let div_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .is_some_and(|e| e.name.local.as_ref() == "div")
+        })
+        .expect("div");
+        let div = doc.get_node(div_id).unwrap();
+
+        let empty_sel = CompoundSelector { parts: vec![] };
+        assert!(
+            !matches_compound(&empty_sel, div),
+            "empty CompoundSelector must not match any node"
+        );
+    }
+
+    /// A non-element node (text node) must return false immediately (line ~857)
+    /// because `node.element_data()` is None for text/comment nodes.
+    #[test]
+    fn matches_compound_non_element_node_returns_false() {
+        // `<body>text</body>` produces a text node child of body.
+        let doc = build_doc("<html><body>hello</body></html>");
+        let body_id = find_node_with(&doc, |n| {
+            n.element_data()
+                .is_some_and(|e| e.name.local.as_ref() == "body")
+        })
+        .expect("body");
+        let body = doc.get_node(body_id).unwrap();
+
+        // Find the first text-node child of body.
+        let text_node_id = body
+            .children
+            .iter()
+            .copied()
+            .find(|&id| doc.get_node(id).is_some_and(|n| n.element_data().is_none()))
+            .expect("text node child of body");
+        let text_node = doc.get_node(text_node_id).unwrap();
+
+        let sel = CompoundSelector {
+            parts: vec![SimpleSelector::Universal],
+        };
+        assert!(
+            !matches_compound(&sel, text_node),
+            "non-element node must not match any compound selector"
+        );
+    }
+
+    // -------- previous_element_sibling: root-element (no-parent) path --------
+
+    /// The root `<html>` element has no parent in the Blitz DOM, so
+    /// `node.parent?` in `previous_element_sibling` returns `None` immediately
+    /// (line ~922 first `?`), causing `previous_element_sibling` to return `None`.
+    /// `matches_complex` on the root element therefore acts as if there is no
+    /// preceding sibling.
+    #[test]
+    fn previous_element_sibling_root_has_no_sibling() {
+        let doc = build_doc("<html><body></body></html>");
+        let root = doc.root_element();
+
+        // A selector with a sibling constraint (`* + *`) must NOT match the
+        // root element because it has no preceding element sibling.
+        let universal = CompoundSelector {
+            parts: vec![SimpleSelector::Universal],
+        };
+        let sel = ComplexSelector {
+            subject: universal.clone(),
+            prev_sibling: Some(universal),
+        };
+        assert!(
+            !matches_complex(&sel, root, &doc),
+            "root element must not match a sibling-constrained selector"
+        );
+    }
 }
