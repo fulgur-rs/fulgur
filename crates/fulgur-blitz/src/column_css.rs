@@ -2724,4 +2724,250 @@ mod tests {
             "the selector before a trailing comma must be returned"
         );
     }
+
+    // -------- parse_length / parse_color: empty-input ?-operator paths --------
+
+    /// A shorthand with no value tokens: `is_exhausted()` at line 687 fires
+    /// immediately on the first loop iteration and breaks out. The function
+    /// skips all `try_parse` calls and returns `Some(ColumnRuleSpec::default())`.
+    /// Covers the early-break path at line 687–688.
+    #[test]
+    fn column_rule_shorthand_empty_value_uses_defaults() {
+        let props = parse_declaration_block("column-rule: ;");
+        let rule = props.rule.expect("empty shorthand produces a default spec");
+        assert_eq!(rule.style, ColumnRuleStyle::None);
+    }
+
+    /// An empty value for the longhand triggers `input.next()?` inside
+    /// parse_length directly, covering the EndOfInput error path at line 256.
+    #[test]
+    fn column_rule_width_empty_value_drops_declaration() {
+        let props = parse_declaration_block("column-rule-width: ;");
+        assert!(
+            props.rule.is_none(),
+            "empty width value must drop the declaration"
+        );
+    }
+
+    /// An empty value for the color longhand triggers `input.next()?` inside
+    /// parse_color (line 279) with no tokens available.
+    #[test]
+    fn column_rule_color_empty_value_drops_declaration() {
+        let props = parse_declaration_block("column-rule-color: ;");
+        assert!(
+            props.rule.is_none(),
+            "empty color value must drop the declaration"
+        );
+    }
+
+    // -------- parse_rgb_args: intermediate error paths --------
+
+    /// `rgb()` with no arguments: parse_rgb_channel is called with an empty
+    /// input (EndOfInput for the R slot), covering the `input.next()?`
+    /// error path at line 319.
+    #[test]
+    fn parse_rgb_no_channels_drops_color() {
+        let props = parse_declaration_block("column-rule-color: rgb();");
+        assert!(
+            props.rule.is_none(),
+            "rgb() with no channels must drop the color"
+        );
+    }
+
+    /// An ident in the G slot fails parse_rgb_channel, whose Err propagates
+    /// through the `?` at the G-channel call site in parse_rgb_args (line 349).
+    #[test]
+    fn parse_rgb_invalid_green_channel_drops_color() {
+        let props = parse_declaration_block("column-rule-color: rgb(0, foo, 0);");
+        assert!(
+            props.rule.is_none(),
+            "invalid G channel must drop the color"
+        );
+    }
+
+    /// A missing comma between G and B causes `expect_comma()?` to fail
+    /// (line 350), which propagates Err out of parse_rgb_args.
+    #[test]
+    fn parse_rgb_missing_comma_between_g_and_b_drops_color() {
+        let props = parse_declaration_block("column-rule-color: rgb(0, 0 0);");
+        assert!(
+            props.rule.is_none(),
+            "missing comma between G and B must drop the color"
+        );
+    }
+
+    /// An ident in the B slot fails parse_rgb_channel, covering the `?`
+    /// error path for the B-channel call site in parse_rgb_args (line 351).
+    #[test]
+    fn parse_rgb_invalid_blue_channel_drops_color() {
+        let props = parse_declaration_block("column-rule-color: rgb(0, 0, foo);");
+        assert!(
+            props.rule.is_none(),
+            "invalid B channel must drop the color"
+        );
+    }
+
+    /// `rgba(0, 0, 0,)` has a trailing comma with no alpha token. After the
+    /// comma is consumed `parse_alpha_value` is called with an exhausted input,
+    /// covering the `input.next()?` error path at line 332.
+    #[test]
+    fn parse_rgba_trailing_comma_no_alpha_drops_color() {
+        let props = parse_declaration_block("column-rule-color: rgba(0, 0, 0,);");
+        assert!(
+            props.rule.is_none(),
+            "trailing comma with no alpha must drop the color"
+        );
+    }
+
+    // -------- parse_hsl_args: intermediate error paths --------
+
+    /// `hsl()` with no arguments: `input.next()?` for the hue slot is called
+    /// with an empty input (line 365).
+    #[test]
+    fn parse_hsl_no_args_drops_color() {
+        let props = parse_declaration_block("column-rule-color: hsl();");
+        assert!(
+            props.rule.is_none(),
+            "hsl() with no args must drop the color"
+        );
+    }
+
+    /// Modern space-separated `hsl(0 100% 50%)` has no comma between hue and
+    /// saturation, causing `expect_comma()?` after the hue to fail (line 369).
+    #[test]
+    fn parse_hsl_missing_first_comma_drops_color() {
+        let props = parse_declaration_block("column-rule-color: hsl(0 100% 50%);");
+        assert!(
+            props.rule.is_none(),
+            "hsl without first comma must drop the color"
+        );
+    }
+
+    /// `hsl(0,)` supplies only the hue and a trailing comma. After that comma
+    /// the saturation slot sees empty input, covering `input.next()?` at line 370.
+    #[test]
+    fn parse_hsl_empty_saturation_drops_color() {
+        let props = parse_declaration_block("column-rule-color: hsl(0,);");
+        assert!(
+            props.rule.is_none(),
+            "hsl with empty saturation must drop the color"
+        );
+    }
+
+    /// `hsl(0, 100% 50%)` has no comma between saturation and lightness,
+    /// causing `expect_comma()?` after saturation to fail (line 374).
+    #[test]
+    fn parse_hsl_missing_second_comma_drops_color() {
+        let props = parse_declaration_block("column-rule-color: hsl(0, 100% 50%);");
+        assert!(
+            props.rule.is_none(),
+            "hsl without second comma must drop the color"
+        );
+    }
+
+    /// `hsl(0, 100%,)` supplies hue and saturation then a trailing comma.
+    /// The lightness slot sees empty input, covering `input.next()?` at line 375.
+    #[test]
+    fn parse_hsl_empty_lightness_drops_color() {
+        let props = parse_declaration_block("column-rule-color: hsl(0, 100%,);");
+        assert!(
+            props.rule.is_none(),
+            "hsl with empty lightness must drop the color"
+        );
+    }
+
+    /// `hsla(0, 100%, 50%,)` has a trailing comma with no alpha token. After
+    /// the comma is consumed `parse_alpha_value` receives empty input, covering
+    /// the `input.next()?` error path at line 384.
+    #[test]
+    fn parse_hsla_trailing_comma_no_alpha_drops_color() {
+        let props = parse_declaration_block("column-rule-color: hsla(0, 100%, 50%,);");
+        assert!(
+            props.rule.is_none(),
+            "hsla trailing comma with no alpha must drop the color"
+        );
+    }
+
+    // -------- parse_column_fill_value / parse_break_*_value: non-ident tokens --------
+
+    /// `column-fill: 42` supplies a Number token where an ident is required.
+    /// `input.expect_ident()?` fails (line 453), and the declaration is dropped.
+    #[test]
+    fn column_fill_number_token_drops_declaration() {
+        let props = parse_declaration_block("column-fill: 42;");
+        assert!(
+            props.fill.is_none(),
+            "number token for column-fill must be dropped"
+        );
+    }
+
+    /// `break-inside: 42` — expect_ident() fails (line 470).
+    #[test]
+    fn break_inside_number_token_drops_declaration() {
+        let props = parse_declaration_block("break-inside: 42;");
+        assert!(
+            props.break_inside.is_none(),
+            "number token for break-inside must be dropped"
+        );
+    }
+
+    /// `break-after: 42` — expect_ident() fails (line 481).
+    #[test]
+    fn break_after_number_token_drops_declaration() {
+        let props = parse_declaration_block("break-after: 42;");
+        assert!(
+            props.break_after.is_none(),
+            "number token for break-after must be dropped"
+        );
+    }
+
+    /// `break-before: 42` — expect_ident() fails (line 492).
+    #[test]
+    fn break_before_number_token_drops_declaration() {
+        let props = parse_declaration_block("break-before: 42;");
+        assert!(
+            props.break_before.is_none(),
+            "number token for break-before must be dropped"
+        );
+    }
+
+    // -------- column-rule shorthand: hash color without a style component --------
+
+    /// `column-rule: #0000ff` has only a color component (no width or style).
+    /// When the shorthand loop tries to parse the style it calls
+    /// `input.expect_ident()` on a Hash token, which fails and the `?`
+    /// propagates the error out of the try_parse closure (line 703).
+    /// Because no style was parsed the `if let Some(s) = style` body is never
+    /// entered, exercising the else-side of that guard (line 737 region).
+    #[test]
+    fn column_rule_shorthand_hash_color_no_style() {
+        // `#0000ff` starts with `0` (a digit), so cssparser tokenises it as
+        // Token::Hash (unrestricted), not IDHash. The IDHash | Hash or-pattern
+        // in parse_color handles it, but expect_ident() in the style branch fails.
+        let props = parse_declaration_block("column-rule: #0000ff;");
+        let rule = props.rule.expect("hash-color-only shorthand must succeed");
+        assert_eq!(rule.color, [0x00, 0x00, 0xff, 0xff]);
+        assert_eq!(
+            rule.style,
+            ColumnRuleStyle::None,
+            "default style when omitted"
+        );
+    }
+
+    // -------- parse_selector_list: Token::Hash (unrestricted) path --------
+
+    /// `#123` tokenises as Token::Hash (unrestricted) because `123` does not
+    /// form a valid CSS identifier (starts with a digit). The
+    /// `Token::IDHash(name) | Token::Hash(name)` or-pattern covers both
+    /// variants; this test exercises the Token::Hash arm.
+    #[test]
+    fn selector_hash_token_digit_start() {
+        let list = parse_selector_list("#123");
+        assert_eq!(list.len(), 1, "one selector must be returned");
+        assert_eq!(
+            list[0].subject.parts,
+            vec![SimpleSelector::Id("123".into())],
+            "digit-start hash must become an Id selector"
+        );
+    }
 }
