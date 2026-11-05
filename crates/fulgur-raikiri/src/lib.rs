@@ -5,11 +5,11 @@
 //! as a fallback.
 
 use fulgur_core::units::F32Units;
-use fulgur_core::{AssetBundle, Config, Error, Result};
+use fulgur_core::{AssetBundle, Config, Error, Margin, PageGeometry, PageLayout, PageSize, Result};
 pub use raikiri_html::SvgRendering;
 use raikiri_html::{
-    LayoutConfig, LayoutOptions, LayoutStatus, PageDefaults, RenderResources, layout,
-    parse_html_with_resources,
+    DocumentLayout, LayoutConfig, LayoutOptions, LayoutStatus, PageDefaults, RenderResources,
+    layout, parse_html_with_resources,
 };
 use raikiri_traits::PageBox;
 use std::borrow::Cow;
@@ -100,6 +100,75 @@ pub fn render_html_with_options(
     render_source(Source::Html { html, base_dir }, config, options)
 }
 
+/// Lay out an HTML string and report its pages, without painting a PDF.
+///
+/// The pages and their page boxes are the ones
+/// [`render_html_with_options`] paints with the same arguments: the page
+/// count and each page's `MediaBox` size and resolved margins, in PDF
+/// points. A page that `page-orientation` turns is reported before the
+/// turn: the PDF shows it through the page's `/Rotate` entry, which this
+/// summary does not carry.
+///
+/// # Errors
+/// Returns the configuration, metadata, input and layout errors
+/// [`render_html_with_options`] returns, including a layout that did not
+/// complete. Checks that need the painted document, such as the document
+/// language PDF/UA requires, are not made.
+pub fn page_layout_html_with_options(
+    html: &str,
+    base_dir: Option<&Path>,
+    config: &Config,
+    options: &RenderOptions<'_>,
+) -> Result<PageLayout> {
+    config.validate()?;
+    metadata::build(config, None, None)?;
+    with_layout(
+        Source::Html { html, base_dir },
+        config,
+        options,
+        LayoutConfig::default(),
+        |status, _resources, _collector, _document_url| Ok(page_layout(&completed(status)?)),
+    )
+}
+
+/// The page boxes of `document`, in PDF points.
+fn page_layout(document: &DocumentLayout) -> PageLayout {
+    let pt = |px: f32| px.as_px().in_pt().to_f32();
+    PageLayout::new(
+        document
+            .pages()
+            .map(|page| {
+                let geometry = page.geometry();
+                let (page_box, margins) = (geometry.page_box, geometry.margins);
+                PageGeometry::new(
+                    PageSize {
+                        width: pt(page_box.width),
+                        height: pt(page_box.height),
+                    },
+                    Margin {
+                        top: pt(margins.top),
+                        right: pt(margins.right),
+                        bottom: pt(margins.bottom),
+                        left: pt(margins.left),
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
+/// The document of a completed layout.
+fn completed(status: LayoutStatus) -> Result<DocumentLayout> {
+    // `LayoutStatus` is non-exhaustive; anything but a completed layout,
+    // including an abort, leaves no pages to draw.
+    let LayoutStatus::Completed(document) = status else {
+        return Err(Error::Layout(
+            "Raikiri layout was aborted or did not complete".into(),
+        ));
+    };
+    Ok(document)
+}
+
 fn render_source(
     source: Source<'_>,
     config: &Config,
@@ -167,13 +236,7 @@ fn draw(
     collector: bookmarks::BookmarkCollector,
     document_url: &url::Url,
 ) -> Result<Vec<u8>> {
-    // `LayoutStatus` is non-exhaustive; anything but a completed layout,
-    // including an abort, leaves no pages to draw.
-    let LayoutStatus::Completed(document) = status else {
-        return Err(Error::Layout(
-            "Raikiri layout was aborted or did not complete".into(),
-        ));
-    };
+    let document = completed(status)?;
     let want_bookmarks = config.effective_bookmarks();
     let bookmarks = if want_bookmarks {
         bookmarks::outline(&document, collector)

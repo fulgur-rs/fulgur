@@ -2127,3 +2127,77 @@ fn gradient_tile_sizes_resolve_against_the_positioning_area() {
         assert!(tiling_steps(&pdf).is_empty(), "{size}");
     }
 }
+
+/// The `MediaBox` width and height of every page of `pdf`, in order.
+fn pdf_page_sizes(pdf: &[u8]) -> Vec<(f32, f32)> {
+    let doc = lopdf::Document::load_mem(pdf).expect("a readable PDF");
+    doc.get_pages()
+        .values()
+        .map(|&id| {
+            let page = doc.get_dictionary(id).expect("a page dictionary");
+            let media_box = page
+                .get(b"MediaBox")
+                .and_then(lopdf::Object::as_array)
+                .expect("a MediaBox");
+            let n = |i: usize| media_box[i].as_float().expect("a number");
+            (n(2) - n(0), n(3) - n(1))
+        })
+        .collect()
+}
+
+#[test]
+fn page_layout_reports_the_pages_render_paints() {
+    let html = format!(
+        "<style>@page {{ size: 300px 200px; margin: 20px }} \
+         @page :first {{ size: 400px 300px; margin: 10px 30px }} \
+         body {{ margin:0 }} p {{ margin:0; height:30px }}</style>{}",
+        "<p>line</p>".repeat(20)
+    );
+    let config = Config::default();
+    let options = RenderOptions::default();
+    let layout = page_layout_html_with_options(&html, None, &config, &options).expect("a layout");
+    let pdf = render_html_with_options(&html, None, &config, &options).expect("PDF bytes");
+    let sizes = pdf_page_sizes(&pdf);
+    assert!(layout.page_count() >= 2, "needs several pages");
+    assert_eq!(layout.page_count(), sizes.len());
+    for (page, &(width, height)) in layout.pages.iter().zip(&sizes) {
+        assert_eq!((page.size.width, page.size.height), (width, height));
+    }
+    // 400 x 300 CSS px is 300 x 225 pt; 10px is 7.5pt and 30px is 22.5pt.
+    let first = layout.pages[0];
+    assert_eq!((first.size.width, first.size.height), (300.0, 225.0));
+    assert_eq!((first.margin.top, first.margin.left), (7.5, 22.5));
+    let second = layout.pages[1];
+    assert_eq!((second.size.width, second.size.height), (225.0, 150.0));
+    assert_eq!(second.margin.top, 15.0);
+}
+
+#[test]
+fn page_layout_uses_the_configured_page_size() {
+    let config = Config::builder().page_size(PageSize::A5).build();
+    let layout =
+        page_layout_html_with_options("<p>x</p>", None, &config, &RenderOptions::default())
+            .expect("a layout");
+    assert_eq!(layout.page_count(), 1);
+    let size = layout.pages[0].size;
+    assert!((size.width - PageSize::A5.width).abs() < 0.01, "{size:?}");
+    assert!((size.height - PageSize::A5.height).abs() < 0.01, "{size:?}");
+}
+
+#[test]
+fn page_layout_rejects_an_invalid_config() {
+    let mut config = Config::default();
+    config.page_size.width = f32::NAN;
+    assert!(
+        page_layout_html_with_options("<p>x</p>", None, &config, &RenderOptions::default())
+            .is_err()
+    );
+}
+
+#[test]
+fn page_layout_rejects_metadata_render_rejects() {
+    let config = Config::builder().creation_date("not a date").build();
+    let options = RenderOptions::default();
+    assert!(render_html_with_options("<p>x</p>", None, &config, &options).is_err());
+    assert!(page_layout_html_with_options("<p>x</p>", None, &config, &options).is_err());
+}

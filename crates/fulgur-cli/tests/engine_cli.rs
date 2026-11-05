@@ -97,31 +97,45 @@ mod raikiri {
     }
 
     #[test]
-    fn engine_raikiri_with_data_fails() {
+    fn engine_raikiri_with_data_renders_the_expanded_template() {
         let dir = TempDir::new().expect("create temp dir");
-        let html = dir.path().join("doc.html");
+        let template = dir.path().join("doc.html");
+        let expanded = dir.path().join("expanded.html");
         let data = dir.path().join("data.json");
-        let pdf = dir.path().join("doc.pdf");
-        std::fs::write(&html, HTML).unwrap();
-        std::fs::write(&data, "{}").unwrap();
+        let from_template = dir.path().join("template.pdf");
+        let from_expanded = dir.path().join("expanded.pdf");
+        std::fs::write(&template, "<h1>{{ title }}</h1><p>{{ body }}</p>").unwrap();
+        std::fs::write(&expanded, "<h1>Engine</h1><p>Hello</p>").unwrap();
+        std::fs::write(&data, r#"{"title": "Engine", "body": "Hello"}"#).unwrap();
 
-        let out = run_cli(&[
-            "render",
-            html.to_str().unwrap(),
-            "-o",
-            pdf.to_str().unwrap(),
-            "--engine",
-            "raikiri",
-            "--data",
-            data.to_str().unwrap(),
-        ]);
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            stderr.contains("--data (template rendering) requires --engine blitz for now"),
-            "stderr: {stderr}"
+        for (input, pdf, data) in [
+            (&template, &from_template, Some(&data)),
+            (&expanded, &from_expanded, None),
+        ] {
+            let mut args = vec![
+                "render",
+                input.to_str().unwrap(),
+                "-o",
+                pdf.to_str().unwrap(),
+                "--engine",
+                "raikiri",
+                "--creation-date",
+                "2020-01-01T00:00:00Z",
+            ];
+            if let Some(data) = data {
+                args.extend(["--data", data.to_str().unwrap()]);
+            }
+            let out = run_cli(&args);
+            assert!(
+                out.status.success(),
+                "CLI failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+        assert_eq!(
+            std::fs::read(&from_template).unwrap(),
+            std::fs::read(&from_expanded).unwrap()
         );
-        assert!(!pdf.exists());
     }
 
     #[test]

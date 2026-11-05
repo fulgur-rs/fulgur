@@ -20,12 +20,14 @@ pub mod config;
 pub mod error;
 pub mod image;
 pub mod inspect;
+pub mod layout;
 pub mod tagging;
 pub mod units;
 
 pub use asset::AssetBundle;
 pub use config::{Config, ConfigBuilder, Margin, PageSize};
 pub use error::{Error, Result};
+pub use layout::{PageGeometry, PageLayout};
 
 /// Upper bound on how many `/Parent` references [`inspect::resolve_page_resources`]
 /// will follow when looking up an inherited `Resources` dictionary on a PDF page.

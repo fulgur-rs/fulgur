@@ -860,6 +860,36 @@ impl Engine {
     /// rasterizer or OCR-label generator can consume [`LayoutOutput`] without
     /// pulling PDF serialization into core.
     pub fn layout(&self, html: &str) -> Result<LayoutOutput> {
+        let artifacts = self.final_layout_artifacts(html)?;
+        Ok(LayoutOutput {
+            drawables: artifacts.drawables,
+            geometry: artifacts.pagination_geometry,
+        })
+    }
+
+    /// Lay out `html` and report how many pages [`render`](Engine::render)
+    /// produces and the resolved page box of each.
+    ///
+    /// Each page's size and margins are resolved from the builder
+    /// configuration and the author's `@page` rules (including `:first`,
+    /// `:left` and `:right`) exactly as `render` resolves them, so the page
+    /// count and page sizes match the PDF. Sizes are in PDF points with the
+    /// orientation applied. Unlike [`layout`](Engine::layout), the result
+    /// does not depend on the layout backend. Checks made only when the PDF
+    /// is written, such as the document language `pdf_ua` requires, are not
+    /// made here.
+    pub fn page_layout(&self, html: &str) -> Result<crate::PageLayout> {
+        let artifacts = self.final_layout_artifacts(html)?;
+        Ok(crate::render::page_layout(
+            &artifacts.pagination_geometry,
+            &artifacts.gcpm.page_settings,
+            &self.config,
+            artifacts.drawables.root_dir_rtl,
+        ))
+    }
+
+    /// The artifacts of the last layout pass `render` runs for `html`.
+    fn final_layout_artifacts(&self, html: &str) -> Result<LayoutArtifacts> {
         // Mirror `render`'s 2-pass loop: pass 1 always runs; when it reports
         // `target-*` cross-references, pass 2 re-lays-out with the pass-1
         // AnchorMap so those resolve. Project the final artifacts once.
@@ -879,10 +909,7 @@ impl Engine {
         } else {
             pass1
         };
-        Ok(LayoutOutput {
-            drawables: artifacts.drawables,
-            geometry: artifacts.pagination_geometry,
-        })
+        Ok(artifacts)
     }
 
     /// Render a template with data to PDF bytes.
@@ -896,6 +923,15 @@ impl Engine {
     /// to `engine.render()` with no arguments will produce a compile error and must be
     /// updated to `engine.render_template()`.
     pub fn render_template(&self) -> Result<Vec<u8>> {
+        self.render(&self.expand_template()?)
+    }
+
+    /// Expand the template set via the builder with its data, without
+    /// rendering it.
+    ///
+    /// This is the HTML that [`render_template`](Engine::render_template)
+    /// renders. Returns an error if no template was set via the builder.
+    pub fn expand_template(&self) -> Result<String> {
         let (name, content) = self
             .template
             .as_ref()
@@ -904,8 +940,7 @@ impl Engine {
             .data
             .as_ref()
             .map_or_else(|| serde_json::json!({}), Clone::clone);
-        let html = crate::template::render_template(name, content, &data)?;
-        self.render(&html)
+        crate::template::render_template(name, content, &data)
     }
 
     /// Render multiple HTML strings to PDFs, sharing this engine's parsed fonts.
@@ -2252,5 +2287,77 @@ mod tests {
             .render(html)
             .expect("bookmarks + target-refs render should succeed");
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── page_layout and expand_template ───────────────────────────────────
+
+    /// A document of many paragraphs, long enough to fill several pages.
+    fn multi_page_html(head_css: &str) -> String {
+        let body: String = (0..120).map(|i| format!("<p>Paragraph {i}</p>")).collect();
+        format!(
+            "<!DOCTYPE html><html><head><style>{head_css}</style></head><body>{body}</body></html>"
+        )
+    }
+
+    /// The `MediaBox` width and height of every page of `pdf`, in order.
+    fn pdf_page_sizes(pdf: &[u8]) -> Vec<(f32, f32)> {
+        let doc = lopdf::Document::load_mem(pdf).expect("parse PDF");
+        doc.get_pages()
+            .values()
+            .map(|&id| {
+                let page = doc.get_dictionary(id).expect("page dictionary");
+                let media_box = page
+                    .get(b"MediaBox")
+                    .and_then(lopdf::Object::as_array)
+                    .expect("MediaBox");
+                let n = |i: usize| media_box[i].as_float().expect("number");
+                (n(2) - n(0), n(3) - n(1))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn page_layout_matches_rendered_pages() {
+        let html = multi_page_html(
+            "@page { size: A5; margin: 10mm } @page :first { size: A4; margin: 20mm }",
+        );
+        let engine = Engine::builder().build();
+        let layout = engine.page_layout(&html).expect("page_layout");
+        let pdf_sizes = pdf_page_sizes(&engine.render(&html).expect("render"));
+        assert!(layout.page_count() >= 2, "needs several pages");
+        assert_eq!(layout.page_count(), pdf_sizes.len());
+        for (page, (w, h)) in layout.pages.iter().zip(&pdf_sizes) {
+            assert!((page.size.width - w).abs() < 0.01, "{page:?} vs {w}x{h}");
+            assert!((page.size.height - h).abs() < 0.01, "{page:?} vs {w}x{h}");
+        }
+        let first = layout.pages[0];
+        let second = layout.pages[1];
+        assert!((first.size.width - PageSize::A4.width).abs() < 0.01);
+        assert!((second.size.width - PageSize::A5.width).abs() < 0.01);
+        assert!((first.margin.top - (20.0_f32 * 72.0 / 25.4)).abs() < 0.01);
+        assert!((second.margin.top - (10.0_f32 * 72.0 / 25.4)).abs() < 0.01);
+    }
+
+    #[test]
+    fn page_layout_applies_landscape() {
+        let engine = Engine::builder().landscape(true).build();
+        let layout = engine.page_layout("<p>x</p>").expect("page_layout");
+        assert_eq!(layout.page_count(), 1);
+        assert!((layout.pages[0].size.width - PageSize::A4.height).abs() < 0.01);
+    }
+
+    #[test]
+    fn expand_template_returns_the_html_render_template_renders() {
+        let engine = Engine::builder()
+            .template("t.html", "<p>{{ name }}</p>")
+            .data(serde_json::json!({ "name": "Ada" }))
+            .build();
+        assert_eq!(engine.expand_template().expect("expand"), "<p>Ada</p>");
+    }
+
+    #[test]
+    fn expand_template_without_template_errors() {
+        let err = Engine::builder().build().expand_template().unwrap_err();
+        assert!(matches!(err, crate::error::Error::Template(_)), "{err:?}");
     }
 }
