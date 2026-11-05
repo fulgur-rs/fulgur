@@ -1,5 +1,5 @@
 /// Page size in points (1 point = 1/72 inch)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageSize {
     pub width: f32,
     pub height: f32,
