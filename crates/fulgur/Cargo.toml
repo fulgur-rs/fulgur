@@ -13,7 +13,7 @@ categories = ["text-processing", "command-line-utilities"]
 
 [features]
 ## Enable rayon-based thread parallelism in `Engine::render_batch`.
-parallel = ["fulgur-blitz/parallel"]
+parallel = ["fulgur-blitz/parallel", "dep:rayon"]
 ## Make the Raikiri layout backend available through `Backend::Raikiri`.
 raikiri = ["dep:fulgur-raikiri", "dep:fontique"]
 
@@ -22,6 +22,7 @@ raikiri = ["dep:fulgur-raikiri", "dep:fontique"]
 [dependencies]
 fulgur-blitz = { version = "0.41.0", path = "../fulgur-blitz" }
 fulgur-raikiri = { version = "0.41.0", path = "../fulgur-raikiri", optional = true }
+rayon = { version = "1", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 # Same pin as fulgur-dev: Blitz enables dynamic loading in the shared

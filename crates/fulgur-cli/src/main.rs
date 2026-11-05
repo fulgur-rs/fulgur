@@ -279,7 +279,7 @@ enum Commands {
         #[arg(long = "data", short = 'd')]
         data: Option<PathBuf>,
 
-        /// Layout engine (raikiri requires a build with the raikiri feature and does not support --data)
+        /// Layout engine (raikiri requires a build with the raikiri feature)
         #[arg(long, value_enum, default_value = "blitz")]
         engine: EngineChoice,
 
@@ -536,10 +536,6 @@ fn main() {
                     );
                     std::process::exit(1);
                 }
-                if data.is_some() {
-                    eprintln!("Error: --data (template rendering) requires --engine blitz for now");
-                    std::process::exit(1);
-                }
             }
             let backend = match engine_choice {
                 EngineChoice::Blitz => Backend::Blitz,
@@ -729,7 +725,7 @@ fn main() {
             };
 
             let pdf = if data.is_some() {
-                engine.render_template()
+                engine.render_template_with(backend)
             } else {
                 engine.render_html_with(backend, &input_content)
             }

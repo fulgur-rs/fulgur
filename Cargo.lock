@@ -1204,6 +1204,7 @@ dependencies = [
  "krilla",
  "lopdf",
  "parley",
+ "rayon",
  "serde_json",
  "tempfile",
  "toml",
