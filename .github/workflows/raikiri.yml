@@ -29,6 +29,7 @@ on:
       - "crates/fulgur/Cargo.toml"
       - "crates/fulgur/src/**"
       - "crates/fulgur/tests/backend_selection.rs"
+      - "crates/fulgur/tests/raikiri_corpus_page_layout.rs"
       - "crates/fulgur-cli/**"
       - "crates/fulgur-blitz/src/engine.rs"
       # Only the files that can break the fulgur-vrt `raikiri` feature build;
@@ -57,6 +58,7 @@ on:
       - "crates/fulgur/Cargo.toml"
       - "crates/fulgur/src/**"
       - "crates/fulgur/tests/backend_selection.rs"
+      - "crates/fulgur/tests/raikiri_corpus_page_layout.rs"
       - "crates/fulgur-cli/**"
       - "crates/fulgur-blitz/src/engine.rs"
       # Only the files that can break the fulgur-vrt `raikiri` feature build;
@@ -134,7 +136,7 @@ jobs:
       - name: Rustfmt
         run: cargo fmt --check -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt
       - name: Clippy
-        run: cargo clippy -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt -p fulgur -p fulgur-cli --features fulgur-wpt/raikiri,fulgur-vrt/raikiri,fulgur/raikiri,fulgur-cli/raikiri --all-targets -- -D warnings
+        run: cargo clippy -p fulgur-raikiri -p fulgur-dev -p fulgur-wpt -p fulgur-vrt -p fulgur -p fulgur-cli --features fulgur-wpt/raikiri,fulgur-vrt/raikiri,fulgur/raikiri,fulgur/parallel,fulgur-cli/raikiri --all-targets -- -D warnings
       # Run the tests under coverage so Codecov patch coverage keeps working
       # on Raikiri PRs now that ci.yml excludes these crates. The upload is
       # flagged `raikiri` and carried forward (codecov.yml) on commits where
@@ -148,7 +150,7 @@ jobs:
           cargo llvm-cov nextest -p fulgur-vrt --features fulgur-vrt/raikiri --lib --profile ci --no-report
           # Engine selection tests, one invocation per package because each
           # package owns only one of the two test targets.
-          cargo llvm-cov nextest -p fulgur --features fulgur/raikiri --test backend_selection --profile ci --no-report
+          cargo llvm-cov nextest -p fulgur --features fulgur/raikiri,fulgur/parallel --test backend_selection --test raikiri_corpus_page_layout --profile ci --no-report
           cargo llvm-cov nextest -p fulgur-cli --features fulgur-cli/raikiri --test engine_cli --profile ci --no-report
           cargo llvm-cov report --lcov --output-path lcov.info
       - name: Upload coverage to Codecov

@@ -1,4 +1,4 @@
-use fulgur::{Backend, Engine, EngineExt, Error};
+use fulgur::{Backend, Engine, EngineExt};
 
 const HTML: &str = "<html><body><p>Hello</p></body></html>";
 
@@ -118,7 +118,7 @@ mod raikiri {
             .build()
             .render_template_with(Backend::Raikiri)
             .unwrap_err();
-        assert!(matches!(err, Error::Template(_)), "{err:?}");
+        assert!(matches!(err, fulgur::Error::Template(_)), "{err:?}");
     }
 
     #[test]

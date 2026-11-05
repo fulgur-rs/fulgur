@@ -529,13 +529,11 @@ fn main() {
             pdf_ua,
         } => {
             // Validate the engine choice before reading input or rendering.
-            if engine_choice == EngineChoice::Raikiri {
-                if cfg!(not(feature = "raikiri")) {
-                    eprintln!(
-                        "Error: --engine raikiri is not available in this build; install with `cargo install fulgur-cli --features raikiri`"
-                    );
-                    std::process::exit(1);
-                }
+            if engine_choice == EngineChoice::Raikiri && cfg!(not(feature = "raikiri")) {
+                eprintln!(
+                    "Error: --engine raikiri is not available in this build; install with `cargo install fulgur-cli --features raikiri`"
+                );
+                std::process::exit(1);
             }
             let backend = match engine_choice {
                 EngineChoice::Blitz => Backend::Blitz,
