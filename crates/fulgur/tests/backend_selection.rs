@@ -156,9 +156,9 @@ mod raikiri {
     }
 
     #[test]
-    fn raikiri_render_batch_isolates_a_failing_item() {
+    fn raikiri_render_batch_reports_each_failure() {
         // Without system fonts or a bundled font every Raikiri item fails,
-        // and each failure is reported in place.
+        // and each failure is reported in its own slot.
         let engine = Engine::builder().system_fonts(false).build();
         let batch = engine.render_batch_with(Backend::Raikiri, &[HTML, HTML]);
         assert_eq!(batch.len(), 2);

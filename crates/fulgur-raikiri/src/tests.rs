@@ -2193,3 +2193,11 @@ fn page_layout_rejects_an_invalid_config() {
             .is_err()
     );
 }
+
+#[test]
+fn page_layout_rejects_metadata_render_rejects() {
+    let config = Config::builder().creation_date("not a date").build();
+    let options = RenderOptions::default();
+    assert!(render_html_with_options("<p>x</p>", None, &config, &options).is_err());
+    assert!(page_layout_html_with_options("<p>x</p>", None, &config, &options).is_err());
+}

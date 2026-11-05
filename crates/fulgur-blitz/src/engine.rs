@@ -875,7 +875,9 @@ impl Engine {
     /// `:left` and `:right`) exactly as `render` resolves them, so the page
     /// count and page sizes match the PDF. Sizes are in PDF points with the
     /// orientation applied. Unlike [`layout`](Engine::layout), the result
-    /// does not depend on the layout backend.
+    /// does not depend on the layout backend. Checks made only when the PDF
+    /// is written, such as the document language `pdf_ua` requires, are not
+    /// made here.
     pub fn page_layout(&self, html: &str) -> Result<crate::PageLayout> {
         let artifacts = self.final_layout_artifacts(html)?;
         Ok(crate::render::page_layout(

@@ -104,12 +104,16 @@ pub fn render_html_with_options(
 ///
 /// The pages and their page boxes are the ones
 /// [`render_html_with_options`] paints with the same arguments: the page
-/// count and each page's size (orientation applied) and resolved margins,
-/// in PDF points.
+/// count and each page's `MediaBox` size and resolved margins, in PDF
+/// points. A page that `page-orientation` turns is reported before the
+/// turn: the PDF shows it through the page's `/Rotate` entry, which this
+/// summary does not carry.
 ///
 /// # Errors
-/// Returns the errors [`render_html_with_options`] returns before painting,
-/// including a layout that did not complete.
+/// Returns the configuration, metadata, input and layout errors
+/// [`render_html_with_options`] returns, including a layout that did not
+/// complete. Checks that need the painted document, such as the document
+/// language PDF/UA requires, are not made.
 pub fn page_layout_html_with_options(
     html: &str,
     base_dir: Option<&Path>,
@@ -117,6 +121,7 @@ pub fn page_layout_html_with_options(
     options: &RenderOptions<'_>,
 ) -> Result<PageLayout> {
     config.validate()?;
+    metadata::build(config, None, None)?;
     with_layout(
         Source::Html { html, base_dir },
         config,

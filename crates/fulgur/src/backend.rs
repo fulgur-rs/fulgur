@@ -72,15 +72,19 @@ pub trait EngineExt: sealed::Sealed {
     ) -> Vec<Result<Vec<u8>>>;
 
     /// Lays out `html` with the chosen backend and reports its pages: the
-    /// page count and each page's size (orientation applied) and resolved
-    /// margins, in PDF points.
+    /// page count and each page's size and resolved margins, in PDF points.
     ///
     /// The pages are the ones [`render_html_with`](Self::render_html_with)
-    /// produces with the same backend.
+    /// produces with the same backend, and each size is that page's
+    /// `MediaBox`. A page turned by `page-orientation` (Raikiri only) is
+    /// reported before the turn, which the PDF applies with `/Rotate`.
+    /// Checks that need the painted PDF, such as the document language
+    /// `pdf_ua` requires, are not made, so a document `render_html_with`
+    /// refuses for that reason still has a layout.
     ///
     /// * [`Backend::Blitz`] is equivalent to [`Engine::page_layout`].
-    /// * `Backend::Raikiri` lays out with the same inputs, and the same
-    ///   refusals, as `render_html_with`.
+    /// * `Backend::Raikiri` lays out with the same inputs, and refuses the
+    ///   same engine settings, as `render_html_with`.
     ///
     /// The Blitz-only [`Engine::layout`] has no Raikiri counterpart: its
     /// output carries the Blitz backend's own drawing data.

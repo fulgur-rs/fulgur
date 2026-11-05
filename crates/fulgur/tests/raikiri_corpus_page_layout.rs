@@ -66,7 +66,8 @@ fn assert_layout_matches_pdf(name: &str, backend: Backend, layout: &PageLayout, 
 fn page_layout_matches_the_rendered_pdf_over_the_vrt_corpus() {
     let files = html_files(&fixtures_dir());
     assert!(!files.is_empty(), "no fixtures found");
-    let mut checked = 0;
+    // Renders checked per backend, in `[Blitz, Raikiri]` order.
+    let mut checked = [0_usize; 2];
     let mut differing = Vec::new();
     for path in &files {
         let name = path
@@ -79,7 +80,7 @@ fn page_layout_matches_the_rendered_pdf_over_the_vrt_corpus() {
             .base_path(path.parent().expect("fixture dir"))
             .build();
         let mut counts = Vec::new();
-        for backend in [Backend::Blitz, Backend::Raikiri] {
+        for (slot, backend) in [Backend::Blitz, Backend::Raikiri].into_iter().enumerate() {
             // A fixture a backend cannot render, for example because of the
             // fonts of the host, says nothing about its page layout.
             let Ok(pdf) = engine.render_html_with(backend, &html) else {
@@ -90,7 +91,7 @@ fn page_layout_matches_the_rendered_pdf_over_the_vrt_corpus() {
                 .unwrap_or_else(|e| panic!("{name} ({backend:?}): page_layout failed: {e}"));
             assert_layout_matches_pdf(&name, backend, &layout, &pdf);
             counts.push(layout.page_count());
-            checked += 1;
+            checked[slot] += 1;
         }
         if let [blitz, raikiri] = counts[..]
             && blitz != raikiri
@@ -99,12 +100,22 @@ fn page_layout_matches_the_rendered_pdf_over_the_vrt_corpus() {
         }
     }
     eprintln!(
-        "checked {checked} renders over {} fixtures; page counts differ between backends on {}:",
+        "checked {} Blitz and {} Raikiri renders over {} fixtures; page counts differ between backends on {}:",
+        checked[0],
+        checked[1],
         files.len(),
         differing.len()
     );
     for line in &differing {
         eprintln!("  {line}");
     }
-    assert!(checked > 0);
+    // Most fixtures must render with each backend, so that neither backend
+    // is checked only vacuously.
+    for (count, backend) in checked.iter().zip(["Blitz", "Raikiri"]) {
+        assert!(
+            *count * 2 > files.len(),
+            "only {count} of {} fixtures rendered with {backend}",
+            files.len()
+        );
+    }
 }

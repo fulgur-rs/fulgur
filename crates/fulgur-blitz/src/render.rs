@@ -402,6 +402,18 @@ pub fn render_v2(
 /// renderer width, and body-link annotation clip rect — so a future
 /// change to how `resolved_margin` subtracts from `page_size` shifts
 /// all three together instead of leaving one behind.
+fn resolved_content_area(
+    page_size: crate::config::PageSize,
+    resolved_margin: crate::config::Margin,
+) -> crate::draw_primitives::Rect {
+    crate::draw_primitives::Rect {
+        x: resolved_margin.left.as_pt(),
+        y: resolved_margin.top.as_pt(),
+        width: (page_size.width - resolved_margin.left - resolved_margin.right).as_pt(),
+        height: (page_size.height - resolved_margin.top - resolved_margin.bottom).as_pt(),
+    }
+}
+
 /// The page box of page `page_num` (1-based) out of `page_count`, after the
 /// `@page` rules and the configuration are applied, with the orientation
 /// applied to the size. `render_v2` paints each page at this size, and
@@ -439,18 +451,6 @@ pub(crate) fn page_layout(
             })
             .collect(),
     )
-}
-
-fn resolved_content_area(
-    page_size: crate::config::PageSize,
-    resolved_margin: crate::config::Margin,
-) -> crate::draw_primitives::Rect {
-    crate::draw_primitives::Rect {
-        x: resolved_margin.left.as_pt(),
-        y: resolved_margin.top.as_pt(),
-        width: (page_size.width - resolved_margin.left - resolved_margin.right).as_pt(),
-        height: (page_size.height - resolved_margin.top - resolved_margin.bottom).as_pt(),
-    }
 }
 
 /// - `transformed_descendants`: every node listed in some
