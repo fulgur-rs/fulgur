@@ -61,7 +61,10 @@ pub trait EngineExt: sealed::Sealed {
     ///   [`render_html_with`](Self::render_html_with) does.
     ///
     /// With the `parallel` feature, items run concurrently on rayon's global
-    /// thread pool with either backend; without it they run in order.
+    /// thread pool with either backend; without it they run in order. The
+    /// Raikiri backend loads system fonts once per process and shares them
+    /// between items, but builds the collection of the bundled fonts for
+    /// each item.
     fn render_batch_with<S: AsRef<str> + Sync>(
         &self,
         backend: Backend,
