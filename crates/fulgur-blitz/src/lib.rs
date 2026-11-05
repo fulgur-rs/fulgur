@@ -311,7 +311,7 @@ pub(crate) const MAX_STRING_SET_STORE_BYTES: usize = 8 * 1024 * 1024;
 /// so only adversarial multi-item lists are clipped.
 pub(crate) const MAX_RESOLVED_CONTENT_BYTES: usize = 1024 * 1024;
 
-pub use fulgur_core::{asset, config, error, image, inspect, units};
+pub use fulgur_core::{asset, config, error, image, inspect, layout, units};
 
 pub mod background;
 pub mod blitz_adapter;
@@ -342,6 +342,7 @@ pub use asset::AssetBundle;
 pub use config::{Config, ConfigBuilder, Margin, PageSize};
 pub use engine::{Engine, EngineBuilder, LayoutOutput};
 pub use error::{Error, Result};
+pub use layout::{PageGeometry, PageLayout};
 pub use outline::build_outline;
 
 /// Convert HTML to PDF with default settings.

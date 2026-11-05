@@ -184,19 +184,17 @@ pub fn render_v2(
         // Pass the full `gcpm.page_settings` (including selector
         // rules: `:first`, `:left`, `:right`) so per-page overrides
         // fire identically to the v1 GCPM path.
-        let (resolved_size, resolved_margin, resolved_landscape) =
-            crate::gcpm::page_settings::resolve_page_settings(
-                &gcpm.page_settings,
-                page_num,
-                page_count,
-                config,
-                drawables.root_dir_rtl,
-            );
-        let page_size = if resolved_landscape {
-            resolved_size.landscape()
-        } else {
-            resolved_size
-        };
+        let crate::PageGeometry {
+            size: page_size,
+            margin: resolved_margin,
+            ..
+        } = resolved_page_geometry(
+            &gcpm.page_settings,
+            page_num,
+            page_count,
+            config,
+            drawables.root_dir_rtl,
+        );
         let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
             .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
         let content_area = resolved_content_area(page_size, resolved_margin);
@@ -404,6 +402,45 @@ pub fn render_v2(
 /// renderer width, and body-link annotation clip rect — so a future
 /// change to how `resolved_margin` subtracts from `page_size` shifts
 /// all three together instead of leaving one behind.
+/// The page box of page `page_num` (1-based) out of `page_count`, after the
+/// `@page` rules and the configuration are applied, with the orientation
+/// applied to the size. `render_v2` paints each page at this size, and
+/// [`page_layout`] reports it, so both read it from here.
+pub(crate) fn resolved_page_geometry(
+    rules: &[crate::gcpm::PageSettingsRule],
+    page_num: usize,
+    page_count: usize,
+    config: &crate::config::Config,
+    root_dir_rtl: bool,
+) -> crate::PageGeometry {
+    let (size, margin, landscape) = crate::gcpm::page_settings::resolve_page_settings(
+        rules,
+        page_num,
+        page_count,
+        config,
+        root_dir_rtl,
+    );
+    let size = if landscape { size.landscape() } else { size };
+    crate::PageGeometry::new(size, margin)
+}
+
+/// The pages `render_v2` produces for `geometry`, with the page box of each.
+pub(crate) fn page_layout(
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    rules: &[crate::gcpm::PageSettingsRule],
+    config: &crate::config::Config,
+    root_dir_rtl: bool,
+) -> crate::PageLayout {
+    let page_count = crate::pagination_layout::implied_page_count(geometry).max(1) as usize;
+    crate::PageLayout::new(
+        (1..=page_count)
+            .map(|page_num| {
+                resolved_page_geometry(rules, page_num, page_count, config, root_dir_rtl)
+            })
+            .collect(),
+    )
+}
+
 fn resolved_content_area(
     page_size: crate::config::PageSize,
     resolved_margin: crate::config::Margin,
