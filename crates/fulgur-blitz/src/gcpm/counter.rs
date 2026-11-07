@@ -2412,6 +2412,10 @@ mod tests {
         assert!(!out.contains("<span style=\"flex:1;"));
         // The outer flex container is still assembled around the capped content.
         assert!(out.contains("<span style=\"display:flex"));
+        // The first String item IS in the output: the outer wrapper adds ~76 bytes
+        // on top of the parts bytes, so out.len() exceeds MAX_RESOLVED_CONTENT_BYTES
+        // only if the first item was actually written.
+        assert!(out.len() > crate::MAX_RESOLVED_CONTENT_BYTES);
     }
 
     // --- target-* no-href skip paths in string mode ---
