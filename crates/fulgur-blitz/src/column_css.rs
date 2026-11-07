@@ -2724,4 +2724,26 @@ mod tests {
             "the selector before a trailing comma must be returned"
         );
     }
+
+    // -------- parse_rgb_channel: EOF inside empty rgb() body --------
+
+    #[test]
+    fn parse_color_rgb_empty_body_drops_declaration() {
+        // `rgb()` has no tokens in its body: input.next()? returns EOF inside
+        // parse_rgb_channel (line 319:29 — the ? error-propagation path that
+        // is not hit by any existing test whose rgb() call has at least one token).
+        let props = parse_declaration_block("column-rule-color: rgb();");
+        assert!(props.rule.is_none());
+    }
+
+    // -------- parse_rgb_args: second expect_comma() failure --------
+
+    #[test]
+    fn parse_color_rgb_missing_second_comma_drops_declaration() {
+        // `rgb(255, 0 0)` has the first comma but not the second:
+        // expect_comma() fails after parsing g (line 350 — distinct from the
+        // first-comma failure tested by parse_rgb_no_comma_between_channels_drops_declaration).
+        let props = parse_declaration_block("column-rule-color: rgb(255, 0 0);");
+        assert!(props.rule.is_none());
+    }
 }
