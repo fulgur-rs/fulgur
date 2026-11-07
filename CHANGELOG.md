@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.42.0] - 2026-11-07
+
+<!-- release-notes:auto:begin -->
+<!-- Release notes generated using configuration in .github/release.yml at main -->
+
+### Bug Fixes
+* fix(release): install fontconfig headers before publishing by @mitsuru in https://github.com/fulgur-rs/fulgur/pull/943
+
+
+**Full Changelog**: https://github.com/fulgur-rs/fulgur/compare/v0.41.0...v0.42.0
+<!-- release-notes:auto:end -->
+
 ## [0.41.0] - 2026-11-01
 
 <!-- release-notes:auto:begin -->
