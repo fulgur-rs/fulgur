@@ -2408,7 +2408,9 @@ mod tests {
             None,
         );
         assert!(!out.contains("NEVER_APPENDED"));
-        // The flex container wraps the processed content in a flex <span>.
+        // The Leader item was also not output (cap break fires before the Leader).
+        assert!(!out.contains("<span style=\"flex:1;"));
+        // The outer flex container is still assembled around the capped content.
         assert!(out.contains("<span style=\"display:flex"));
     }
 
