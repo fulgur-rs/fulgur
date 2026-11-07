@@ -2340,4 +2340,124 @@ mod tests {
             "expected flex-mode counters() output to wrap value in <span>, got {result:?}"
         );
     }
+
+    // --- byte-cap break paths ---
+
+    #[test]
+    fn resolve_content_string_breaks_at_byte_cap() {
+        // After processing the first item the accumulated output reaches
+        // MAX_RESOLVED_CONTENT_BYTES; the second item must never be appended.
+        let at_cap = "x".repeat(crate::MAX_RESOLVED_CONTENT_BYTES);
+        let items = vec![
+            ContentItem::String(at_cap),
+            ContentItem::String("NEVER_APPENDED".to_string()),
+        ];
+        let out =
+            resolve_content_to_string_with_anchor(&items, &BTreeMap::new(), 1, 10, None, None);
+        assert_eq!(out.len(), crate::MAX_RESOLVED_CONTENT_BYTES);
+        assert!(!out.contains("NEVER_APPENDED"));
+    }
+
+    #[test]
+    fn resolve_content_html_flat_breaks_at_byte_cap() {
+        // Same cap in the HTML flat mode (no Leader → flat path).
+        let at_cap = "x".repeat(crate::MAX_RESOLVED_CONTENT_BYTES);
+        let items = vec![
+            ContentItem::String(at_cap),
+            ContentItem::String("NEVER_APPENDED".to_string()),
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            None,
+            None,
+        );
+        assert_eq!(out.len(), crate::MAX_RESOLVED_CONTENT_BYTES);
+        assert!(!out.contains("NEVER_APPENDED"));
+    }
+
+    #[test]
+    fn resolve_content_html_flex_breaks_at_byte_cap() {
+        // Flex mode is selected when a Leader item is present anywhere in the
+        // list. After the first String item the accumulated parts_bytes exceeds
+        // the cap; the Leader and the subsequent String are never processed.
+        let at_cap = "x".repeat(crate::MAX_RESOLVED_CONTENT_BYTES);
+        let items = vec![
+            ContentItem::String(at_cap),
+            ContentItem::Leader {
+                style: super::super::LeaderStyle::Dotted,
+            },
+            ContentItem::String("NEVER_APPENDED".to_string()),
+        ];
+        let store = RunningElementStore::new();
+        let out = resolve_content_to_html_with_anchor(
+            &items,
+            &store,
+            &[],
+            &BTreeMap::new(),
+            1,
+            10,
+            0,
+            None,
+            None,
+        );
+        assert!(!out.contains("NEVER_APPENDED"));
+        // The Leader item was also not output (cap break fires before the Leader).
+        assert!(!out.contains("<span style=\"flex:1;"));
+        // The outer flex container is still assembled around the capped content.
+        assert!(out.contains("<span style=\"display:flex"));
+        // The first String item IS in the output: the outer wrapper adds ~76 bytes
+        // on top of the parts bytes, so out.len() exceeds MAX_RESOLVED_CONTENT_BYTES
+        // only if the first item was actually written.
+        assert!(out.len() > crate::MAX_RESOLVED_CONTENT_BYTES);
+    }
+
+    // --- target-* no-href skip paths in string mode ---
+
+    #[test]
+    fn resolve_target_counters_non_href_attr_skips_in_string_mode() {
+        // TargetUrl::Attr("data-ref") is not "href"; target_href() returns None,
+        // so the item is skipped (continue) and the output is empty.
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetCounters {
+            url: TargetUrl::Attr("data-ref".into()),
+            counter_name: "section".into(),
+            separator: ".".into(),
+            style: CounterStyle::Decimal,
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn resolve_target_text_non_href_attr_skips_in_string_mode() {
+        // Same non-href attr skip for TargetText in string mode.
+        let map = make_anchor_map_for_target_tests();
+        let items = vec![ContentItem::TargetText {
+            url: TargetUrl::Attr("data-ref".into()),
+            kind: TargetTextKind::Content,
+        }];
+        let out = resolve_content_to_string_with_anchor(
+            &items,
+            &BTreeMap::new(),
+            1,
+            10,
+            Some(&map),
+            Some("#sec"),
+        );
+        assert_eq!(out, "");
+    }
 }
