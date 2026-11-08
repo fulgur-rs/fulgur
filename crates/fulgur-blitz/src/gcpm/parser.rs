@@ -4439,4 +4439,57 @@ mod tests {
             "bookmark-level: 0 must not produce a bookmark mapping"
         );
     }
+
+    // ── margin-right / margin-bottom longhand: parse failure (None branch) ───
+
+    #[test]
+    fn test_page_margin_right_unknown_unit_not_stored() {
+        // `margin-right: 5vh` — `vh` is not a supported @page unit, so
+        // `parse_page_margin_longhand_value` returns None and `self.margin.right`
+        // is never set.  With no other size/margin values, `page_settings` stays
+        // empty (the implicit-else branch of the `if let Some(v)` at the
+        // `margin-right` arm is the coverage target here).
+        assert_no_page_settings("@page { margin-right: 5vh; }");
+    }
+
+    #[test]
+    fn test_page_margin_bottom_unknown_unit_not_stored() {
+        // Same as above but for `margin-bottom`.  The implicit-else branch of
+        // the `if let Some(v) = parse_page_margin_longhand_value(input)` for the
+        // `margin-bottom` arm is the coverage target.
+        assert_no_page_settings("@page { margin-bottom: 3em; }");
+    }
+
+    // ── parse_policy_ident: `first - <non-except>` rollback ─────────────────
+
+    #[test]
+    fn test_string_policy_first_non_except_rollback() {
+        // `string(title, first - badword)`: the try_parse closure sees `-` and
+        // then `badword` (not "except"), so it returns Err and try_parse rolls
+        // the cursor back.  `has_except` becomes false, canonical stays "first",
+        // and the policy resolves to StringPolicy::First.  The Err branch inside
+        // the closure (the coverage target) is exercised while the outer parse
+        // succeeds.
+        let css = r#"@page { @top-center { content: string(title, first - badword); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::StringRef {
+                name: "title".to_string(),
+                policy: StringPolicy::First,
+            }],
+            "`first - badword` must roll back and resolve to StringPolicy::First"
+        );
+    }
+
+    // ── parse_page_size_value: empty input (line 305 `?` early-return) ───────
+
+    #[test]
+    fn test_page_size_empty_value_not_stored() {
+        // `@page { size: ; }` — the value block has no tokens, so
+        // `input.next().ok()?` in `parse_page_size_value` returns None
+        // immediately (the coverage target), and no PageSettingsRule is stored.
+        assert_no_page_settings("@page { size: ; }");
+    }
 }
