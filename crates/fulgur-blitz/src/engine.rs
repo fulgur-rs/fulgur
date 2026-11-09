@@ -17,6 +17,7 @@ pub struct Engine {
     data: Option<serde_json::Value>,
     serialize_settings: SerializeSettings,
     system_fonts: bool,
+    custom_serialize_settings: bool,
 }
 
 /// Renderer-agnostic layout result produced by [`Engine::layout`].
@@ -82,6 +83,7 @@ impl Engine {
             data: None,
             serialize_settings: SerializeSettings::default(),
             system_fonts: true,
+            custom_serialize_settings: false,
         }
     }
 
@@ -95,6 +97,21 @@ impl Engine {
 
     pub fn assets(&self) -> Option<&AssetBundle> {
         self.assets.as_ref()
+    }
+
+    /// Whether system fonts are loaded in addition to bundled fonts.
+    pub fn system_fonts(&self) -> bool {
+        self.system_fonts
+    }
+
+    /// Whether a template was set via [`EngineBuilder::template`].
+    pub fn has_template(&self) -> bool {
+        self.template.is_some()
+    }
+
+    /// Whether [`EngineBuilder::serialize_settings`] was called explicitly.
+    pub fn has_custom_serialize_settings(&self) -> bool {
+        self.custom_serialize_settings
     }
 
     /// Font byte-blobs registered on the [`AssetBundle`], or an empty slice
@@ -1335,6 +1352,7 @@ pub struct EngineBuilder {
     data: Option<serde_json::Value>,
     serialize_settings: SerializeSettings,
     system_fonts: bool,
+    custom_serialize_settings: bool,
 }
 
 impl EngineBuilder {
@@ -1440,6 +1458,7 @@ impl EngineBuilder {
 
     pub fn serialize_settings(mut self, settings: SerializeSettings) -> Self {
         self.serialize_settings = settings;
+        self.custom_serialize_settings = true;
         self
     }
 
@@ -1461,6 +1480,7 @@ impl EngineBuilder {
             data: self.data,
             serialize_settings: self.serialize_settings,
             system_fonts: self.system_fonts,
+            custom_serialize_settings: self.custom_serialize_settings,
         }
     }
 }
@@ -1916,6 +1936,26 @@ mod tests {
     }
 
     // ── Builder: system_fonts and serialize_settings ──────────────────────
+
+    #[test]
+    fn accessors_report_builder_defaults() {
+        let engine = Engine::builder().build();
+        assert!(engine.system_fonts());
+        assert!(!engine.has_template());
+        assert!(!engine.has_custom_serialize_settings());
+    }
+
+    #[test]
+    fn accessors_report_builder_settings() {
+        let engine = Engine::builder()
+            .system_fonts(false)
+            .template("t.html", "<p>{{ x }}</p>")
+            .serialize_settings(SerializeSettings::default())
+            .build();
+        assert!(!engine.system_fonts());
+        assert!(engine.has_template());
+        assert!(engine.has_custom_serialize_settings());
+    }
 
     #[test]
     fn system_fonts_false_still_produces_pdf() {
