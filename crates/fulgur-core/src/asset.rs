@@ -1961,4 +1961,77 @@ mod tests {
             "no image must be stored on I/O error"
         );
     }
+
+    // --- try_push_font: per-entry cap for TTF/OTF/Unknown pass-through ---
+    //
+    // `add_font_bytes` for WOFF2 is bounded by `decode_woff2`, which checks
+    // MAX_DECODED_FONT_BYTES internally before returning. The TTF/OTF/TTC/Unknown
+    // branches skip the decoder and pass the raw vec directly to
+    // `try_push_font`, which also checks MAX_DECODED_FONT_BYTES — but that
+    // per-entry guard for non-WOFF2 paths had no test of its own.
+
+    #[test]
+    fn add_font_bytes_ttf_passthrough_exceeds_per_entry_cap() {
+        let _guard = HEAVY_BUDGET_TEST_LOCK.lock().unwrap();
+        // A raw TTF byte vec larger than MAX_DECODED_FONT_BYTES must be
+        // rejected by try_push_font without being stored.
+        let mut data = vec![0x00u8, 0x01, 0x00, 0x00]; // TTF magic
+        data.resize(MAX_DECODED_FONT_BYTES + 1, 0);
+        let mut bundle = AssetBundle::new();
+        let err = bundle
+            .add_font_bytes(data)
+            .expect_err("TTF bytes exceeding the per-entry cap must be rejected");
+        assert!(
+            matches!(err, Error::Asset(ref msg) if msg.contains("limit")),
+            "expected Error::Asset containing \"limit\", got {err:?}"
+        );
+        assert!(
+            bundle.fonts.is_empty(),
+            "no font must be stored on rejection"
+        );
+    }
+
+    // --- woff2_declared_sfnt_size: truncated header path ---
+    //
+    // `woff2_declared_sfnt_size` checks that the data is at least 20 bytes
+    // before reading the totalSfntSize field (bytes 16..20). Every existing
+    // test supplies at least 20 bytes, leaving this guard uncovered.
+
+    #[test]
+    fn woff2_declared_sfnt_size_rejects_header_shorter_than_20_bytes() {
+        // 7 bytes: has the wOF2 magic but not enough bytes for the header.
+        let short = b"wOF2\x00\x00\x00";
+        let err = super::woff2_declared_sfnt_size(short)
+            .expect_err("truncated WOFF2 header must be rejected");
+        assert!(
+            matches!(err, Error::WoffDecode(ref msg) if msg.contains("truncated")),
+            "expected WoffDecode containing \"truncated\", got {err:?}"
+        );
+    }
+
+    // --- add_image: log::warn! format-arg covered when Warn level is active ---
+    //
+    // `log::warn!` only evaluates its format arguments when the runtime log
+    // level is at least Warn. Without a registered logger, `max_level()`
+    // returns Off and the format-arg expression (`key.len()` on the
+    // name-too-long rejection path) is never reached. This test raises the
+    // level temporarily so that LLVM counts the format-arg region as covered,
+    // then restores the previous level. The NopLogger swallows the message;
+    // no test output is produced.
+
+    #[test]
+    fn add_image_oversized_key_warn_format_arg_evaluated() {
+        let prev = log::max_level();
+        log::set_max_level(log::LevelFilter::Warn);
+        let mut bundle = AssetBundle::new();
+        // Key just above MAX_IMAGE_KEY_BYTES — triggers the warn path without
+        // needing a HEAVY_BUDGET_TEST_LOCK (the vec is only ~4 KiB).
+        let oversized_key = "k".repeat(MAX_IMAGE_KEY_BYTES + 1);
+        bundle.add_image(oversized_key, vec![1, 2, 3]);
+        log::set_max_level(prev);
+        assert!(
+            bundle.images.is_empty(),
+            "oversized key must be silently dropped"
+        );
+    }
 }
