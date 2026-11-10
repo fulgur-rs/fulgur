@@ -3913,4 +3913,149 @@ mod tests {
         );
         assert_eq!(result.pages, 1, "page must still be counted");
     }
+
+    // --- Tf operator with insufficient operands ---
+    //
+    // `if let (Some(name_obj), Some(size)) = (operands.first(), operands.get(1))`
+    // in the "Tf" match arm does not match when fewer than 2 operands are present.
+    // The closing brace of that if-let is the else path counted by LLVM.
+
+    /// `Tf` オペランド 0 個のときは if-let が不一致となり、フォント状態は更新されない。
+    /// テキストアイテムは生成されない。
+    #[test]
+    fn tf_no_operands_is_silently_skipped() {
+        // "BT Tf ET" — Tf has 0 operands on the stack.
+        let content = b"BT Tf ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "Tf with 0 operands must not produce text items"
+        );
+        assert_eq!(result.pages, 1);
+    }
+
+    /// `Tf` オペランド 1 個（フォント名のみ、サイズなし）のときも if-let が不一致。
+    #[test]
+    fn tf_one_operand_is_silently_skipped() {
+        // "/F1 Tf" — font name present but size operand missing.
+        let content = b"BT /F1 Tf ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert!(
+            result.text_items.is_empty(),
+            "Tf with 1 operand must not produce text items"
+        );
+        assert_eq!(result.pages, 1);
+    }
+
+    // --- resolve_page_resources: non-dictionary canonical object ---
+
+    /// ページの /Parent が辞書ではないオブジェクトを参照するとき、
+    /// `resolve_page_resources` は `_ => return None` (line 715) を通り
+    /// None を返す。ページはカウントされるがテキストアイテムは生成されない。
+    #[test]
+    fn page_parent_non_dict_skips_resource_resolution() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+
+        // A non-dictionary object: when resolve_page_resources follows /Parent
+        // it canonicalises to this id and finds Integer(99), not a Dictionary.
+        let non_dict_id = doc.add_object(Object::Integer(99));
+
+        let content_id = doc.add_object(Stream::new(dictionary! {}, b"BT ET\n".to_vec()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            // /Parent deliberately points at a non-dictionary object.
+            "Parent" => non_dict_id,
+            "Contents" => content_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+            // No /Resources key: first loop iteration finds no resources and
+            // falls through to the /Parent traversal, which then hits line 715.
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert_eq!(
+            result.pages, 1,
+            "page must be counted even without resources"
+        );
+        assert!(
+            result.text_items.is_empty(),
+            "page with non-dict parent must produce no text items"
+        );
+    }
+
+    /// ページの /Resources キーが辞書でないオブジェクトに解決されるとき、
+    /// `dereference` が Dictionary にマッチしないため内側の if-let (line 727) の
+    /// else パスを通り、resources は取得されない。
+    #[test]
+    fn page_resources_non_dict_skips_resource_resolution() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+
+        let content_id = doc.add_object(Stream::new(dictionary! {}, b"BT ET\n".to_vec()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+            // /Resources is an Integer — dereference returns Ok((None, Integer(42))),
+            // which does not match Dictionary, so the inner if-let else-path fires.
+            "Resources" => Object::Integer(42),
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert_eq!(
+            result.pages, 1,
+            "page must be counted even with non-dict resources"
+        );
+        assert!(
+            result.text_items.is_empty(),
+            "page with non-dict resources must produce no text items"
+        );
+    }
 }
