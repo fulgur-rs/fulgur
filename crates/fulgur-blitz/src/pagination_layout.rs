@@ -2573,7 +2573,14 @@ fn fragment_block_subtree_inner(
             }
         }
 
-        if let Some(mut target_y) = origin_pending_target_y.take() {
+        // A zero-height child keeps the re-anchor pending: it is placed at
+        // `cursor_y` below, not via the origin, and a box-less one
+        // (`display: none`, a running element) reports Taffy y=0 — taking
+        // the re-anchor there would place the next real child at its
+        // unbroken offset on the new page.
+        if child_h > 0.0
+            && let Some(mut target_y) = origin_pending_target_y.take()
+        {
             if let Some((row_top, row_bottom, same_row_y)) = origin_pending_same_row.take()
                 && this_top_in_parent < row_bottom - 0.5
             {
@@ -5206,6 +5213,32 @@ mod tests {
             vec![0, 0, 1],
             "body page 0, first child page 0, second child page 1, got {pages:?}"
         );
+    }
+
+    /// After a forced break inside a container, the first child on the new
+    /// page re-anchors the page's Taffy origin. A `display: none` sibling
+    /// right after the break has no box — Taffy reports it at y=0 — so if it
+    /// takes the re-anchor, the next real child is placed at its unbroken
+    /// offset on the new page and, once that offset passes a page height,
+    /// drawn off the paper.
+    #[test]
+    fn boxless_sibling_after_forced_break_does_not_take_page_origin() {
+        let html = r#"<html><body style="margin:0"><section>
+              <div style="height:60px"></div>
+              <div style="height:0; break-after:page"></div>
+              <div style="display:none"><div style="height:20px"></div></div>
+              <div id="lead" style="height:10px"></div>
+            </section></body></html>"#;
+        let mut doc = parse(html, 600.0);
+        let styles = blitz_adapter::extract_column_style_table(&doc, &[]);
+        let table = super::run_pass_with_break_styles(doc.deref_mut(), 100.0_f32.as_px(), &styles);
+        let lead = find_by_id(&doc, "lead").expect("lead");
+        let placed: Vec<(u32, f32)> = table[&lead]
+            .fragments
+            .iter()
+            .map(|f| (f.page_index, f.y.to_f32()))
+            .collect();
+        assert_eq!(placed, vec![(1, 0.0)], "lead must open page 1");
     }
 
     /// Find the first element node carrying `id="<id>"`.
