@@ -4492,4 +4492,73 @@ mod tests {
         // immediately (the coverage target), and no PageSettingsRule is stored.
         assert_no_page_settings("@page { size: ; }");
     }
+
+    // ── parse_counter_style: split-token hyphenated form (lines 965-966) ───────
+
+    #[test]
+    fn test_counter_style_upper_roman_split_token() {
+        // cssparser tokenises `upper-roman` (no spaces) as a single Ident, taking
+        // the else-branch at line 968. With spaces — `upper - roman` — it emits
+        // three separate tokens: Ident("upper"), Delim('-'), Ident("roman").
+        // Lines 965-966 in parse_counter_style handle that split form:
+        // try_parse(expect_delim('-')) consumes the `-`, expect_ident() yields
+        // "roman", and format!("{}-{}", ...) reconstructs "upper-roman" →
+        // CounterStyle::UpperRoman.
+        let css = r#"@page { @bottom-center { content: counter(chapter, upper - roman); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "chapter".into(),
+                style: CounterStyle::UpperRoman,
+            }],
+            "split-token `upper - roman` must reassemble to CounterStyle::UpperRoman"
+        );
+    }
+
+    #[test]
+    fn test_counter_style_lower_alpha_split_token() {
+        // Same as above but for `lower - alpha`. Exercises the same lines 965-966
+        // path with a different resolved CounterStyle variant (LowerAlpha).
+        let css = r#"@page { @bottom-center { content: counter(section, lower - alpha); } }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.margin_boxes.len(), 1);
+        assert_eq!(
+            ctx.margin_boxes[0].content,
+            vec![ContentItem::Counter {
+                name: "section".into(),
+                style: CounterStyle::LowerAlpha,
+            }],
+            "split-token `lower - alpha` must reassemble to CounterStyle::LowerAlpha"
+        );
+    }
+
+    // ── parse_string_set_value: break on error (line 896) ───────────────────────
+
+    #[test]
+    fn test_string_set_value_break_on_empty_content_function() {
+        // `string-set: chapter "intro" content()` — `content()` with no argument
+        // causes expect_ident() inside parse_nested_block to fail (EndOfInput).
+        // The Err propagates through the outer try_parse closure; result.is_err()
+        // triggers the `break` at line 896, cutting the loop short.  The "intro"
+        // literal was already pushed before the failing token was attempted, so
+        // the mapping survives with just that one value.
+        let css = r#"h1 { string-set: chapter "intro" content(); }"#;
+        let ctx = parse_gcpm(css);
+        assert_eq!(
+            ctx.string_set_mappings.len(),
+            1,
+            "one string-set mapping must survive"
+        );
+        assert_eq!(
+            ctx.string_set_mappings[0].name, "chapter",
+            "string-set name must be `chapter`"
+        );
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![StringSetValue::Literal("intro".into())],
+            "only the literal before the failing content() must be retained"
+        );
+    }
 }
