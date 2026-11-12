@@ -2213,4 +2213,66 @@ mod tests {
             .expect("bookmarks + target-refs render should succeed");
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // ── PDF/UA: 言語チェックと HTML lang フォールバック (engine.rs:791-799) ──
+
+    #[test]
+    fn pdf_ua_without_lang_returns_error() {
+        // PDF/UA-1 requires a document language. When neither Config::lang nor
+        // <html lang> is set the render must return Err before writing any PDF.
+        let result = Engine::builder()
+            .pdf_ua(true)
+            .build()
+            .render("<html><body><p>no lang attribute</p></body></html>");
+        assert!(result.is_err(), "pdf_ua without lang must return an error");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("language") || msg.contains("lang"),
+            "error message must mention language requirement, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn html_lang_overrides_config_none_in_non_pdfua_render() {
+        // When Config::lang is None and <html lang="fr"> is present, `lang`
+        // becomes Some("fr"), which != None, so the else branch at engine.rs:791
+        // creates Cow::Owned(Config { lang: Some("fr"), .. }).  The render must
+        // still produce a valid PDF.
+        let pdf = Engine::builder()
+            .build()
+            .render(r#"<html lang="fr"><body><p>bonjour</p></body></html>"#)
+            .expect("render with html lang should succeed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── 非推奨エイリアス: render_html / render_html_to_file (engine.rs:917-924) ─
+
+    #[test]
+    #[allow(deprecated)]
+    fn render_html_deprecated_alias_produces_pdf() {
+        // render_html() is a deprecated alias for render(); it must still work.
+        let engine = Engine::builder().build();
+        let pdf = engine
+            .render_html("<html><body><p>deprecated</p></body></html>")
+            .expect("render_html should succeed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn render_html_to_file_deprecated_alias_writes_pdf() {
+        // render_html_to_file() is a deprecated alias for render_file(); it must
+        // write a valid PDF bytes to the given path.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("out.pdf");
+        Engine::builder()
+            .build()
+            .render_html_to_file("<html><body><p>deprecated file</p></body></html>", &path)
+            .expect("render_html_to_file should succeed");
+        let bytes = std::fs::read(&path).expect("read written pdf");
+        assert!(
+            bytes.starts_with(b"%PDF"),
+            "written file must be a valid PDF"
+        );
+    }
 }
