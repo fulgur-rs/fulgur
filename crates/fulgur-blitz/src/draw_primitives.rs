@@ -3103,6 +3103,56 @@ mod dp_unit_tests {
         );
     }
 
+    #[test]
+    fn build_rounded_rect_path_zero_radii_produces_valid_path() {
+        // All corners have zero radius → no cubic_to calls, plain rectangle path.
+        // Covers the FALSE branch of each `if r[N][0] > 0.0 || r[N][1] > 0.0`
+        // condition (the skip path) and forces evaluation of the second `||` operand
+        // for every corner (since r[N][0] = 0.0 short-circuit is not taken).
+        let path = build_rounded_rect_path(0.0, 0.0, 20.0, 10.0, &[[0.0, 0.0]; 4]);
+        assert!(
+            path.is_some(),
+            "zero-radius rounded rect must produce a valid path"
+        );
+    }
+
+    // ── draw_block_border: uniform Solid without radius ───────────────────
+
+    #[test]
+    fn draw_block_border_uniform_solid_without_radius_smoke() {
+        // !has_radius && uniform_width && uniform_style && Solid (not Double ≥ 3)
+        // → the else sub-branch (stroke_inset_rect with a single solid stroke).
+        // No existing test covers this path; Double ≥ 3 is covered by
+        // draw_block_border_double_uniform_rect_smoke.
+        let style = BlockStyle {
+            border_color: [255, 0, 0, 255],
+            border_widths: [2.0, 2.0, 2.0, 2.0].map(|v| v.as_pt()),
+            border_styles: [BorderStyleValue::Solid; 4],
+            ..Default::default()
+        };
+        with_canvas_smoke(|canvas| {
+            draw_block_border(canvas, &style, 0.0, 0.0, 80.0, 80.0);
+        });
+    }
+
+    #[test]
+    fn draw_block_border_uniform_solid_degenerate_box_smoke() {
+        // Border-width (4 pt) exceeds box dimensions (1×1 pt): inset clamps the
+        // inner rect to 0×0, so build_rect_path returns None and
+        // stroke_inset_rect's `if let Some(path)` branch is NOT taken.
+        // Covers the None-return path in build_rect_path and the implicit
+        // false-arm of stroke_inset_rect's if-let.
+        let style = BlockStyle {
+            border_color: [0, 0, 0, 255],
+            border_widths: [4.0, 4.0, 4.0, 4.0].map(|v| v.as_pt()),
+            border_styles: [BorderStyleValue::Solid; 4],
+            ..Default::default()
+        };
+        with_canvas_smoke(|canvas| {
+            draw_block_border(canvas, &style, 0.0, 0.0, 1.0, 1.0);
+        });
+    }
+
     // ── draw_border_line: early-return guards ─────────────────────────────
 
     #[test]
