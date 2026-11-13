@@ -315,4 +315,127 @@ mod tests {
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "");
     }
+
+    // --- Direct format_filter unit tests ---
+    //
+    // These call format_filter directly (bypassing MiniJinja's template dispatch)
+    // to cover the "else" paths of inner if-let guards that are only reachable
+    // when the precision/width token is not a valid usize.  MiniJinja's indirect
+    // dispatch can obscure those paths from LLVM's region-level instrumentor.
+
+    #[test]
+    fn format_filter_direct_comma_nf_invalid_precision() {
+        // ",.xf": strip succeeds ("x" is the precision token) but "x".parse::<usize>()
+        // fails — exercises the else path of `if let Ok(prec)` in the ",.Nf" branch.
+        let v = minijinja::Value::from(1_000_i64);
+        assert_eq!(format_filter(&v, ",.xf"), "1000");
+    }
+
+    #[test]
+    fn format_filter_direct_comma_prefix_without_dot_f_suffix() {
+        // "," is a prefix but rest ("2f") does not start with '.' so the inner
+        // `if let Some(prec_str) = rest.strip_prefix('.')...` returns None.
+        // This exercises the else-path at line 63 (the closing `}` of that if-let).
+        let v = minijinja::Value::from(1_000_i64);
+        assert_eq!(format_filter(&v, ",2f"), "1000");
+    }
+
+    #[test]
+    fn format_filter_direct_dot_nf_invalid_precision() {
+        // ".xf": same pattern for the ".Nf" branch.
+        let v = minijinja::Value::from(1_000_i64);
+        assert_eq!(format_filter(&v, ".xf"), "1000");
+    }
+
+    #[test]
+    fn format_filter_direct_zero_pad_invalid_width() {
+        // "0xd": starts with '0' and ends with 'd', but "0x".parse::<usize>() fails —
+        // exercises the else path of `if let Ok(width)` in the "0Nd" branch.
+        let v = minijinja::Value::from(42_i64);
+        assert_eq!(format_filter(&v, "0xd"), "42");
+    }
+
+    #[test]
+    fn format_filter_direct_comma_nf_non_numeric_value() {
+        // ",.2f" with a non-numeric minijinja::Value: as_f64 is None.
+        // Exercises the else path of `if let Some(f) = as_f64` in the ",.Nf" branch
+        // via a direct call, ensuring LLVM tracks the branch without MiniJinja dispatch.
+        let v = minijinja::Value::from("hello");
+        assert_eq!(format_filter(&v, ",.2f"), "hello");
+    }
+
+    #[test]
+    fn format_filter_direct_dot_nf_non_numeric_value() {
+        // ".2f" with a non-numeric value: as_f64 is None.
+        let v = minijinja::Value::from("hello");
+        assert_eq!(format_filter(&v, ".2f"), "hello");
+    }
+
+    #[test]
+    fn format_filter_direct_zero_pad_non_integer_value() {
+        // "04d" with a float that is not a whole number: as_i64 is None.
+        // Exercises the else path of `if let Some(n) = as_i64` in the "0Nd" branch.
+        let v = minijinja::Value::from(1.5_f64);
+        assert_eq!(format_filter(&v, "04d"), "1.5");
+    }
+
+    #[test]
+    fn format_filter_direct_comma_non_numeric_value() {
+        // "," with a non-numeric value: both as_i64 and as_f64 are None,
+        // so the function returns value.to_string() unchanged.
+        let v = minijinja::Value::from("abc");
+        assert_eq!(format_filter(&v, ","), "abc");
+    }
+
+    #[test]
+    fn format_filter_direct_comma_integer_value() {
+        // "," with an integer: as_i64 is Some, returns comma-separated digits.
+        let v = minijinja::Value::from(1_234_567_i64);
+        assert_eq!(format_filter(&v, ","), "1,234,567");
+    }
+
+    #[test]
+    fn format_filter_direct_comma_float_value() {
+        // "," with a float that has no integer representation: falls through
+        // to the as_f64 branch of the "," arm.
+        let v = minijinja::Value::from(1_234.5_f64);
+        let result = format_filter(&v, ",");
+        assert!(
+            result.contains("1,234"),
+            "expected comma-grouped integer part, got {result}"
+        );
+    }
+
+    // --- Direct insert_commas unit tests ---
+
+    #[test]
+    fn insert_commas_negative_integer() {
+        assert_eq!(insert_commas("-1234567"), "-1,234,567");
+    }
+
+    #[test]
+    fn insert_commas_negative_with_decimal() {
+        // Exercises the negative=true AND decimal=Some(...) paths together.
+        assert_eq!(insert_commas("-1234.56"), "-1,234.56");
+    }
+
+    #[test]
+    fn insert_commas_small_number_no_commas() {
+        assert_eq!(insert_commas("42"), "42");
+    }
+
+    #[test]
+    fn insert_commas_exactly_three_digits() {
+        assert_eq!(insert_commas("123"), "123");
+    }
+
+    #[test]
+    fn insert_commas_exactly_four_digits() {
+        assert_eq!(insert_commas("1234"), "1,234");
+    }
+
+    #[test]
+    fn insert_commas_with_decimal_no_integer_grouping() {
+        assert_eq!(insert_commas("12.345"), "12.345");
+    }
 }
