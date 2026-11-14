@@ -3913,4 +3913,183 @@ mod tests {
         );
         assert_eq!(result.pages, 1, "page must still be counted");
     }
+
+    // --- Do operator — form XObject (not image) ---
+
+    /// `Do` で呼び出す XObject の Subtype が `/Form` の場合、`image_xobjects` マップに
+    /// エントリが存在しないため ImageItem は生成されない（lines 1044-1046 の各 `}` branch）。
+    #[test]
+    fn do_on_form_xobject_produces_no_image_item() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+
+        // Form XObject — Subtype が Image でないため collect_image_xobjects がスキップする。
+        let form_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+                "BBox" => vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(100), Object::Integer(100),
+                ],
+            },
+            b"".to_vec(),
+        ));
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! {
+                "Fm0" => Object::Reference(form_id),
+            },
+        });
+        // content stream: "Do" で Form XObject を呼び出す
+        let content = b"/Fm0 Do\n".to_vec();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.images.is_empty(),
+            "Do on a Form XObject must produce no ImageItem; got {} items",
+            result.images.len()
+        );
+        assert_eq!(result.pages, 1);
+    }
+
+    /// `Do` のオペランドが名前オブジェクトではない場合、`obj_as_name_str` が `None` を返し
+    /// ImageItem は生成されない（line 1045 の `}` branch）。
+    #[test]
+    fn do_with_non_name_operand_produces_no_image_item() {
+        // "42 Do" — operand is an integer, not a name.
+        let content = b"42 Do\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_and_raw_content(content));
+        assert!(
+            result.images.is_empty(),
+            "Do with non-name operand must produce no ImageItem"
+        );
+    }
+
+    /// `Do` にオペランドがない場合、ImageItem は生成されない（line 1046 の `}` branch）。
+    #[test]
+    fn do_with_no_operands_produces_no_image_item() {
+        // "Do" with no preceding operand.
+        let content = b"Do\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_and_raw_content(content));
+        assert!(
+            result.images.is_empty(),
+            "Do with no operands must produce no ImageItem"
+        );
+    }
+
+    // --- Tf operator — operand count ---
+
+    /// `Tf` にオペランドが0個の場合、フォント設定は変更されない（line 562 の `}` branch）。
+    #[test]
+    fn tf_with_no_operands_does_not_panic() {
+        // "BT Tf ET" — Tf has no operands; the if-let branch fires false and skips it.
+        let content = b"BT Tf ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        // No text was drawn, so no items. The key assertion is that inspect does not panic.
+        assert!(result.text_items.is_empty());
+        assert_eq!(result.pages, 1);
+    }
+
+    /// `Tf` にオペランドが1個しかない場合（サイズが欠落）、フォント設定は変更されない（line 562）。
+    #[test]
+    fn tf_with_one_operand_does_not_panic() {
+        // "/F1 Tf" — name present but size operand missing.
+        let content = b"BT /F1 Tf (hello) Tj ET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        // The draw still happens but with whatever default font; the key is no panic.
+        assert_eq!(result.pages, 1);
+    }
+
+    // --- Content stream entry that cannot be canonicalised ---
+
+    /// `/Contents` エントリがアリアスチェーン長 [`MAX_PDF_PARENT_DEPTH`] + 1 の場合、
+    /// `canonical_object_id` が `None` を返し、そのエントリはスキップされる（line 309）。
+    #[test]
+    fn content_stream_over_depth_alias_is_skipped() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+        let resources_id = doc.add_object(dictionary! {
+            "Font" => dictionary! {
+                "F1" => dictionary! {
+                    "Type" => "Font", "Subtype" => "Type1", "BaseFont" => "Courier",
+                },
+            },
+        });
+
+        // 生き残るコンテントストリーム（通常の 1 ホップ参照）。
+        let real_content = b"BT /F1 12 Tf 1 0 0 1 10 800 Tm (Alive) Tj ET\n".to_vec();
+        let real_id = doc.add_object(Stream::new(dictionary! {}, real_content));
+
+        // `MAX_PDF_PARENT_DEPTH + 1` 本の Reference チェーン — `canonical_object_id` が None を返す。
+        let chain_len = MAX_PDF_PARENT_DEPTH + 1;
+        let dummy_target = doc.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let mut chain_id = dummy_target;
+        for _ in 0..chain_len {
+            chain_id = doc.add_object(Object::Reference(chain_id));
+        }
+
+        // /Contents: [deep_alias, real_stream] — deep alias はスキップ、real は生き残る。
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => vec![
+                Object::Reference(chain_id),
+                Object::Reference(real_id),
+            ],
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0), Object::Integer(0),
+                Object::Integer(595), Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        // deep alias がスキップされた後、実在するストリームの "Alive" はなお抽出される。
+        let texts: Vec<&str> = result.text_items.iter().map(|i| i.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            ["Alive"],
+            "over-depth alias must be skipped; surviving stream must still be extracted"
+        );
+        assert_eq!(result.pages, 1);
+    }
 }
