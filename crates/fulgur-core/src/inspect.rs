@@ -3918,6 +3918,10 @@ mod tests {
 
     /// `Do` で呼び出す XObject の Subtype が `/Form` の場合、`image_xobjects` マップに
     /// エントリが存在しないため ImageItem は生成されない（lines 1044-1046 の各 `}` branch）。
+    ///
+    /// リソース辞書には Image XObject も含めて `image_xobjects` が空にならないようにする。
+    /// 空の場合 `extract_image_items` が content 解析前に `continue` し、`Do` ハンドラに
+    /// 到達しないため（line 942）、Form 専用辞書ではこの branch をカバーできない。
     #[test]
     fn do_on_form_xobject_produces_no_image_item() {
         use lopdf::{Document, Object, Stream, dictionary};
@@ -3937,12 +3941,26 @@ mod tests {
             },
             b"".to_vec(),
         ));
+        // 未使用の Image XObject — `image_xobjects` を空でなくするためだけに存在する。
+        // これがないと extract_image_items が is_empty() で early-return し Do ハンドラに届かない。
+        let dummy_image_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => Object::Integer(1),
+                "Height" => Object::Integer(1),
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => Object::Integer(8),
+            },
+            vec![0u8],
+        ));
         let resources_id = doc.add_object(dictionary! {
             "XObject" => dictionary! {
                 "Fm0" => Object::Reference(form_id),
+                "Im0" => Object::Reference(dummy_image_id),
             },
         });
-        // content stream: "Do" で Form XObject を呼び出す
+        // content stream: "Do" で Form XObject を呼び出す（Im0 は呼ばない）
         let content = b"/Fm0 Do\n".to_vec();
         let content_id = doc.add_object(Stream::new(dictionary! {}, content));
         let page_id = doc.add_object(dictionary! {
