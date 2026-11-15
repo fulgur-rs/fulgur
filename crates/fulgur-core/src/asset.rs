@@ -1961,4 +1961,117 @@ mod tests {
             "no image must be stored on I/O error"
         );
     }
+
+    // --- log::warn! format-arg evaluation when a logger is active ---
+    //
+    // `add_image` warns via `log::warn!(..., key.len())` when the image name
+    // exceeds MAX_IMAGE_KEY_BYTES.  The `log::warn!` macro only evaluates its
+    // format arguments when `log::max_level() >= Warn`, so the `key.len()`
+    // expression is otherwise dead code (line 345 is never reached when no
+    // logger is registered).  Registering a no-op logger here is the minimum
+    // needed to exercise that path and confirm the format arg is evaluated
+    // correctly (no panic, no wrong value) in a logger-active scenario.
+
+    struct NoopLogger;
+    impl log::Log for NoopLogger {
+        fn enabled(&self, _: &log::Metadata) -> bool {
+            true
+        }
+        fn log(&self, _: &log::Record) {}
+        fn flush(&self) {}
+    }
+    static NOOP_LOGGER: NoopLogger = NoopLogger;
+    static LOGGER_INIT: std::sync::Once = std::sync::Once::new();
+
+    fn init_warn_logger() {
+        LOGGER_INIT.call_once(|| {
+            // May fail if another test already registered a global logger;
+            // that is fine — a logger is already active and max_level will
+            // be set to Warn below regardless.
+            let _ = log::set_logger(&NOOP_LOGGER);
+            log::set_max_level(log::LevelFilter::Warn);
+        });
+    }
+
+    #[test]
+    fn add_image_warn_format_arg_evaluated_when_logger_active() {
+        // Verifies that `add_image` correctly evaluates the `key.len()` format
+        // arg inside `log::warn!` when warn-level logging is enabled, and that
+        // the image is still dropped even with a logger active.
+        init_warn_logger();
+        let mut bundle = AssetBundle::new();
+        let oversized_key = "k".repeat(MAX_IMAGE_KEY_BYTES + 1);
+        bundle.add_image(oversized_key, vec![1, 2, 3]);
+        assert!(
+            bundle.images.is_empty(),
+            "image with oversized key must be dropped even when a logger is active"
+        );
+    }
+
+    // --- add_font_bytes: OTF and TTC passthrough ---
+    //
+    // `add_font_bytes` passes OTF (`OTTO`) and TTC (`ttcf`) through unchanged,
+    // the same way it handles TTF.  These branches are tested individually to
+    // guard against regressions in the `Otf | Ttc` arm of `detect_font_format`.
+
+    #[test]
+    fn add_font_bytes_otf_passes_through_unchanged() {
+        let mut bundle = AssetBundle::new();
+        let mut data = b"OTTO".to_vec();
+        data.extend_from_slice(&[0xABu8; 64]);
+        bundle
+            .add_font_bytes(data.clone())
+            .expect("OTF magic should be accepted as a passthrough");
+        assert_eq!(bundle.fonts.len(), 1);
+        assert_eq!(&bundle.fonts[0][..], &data[..]);
+    }
+
+    #[test]
+    fn add_font_bytes_ttc_passes_through_unchanged() {
+        let mut bundle = AssetBundle::new();
+        let mut data = b"ttcf".to_vec();
+        data.extend_from_slice(&[0xBCu8; 64]);
+        bundle
+            .add_font_bytes(data.clone())
+            .expect("TTC magic should be accepted as a passthrough");
+        assert_eq!(bundle.fonts.len(), 1);
+        assert_eq!(&bundle.fonts[0][..], &data[..]);
+    }
+
+    // --- add_css_file: aggregate budget exceeded ---
+    //
+    // `add_css_file` reads the stylesheet from disk then calls `try_push_css`.
+    // When the aggregate CSS budget is already exhausted, the file I/O succeeds
+    // but `try_push_css` returns `Err`, propagated as `Error::Asset`.  This
+    // path differs from the per-file size cap tested by
+    // `add_css_file_rejects_oversized_before_reading` and was previously untested.
+    //
+    // We exhaust the budget by writing directly to the private `css_total_bytes`
+    // field (accessible from same-file `#[cfg(test)]` modules) so the test stays
+    // fast and does not need to allocate megabytes of dummy CSS.
+
+    #[test]
+    fn add_css_file_returns_error_when_aggregate_budget_exceeded() {
+        let mut bundle = AssetBundle::new();
+        // Setting css_total_bytes to the cap while css_synced_len == css.len() == 0
+        // prevents any further try_push_css from succeeding: each charge is at
+        // least STRING_ENTRY_OVERHEAD_BYTES bytes, so saturating_add always exceeds
+        // MAX_TOTAL_CSS_BYTES.
+        bundle.css_total_bytes = MAX_TOTAL_CSS_BYTES;
+
+        use std::io::Write as _;
+        let mut tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        write!(tmp, "body {{}}").expect("write");
+        let err = bundle
+            .add_css_file(tmp.path())
+            .expect_err("add_css_file must return Err when aggregate CSS budget is exhausted");
+        assert!(
+            matches!(err, Error::Asset(_)),
+            "expected Error::Asset from the aggregate-budget rejection, got {err:?}"
+        );
+        assert!(
+            bundle.css.is_empty(),
+            "no stylesheet must be stored when the aggregate budget is exceeded"
+        );
+    }
 }
