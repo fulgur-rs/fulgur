@@ -2228,6 +2228,13 @@ mod tests {
             .render(html)
             .expect("HTML lang should be accepted without error");
         assert!(pdf.starts_with(b"%PDF"));
+        // Verify the PDF catalog carries /Lang (fr) — the actual purpose of
+        // this test is that the HTML lang attribute propagates into the output.
+        assert!(
+            pdf.windows(b"/Lang (fr)".len())
+                .any(|w| w == b"/Lang (fr)"),
+            "PDF catalog should contain /Lang (fr)"
+        );
     }
 
     #[test]
