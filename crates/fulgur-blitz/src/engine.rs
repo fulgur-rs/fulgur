@@ -2231,8 +2231,7 @@ mod tests {
         // Verify the PDF catalog carries /Lang (fr) — the actual purpose of
         // this test is that the HTML lang attribute propagates into the output.
         assert!(
-            pdf.windows(b"/Lang (fr)".len())
-                .any(|w| w == b"/Lang (fr)"),
+            pdf.windows(b"/Lang (fr)".len()).any(|w| w == b"/Lang (fr)"),
             "PDF catalog should contain /Lang (fr)"
         );
     }
