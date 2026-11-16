@@ -2213,4 +2213,74 @@ mod tests {
             .expect("bookmarks + target-refs render should succeed");
         assert!(pdf.starts_with(b"%PDF"));
     }
+
+    // ── render_artifacts: lang resolution (Cow::Owned) and pdf_ua guard ────
+
+    #[test]
+    fn render_with_html_lang_overrides_unset_config_lang() {
+        // When the engine has no `.lang()` and the HTML carries
+        // `<html lang="fr">`, `render_artifacts` builds a `Cow::Owned`
+        // Config with `lang = Some("fr")` (lines 791-794 of engine.rs).
+        // The document must still render successfully.
+        let html = r#"<!doctype html><html lang="fr"><body><p>Bonjour</p></body></html>"#;
+        let pdf = Engine::builder()
+            .build()
+            .render(html)
+            .expect("HTML lang should be accepted without error");
+        assert!(pdf.starts_with(b"%PDF"));
+        // Verify the PDF catalog carries /Lang (fr) — the actual purpose of
+        // this test is that the HTML lang attribute propagates into the output.
+        assert!(
+            pdf.windows(b"/Lang (fr)".len()).any(|w| w == b"/Lang (fr)"),
+            "PDF catalog should contain /Lang (fr)"
+        );
+    }
+
+    #[test]
+    fn pdf_ua_without_any_lang_returns_error() {
+        // PDF/UA requires a document language. When neither the builder
+        // nor the HTML supplies one, `render_artifacts` must return
+        // `Error::PdfGeneration` (lines 797-799 of engine.rs).
+        let html = "<html><body><p>no lang</p></body></html>";
+        let err = Engine::builder()
+            .pdf_ua(true)
+            .build()
+            .render(html)
+            .expect_err("pdf_ua without lang must fail");
+        assert!(
+            err.to_string().contains("PDF/UA"),
+            "error message should mention PDF/UA: {err}"
+        );
+    }
+
+    // ── Deprecated render_html / render_html_to_file wrappers ────────────
+
+    #[test]
+    #[allow(deprecated)]
+    fn render_html_deprecated_produces_valid_pdf() {
+        // `render_html` is a `#[deprecated]` alias for `render` (lines
+        // 917-919 of engine.rs). It must still produce a valid PDF so
+        // that existing callers on 0.19.0 do not break silently.
+        let pdf = Engine::builder()
+            .build()
+            .render_html("<html><body><p>legacy</p></body></html>")
+            .expect("deprecated render_html should succeed");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn render_html_to_file_deprecated_writes_pdf_to_disk() {
+        // `render_html_to_file` is a `#[deprecated]` alias for
+        // `render_file` (lines 923-925 of engine.rs). The file written
+        // must be a valid PDF.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.pdf");
+        Engine::builder()
+            .build()
+            .render_html_to_file("<html><body><p>legacy file</p></body></html>", &path)
+            .expect("deprecated render_html_to_file should succeed");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+    }
 }
