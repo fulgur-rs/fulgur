@@ -3913,4 +3913,62 @@ mod tests {
         );
         assert_eq!(result.pages, 1, "page must still be counted");
     }
+
+    // --- cm (concat matrix) operator ---
+
+    /// `cm` オペレーターが CTM を更新し、後続の `BT`/`Tm` で text 座標に反映されることを
+    /// 検証する（`extract_text_items` の cm ハンドラーを対象）。
+    #[test]
+    fn cm_operator_translates_text_positions() {
+        // 1 0 0 1 50 300 cm → CTM = [1, 0, 0, 1, 50, 300]
+        // 1 0 0 1 10 700 Tm → tx = 1*10 + 0*700 + 50 = 60
+        //                    ty = 0*10 + 1*700 + 300 = 1000
+        let content =
+            b"1 0 0 1 50 300 cm\nBT\n/F1 12 Tf\n1 0 0 1 10 700 Tm\n(Hello) Tj\nET\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content));
+        assert_eq!(result.text_items.len(), 1, "expected one text item");
+        let item = &result.text_items[0];
+        assert!(
+            (item.x - 60.0).abs() < 1e-4,
+            "expected x=60.0 (10 + 50 from cm), got {}",
+            item.x
+        );
+        assert!(
+            (item.y - 1000.0).abs() < 1e-4,
+            "expected y=1000.0 (700 + 300 from cm), got {}",
+            item.y
+        );
+    }
+
+    /// `cm` オペレーターが image XObject の位置を更新することを検証する
+    /// （`extract_image_items` の cm ハンドラーを対象）。
+    #[test]
+    fn cm_operator_translates_image_position() {
+        // 1 0 0 1 100 200 cm → CTM = [1, 0, 0, 1, 100, 200]
+        // /Im0 Do → unit square mapped through CTM: min_x=100, min_y=200, w=1, h=1
+        let content = b"1 0 0 1 100 200 cm\n/Im0 Do\n".to_vec();
+        let result = inspect_bytes(&make_pdf_with_image_and_raw_content(content));
+        assert_eq!(result.images.len(), 1, "expected one image item");
+        let img = &result.images[0];
+        assert!(
+            (img.x - 100.0).abs() < 1e-4,
+            "expected image x=100.0 (from cm translation), got {}",
+            img.x
+        );
+        assert!(
+            (img.y - 200.0).abs() < 1e-4,
+            "expected image y=200.0 (from cm translation), got {}",
+            img.y
+        );
+        assert!(
+            (img.width - 1.0).abs() < 1e-4,
+            "expected image width=1.0 (unit square with identity scale), got {}",
+            img.width
+        );
+        assert!(
+            (img.height - 1.0).abs() < 1e-4,
+            "expected image height=1.0 (unit square with identity scale), got {}",
+            img.height
+        );
+    }
 }
