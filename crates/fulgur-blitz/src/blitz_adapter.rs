@@ -2406,13 +2406,26 @@ impl DomPass for CaptionRestructurePass {
             // so the caption keeps source order (before the table) — hence the
             // gate on `force_block`.
             let on_bottom = force_block && caption_side_is_bottom(doc, caption_id);
+            let table_pct = table_percentage_width(doc, table_id);
             let mut mutator = doc.mutate();
             let wrapper_id = mutator.create_element(make_qual_name("div"), vec![]);
-            // `fit-content` keeps the wrapper at the table's width when the
-            // caption is narrower; a wider caption clamps to the available
-            // (page) width and wraps.
             mutator.set_style_property(wrapper_id, "display", "block");
-            mutator.set_style_property(wrapper_id, "width", "fit-content");
+            if let Some(pct) = table_pct {
+                // A percentage width (`width:100%` report tables) refers to the
+                // table's containing block. Inside a `fit-content` wrapper it
+                // would resolve against the shrink-wrapped wrapper instead, and
+                // the table collapses to its content width (Taffy in blitz-dom
+                // 0.3 sizes the wrapper from the table's auto width). Move the
+                // percentage to the wrapper, which now has the original
+                // containing block, and let the table fill the wrapper.
+                mutator.set_style_property(wrapper_id, "width", &format!("{}%", pct * 100.0));
+                mutator.set_style_property(crate::blitz_adapter::bid(table_id), "width", "100%");
+            } else {
+                // `fit-content` keeps the wrapper at the table's width when the
+                // caption is narrower; a wider caption clamps to the available
+                // (page) width and wraps.
+                mutator.set_style_property(wrapper_id, "width", "fit-content");
+            }
             // Override the UA `display: table-caption` so the moved caption
             // is a plain block (otherwise Stylo wraps it in an anonymous
             // table box again).
@@ -2429,6 +2442,17 @@ impl DomPass for CaptionRestructurePass {
                 mutator.append_children(wrapper_id, &[crate::blitz_adapter::bid(caption_id), crate::blitz_adapter::bid(table_id)]);
             }
         }
+    }
+}
+
+/// The table's computed `width` as a fraction when it is a pure percentage
+/// (`width: 100%` → `Some(1.0)`); `None` for `auto`, lengths and mixed `calc()`.
+fn table_percentage_width(doc: &HtmlDocument, table_id: usize) -> Option<f32> {
+    use ::style::values::generics::length::GenericSize;
+    let styles = doc.get_node(crate::blitz_adapter::bid(table_id))?.primary_styles()?;
+    match styles.slow_clone_width() {
+        GenericSize::LengthPercentage(lp) => lp.0.to_percentage().map(|p| p.0),
+        _ => None,
     }
 }
 

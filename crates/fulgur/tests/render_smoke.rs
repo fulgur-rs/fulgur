@@ -5324,6 +5324,12 @@ fn table_caption_side_bottom_via_injected_css() {
 /// wrapper does not shrink the table away from full width (the primary
 /// SaaS report-table use case). fulgur-78o.
 fn full_width_table_max_cell_x(with_caption: bool) -> f32 {
+    table_max_cell_x("100%", with_caption)
+}
+
+/// Max cell-text x for a two-column table of the given CSS `width`,
+/// optionally with a caption.
+fn table_max_cell_x(width: &str, with_caption: bool) -> f32 {
     use fulgur::inspect::inspect;
     let caption = if with_caption {
         "<caption>CAP</caption>"
@@ -5334,7 +5340,7 @@ fn full_width_table_max_cell_x(with_caption: bool) -> f32 {
         r#"<!doctype html><html><head><style>
           td {{ font-size: 12px; padding: 4px; }}
         </style></head><body>
-          <table style="width:100%">{caption}
+          <table style="width:{width}">{caption}
             <tbody><tr><td>leftcell</td><td>rightcell</td></tr></tbody>
           </table>
         </body></html>"#
@@ -5362,6 +5368,19 @@ fn table_caption_preserves_full_width_table() {
     assert!(
         (without - with).abs() < 1.0,
         "caption must not change table width: max cell x without={without}, with={with}"
+    );
+}
+
+/// A percentage width other than 100% must be applied once, not twice:
+/// the caption wrapper takes the percentage and the table fills the
+/// wrapper, so a `width:50%` table must not shrink to 25%.
+#[test]
+fn table_caption_preserves_half_width_table() {
+    let without = table_max_cell_x("50%", false);
+    let with = table_max_cell_x("50%", true);
+    assert!(
+        (without - with).abs() < 1.0,
+        "caption must not change a 50% table's width: max cell x without={without}, with={with}"
     );
 }
 
