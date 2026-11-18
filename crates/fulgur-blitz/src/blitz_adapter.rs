@@ -2277,6 +2277,13 @@ fn make_qual_name(local: &str) -> blitz_dom::QualName {
     )
 }
 
+/// Name for an attribute on an HTML element. HTML attributes live in the null
+/// namespace; blitz-dom 0.3 compares attribute namespaces when matching
+/// selectors, so an `html`-namespaced name would never match `[name]`.
+fn make_attr_name(local: &str) -> blitz_dom::QualName {
+    blitz_dom::QualName::new(None, blitz_dom::ns!(), blitz_dom::LocalName::from(local))
+}
+
 /// Create a `<style>` element with the given CSS text, attach it to the DOM,
 /// and register it with Stylo. Returns the style node id.
 ///
@@ -3361,11 +3368,16 @@ impl CounterPass {
             drop(id);
 
             // Set data attribute once
-            let qual = make_qual_name("data-fulgur-cid");
-            if let Some(node_mut) = doc.get_node_mut(crate::blitz_adapter::bid(node_id)) {
-                if let Some(elem_mut) = node_mut.element_data_mut() {
-                    elem_mut.attrs.set(qual, &v);
-                }
+            // Go through the mutator: blitz-dom 0.3 restyles incrementally, and
+            // only `set_attribute` snapshots the element and marks it for
+            // restyle, so the injected `[data-fulgur-cid]` rule can match.
+            let qual = make_attr_name("data-fulgur-cid");
+            if doc
+                .get_node(crate::blitz_adapter::bid(node_id))
+                .is_some_and(|n| n.element_data().is_some())
+            {
+                doc.mutate()
+                    .set_attribute(crate::blitz_adapter::bid(node_id), qual, &v);
             }
             Some(v)
         } else {
