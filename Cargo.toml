@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fulgur", "crates/fulgur-blitz", "crates/fulgur-core", "crates/fulgur-cli", "crates/fulgur-ruby", "crates/fulgur-vrt", "crates/fulgur-wasm", "crates/fulgur-wpt", "crates/pyfulgur", "crates/fulgur-raikiri", "crates/fulgur-dev"]
+members = ["crates/fulgur", "crates/fulgur-blitz", "crates/fulgur-core", "crates/fulgur-cli", "crates/fulgur-ruby", "crates/fulgur-vrt", "crates/fulgur-wasm", "crates/fulgur-wpt", "crates/pyfulgur"]  # TODO(blitz-master): raikiri-svg pins svgtypes =0.16.1, blitz-dom needs ^0.16.2
 
 [workspace.package]
 edition = "2024"
@@ -8,3 +8,10 @@ rust-version = "1.89.0"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/fulgur-rs/fulgur"
 homepage = "https://github.com/fulgur-rs/fulgur"
+
+# TODO(blitz-master): local Blitz with `LayoutPassState` made public
+# (branch public-layout-pass). Replace with an upstream rev once merged.
+[patch."https://github.com/DioxusLabs/blitz"]
+blitz-dom = { path = "../blitz/packages/blitz-dom" }
+blitz-html = { path = "../blitz/packages/blitz-html" }
+blitz-traits = { path = "../blitz/packages/blitz-traits" }

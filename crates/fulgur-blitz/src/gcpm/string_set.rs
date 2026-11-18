@@ -90,7 +90,7 @@ fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String,
     if depth >= MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     // Skip non-rendered subtrees so <script>/<style> bodies don't leak into
@@ -98,7 +98,7 @@ fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String,
     // string-set target.
     if let Some(elem) = node.element_data() {
         if matches!(
-            elem.name.local.as_ref(),
+            &*elem.name.local,
             "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
         ) {
             return;
@@ -108,7 +108,7 @@ fn collect_text(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut String,
         blitz_dom::NodeData::Text(text_data) => out.push_str(&text_data.content),
         _ => {
             for &child_id in &node.children {
-                collect_text(doc, child_id, out, depth + 1);
+                collect_text(doc, crate::blitz_adapter::uid(child_id), out, depth + 1);
             }
         }
     }

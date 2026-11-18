@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     // Background color — access the computed value directly
-    let bg = ctx.styles.clone_background_color();
+    let bg = ctx.styles.slow_clone_background_color();
     let bg_rgba = absolute_to_rgba(bg.resolve_to_absolute(ctx.current_color));
     if bg_rgba[3] > 0 {
         style.background_color = Some(bg_rgba);
@@ -21,18 +21,18 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     // Background image layers. Skip the six secondary `clone_*` calls
     // (sizes/positions/repeats/origins/clips) if no layer is actually
     // populated — the vast majority of DOM nodes have only `Image::None`.
-    let bg_images = ctx.styles.clone_background_image();
+    let bg_images = ctx.styles.slow_clone_background_image();
     let has_real_bg_image = bg_images
         .0
         .iter()
         .any(|i| !matches!(i, style::values::computed::image::Image::None));
     if has_real_bg_image {
-        let bg_sizes = ctx.styles.clone_background_size();
-        let bg_pos_x = ctx.styles.clone_background_position_x();
-        let bg_pos_y = ctx.styles.clone_background_position_y();
-        let bg_repeats = ctx.styles.clone_background_repeat();
-        let bg_origins = ctx.styles.clone_background_origin();
-        let bg_clips = ctx.styles.clone_background_clip();
+        let bg_sizes = ctx.styles.slow_clone_background_size();
+        let bg_pos_x = ctx.styles.slow_clone_background_position_x();
+        let bg_pos_y = ctx.styles.slow_clone_background_position_y();
+        let bg_repeats = ctx.styles.slow_clone_background_repeat();
+        let bg_origins = ctx.styles.slow_clone_background_origin();
+        let bg_clips = ctx.styles.slow_clone_background_clip();
 
         for (i, image) in bg_images.0.iter().enumerate() {
             use style::values::computed::image::Image;
@@ -42,8 +42,8 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
             let resolved: Option<(BgImageContent, f32, f32)> = match image {
                 Image::Url(url) => ctx.assets.and_then(|a| {
                     let raw_src = match url {
-                        style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
-                        style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+                        style::url::ComputedUrl::Valid(u) => u.as_str(),
+                        style::url::ComputedUrl::Invalid(s) => s.as_str(),
                     };
                     let src = extract_asset_name(raw_src);
                     let data = a.get_image(src)?;
@@ -621,6 +621,10 @@ fn convert_bg_clip(
         C::BorderBox => BgClip::BorderBox,
         C::PaddingBox => BgClip::PaddingBox,
         C::ContentBox => BgClip::ContentBox,
+        // Not supported by fulgur's painter; Stylo 0.8 rejected these
+        // values at parse time, which left the initial `border-box`, so
+        // keep that behaviour.
+        C::Text | C::BorderArea => BgClip::BorderBox,
     }
 }
 

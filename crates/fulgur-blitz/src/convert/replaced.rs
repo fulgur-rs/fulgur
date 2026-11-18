@@ -1,3 +1,4 @@
+use crate::blitz_adapter::NodeLayoutExt;
 use super::*;
 
 /// Dispatcher entry for replaced elements (img / svg / `content: url(...)`).
@@ -12,11 +13,11 @@ pub(super) fn try_convert(
     ctx: &mut super::ConvertContext<'_>,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
     if let Some(elem_data) = node.element_data() {
-        let tag = elem_data.name.local.as_ref();
+        let tag = &*elem_data.name.local;
         // Fall through to the generic / content-url paths below when the
         // asset can't be resolved (missing in bundle, unsupported format,
         // or `ImageData::None` from upstream SVG parse failure).
@@ -47,7 +48,7 @@ fn maybe_insert_block_for_replaced(
     assets: Option<&AssetBundle>,
     out: &mut crate::drawables::Drawables,
 ) -> (f32, f32, f32, bool) {
-    let (width, height) = size_in_pt(node.final_layout.size);
+    let (width, height) = size_in_pt(node.final_layout_or_zero().size);
     let style = extract_block_style(node, assets);
     let (opacity, visible) = extract_opacity_visible(node);
 
@@ -58,7 +59,7 @@ fn maybe_insert_block_for_replaced(
         let content_width = (width.to_f32() - left_inset - right_inset).max(0.0);
         let content_height = (height.to_f32() - top_inset - bottom_inset).max(0.0);
         out.block_styles.insert(
-            node.id,
+            crate::blitz_adapter::uid(node.id),
             crate::drawables::BlockEntry {
                 style,
                 opacity,
@@ -177,7 +178,7 @@ fn convert_content_url(
         opacity,
         visible,
     );
-    out.images.insert(node.id, entry);
+    out.images.insert(crate::blitz_adapter::uid(node.id), entry);
     true
 }
 
@@ -213,7 +214,7 @@ fn convert_image(
         opacity,
         visible,
     );
-    out.images.insert(node.id, entry);
+    out.images.insert(crate::blitz_adapter::uid(node.id), entry);
     true
 }
 
@@ -225,17 +226,17 @@ fn convert_svg(
     assets: Option<&AssetBundle>,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(elem) = node.element_data() else {
+    let Some(_elem) = node.element_data() else {
         return false;
     };
-    let Some(tree) = extract_inline_svg_tree(elem) else {
+    let Some(tree) = extract_inline_svg_tree(node) else {
         return false;
     };
 
     let (content_w, content_h, opacity, visible) =
         maybe_insert_block_for_replaced(node, assets, out);
     out.svgs.insert(
-        node.id,
+        crate::blitz_adapter::uid(node.id),
         crate::drawables::SvgEntry {
             tree,
             width: content_w.as_pt(),
@@ -382,14 +383,14 @@ mod tests {
     }
 
     fn find_by_tag_inner(doc: &BaseDocument, id: usize, tag: &str) -> Option<usize> {
-        let n = doc.get_node(id)?;
+        let n = doc.get_node(crate::blitz_adapter::bid(id))?;
         if n.element_data()
-            .is_some_and(|e| e.name.local.as_ref() == tag)
+            .is_some_and(|e| (&*e.name.local) == tag)
         {
             return Some(id);
         }
         for &c in &n.children {
-            if let Some(f) = find_by_tag_inner(doc, c, tag) {
+            if let Some(f) = find_by_tag_inner(doc, crate::blitz_adapter::uid(c), tag) {
                 return Some(f);
             }
         }
@@ -398,7 +399,7 @@ mod tests {
 
     fn find_tag(doc: &HtmlDocument, tag: &str) -> usize {
         let root = doc.root_element();
-        find_by_tag_inner(doc, root.id, tag)
+        find_by_tag_inner(doc, crate::blitz_adapter::uid(root.id), tag)
             .unwrap_or_else(|| panic!("<{tag}> not found in document"))
     }
 
@@ -518,7 +519,7 @@ mod tests {
             r#"<!doctype html><html><body><img src="x.png" style="width:40px;height:25px;"></body></html>"#,
         );
         let img_id = find_tag(&doc, "img");
-        let node = doc.get_node(img_id).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(img_id)).unwrap();
         let mut out = Drawables::new();
         let (_w, _h, opacity, visible) = maybe_insert_block_for_replaced(node, None, &mut out);
         assert!(
@@ -534,14 +535,23 @@ mod tests {
     #[test]
     fn maybe_insert_block_with_border_inserts_block_entry_and_shrinks_content() {
         // A 4px border on each side subtracts from content dimensions.
-        let doc = parse_doc(
+        //
+        // blitz-dom 0.3 builds no inline formatting context when no font at
+        // all is available, leaving inline-level boxes (this `<img>`)
+        // without a layout; `parse_doc`'s font-less setup therefore can't
+        // be used for an inline replaced element. Enable system fonts.
+        let doc = crate::blitz_adapter::parse_and_layout(
             r#"<!doctype html><html><body>
               <img src="x.png" style="width:60px;height:40px;border:4px solid black;">
             </body></html>"#,
+            595.0_f32.as_px(),
+            842.0_f32.as_px(),
+            &[],
+            true,
         );
         let img_id = find_tag(&doc, "img");
-        let node = doc.get_node(img_id).unwrap();
-        let (layout_w, layout_h) = size_in_pt(node.final_layout.size);
+        let node = doc.get_node(crate::blitz_adapter::bid(img_id)).unwrap();
+        let (layout_w, layout_h) = size_in_pt(node.final_layout_or_zero().size);
         let (layout_w, layout_h) = (layout_w.to_f32(), layout_h.to_f32());
         let mut out = Drawables::new();
         let (content_w, content_h, _opacity, _visible) =

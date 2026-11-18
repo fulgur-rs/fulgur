@@ -18,7 +18,7 @@ parallel = ["dep:rayon"]
 [dependencies]
 fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
 rayon = { version = "1", optional = true }
-cssparser = "0.37"
+cssparser = "0.38"
 krilla = "0.7.0"
 krilla-svg = "0.7.0"
 usvg = "0.45"
@@ -27,13 +27,13 @@ usvg = "0.45"
 data-url = "0.3"
 # Bounded SVGZ decompression in the SVG sanitizer (usvg's is unbounded).
 flate2 = "1.1.9"
-blitz-html = "0.2"
-blitz-dom = "0.2"
-blitz-traits = "0.2"
-taffy = "0.9"
-parley = "0.6"
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015" }
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015", features = ["floats"] }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015" }
+taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "a3997d55bacd1fb6cd12fe31db0be15b20f91528" }
+parley = "0.13"
 skrifa = "0.47"
-stylo = "0.8.0"
+stylo = "0.24.0"
 thiserror = "2"
 minijinja = { version = "=2.24.0", features = ["unstable_machinery"] }
 serde_json = "1"

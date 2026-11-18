@@ -1,6 +1,6 @@
 use cssparser::{
     AtRuleParser, BasicParseErrorKind, CowRcStr, DeclarationParser, ParseError, Parser,
-    ParserInput, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
+    QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
 };
 
 use super::bookmark::{BookmarkLevel, BookmarkMapping};
@@ -64,15 +64,15 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
     fn parse_prelude<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<()>> {
         if !name.eq_ignore_ascii_case("page") {
-            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
         }
 
         // Optional page selector like `:first`
         let page_selector = input
-            .try_parse(|input| -> Result<String, ParseError<'i, ()>> {
+            .try_parse(|input| -> Result<String, ParseError<()>> {
                 input.expect_colon()?;
                 let ident = input.expect_ident()?.clone();
                 Ok(format!(":{}", &*ident))
@@ -86,8 +86,8 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
         &mut self,
         page_selector: Self::Prelude,
         start: &cssparser::ParserState,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::AtRule, ParseError<()>> {
         let mut boxes = Vec::new();
         let mut size = None;
         let mut margin = PartialMargin::default();
@@ -127,8 +127,8 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
 
     fn parse_prelude<'t>(
         &mut self,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<()>> {
         // Skip leading whitespace
         let first = loop {
             match input.next_including_whitespace()?.clone() {
@@ -161,7 +161,7 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
                 } else if ident.eq_ignore_ascii_case("after") {
                     Ok(PseudoElement::After)
                 } else {
-                    Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                    Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
                 }
             })
             .ok();
@@ -181,8 +181,8 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
         &mut self,
         prelude: Self::Prelude,
         _start: &cssparser::ParserState,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::QualifiedRule, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::QualifiedRule, ParseError<()>> {
         // Only scan for GCPM declarations if the selector is supported.
         // Otherwise, skip the block to avoid replacing declarations with
         // `display: none` for elements that won't be registered as running.
@@ -301,7 +301,7 @@ fn css_unit_to_pt(value: f32, unit: &str) -> Option<f32> {
 ///
 /// Returns `None` if the value is invalid or has trailing tokens
 /// (CSS requires invalid declarations to be ignored entirely).
-fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
+fn parse_page_size_value(input: &mut Parser<'_>) -> Option<PageSizeDecl> {
     let token = input.next().ok()?.clone();
     let result = match token {
         Token::Ident(ref name) => {
@@ -329,11 +329,12 @@ fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
                             } else if orient.eq_ignore_ascii_case("portrait") {
                                 Ok(false)
                             } else {
-                                Err(input
-                                    .new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                                Err(ParseError::<()>::from_basic_kind(
+                                    BasicParseErrorKind::QualifiedRuleInvalid,
+                                ))
                             }
                         }
-                        _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
+                        _ => Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
                     }
                 });
                 match orientation {
@@ -352,9 +353,9 @@ fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
                         Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit)
                             .filter(|v| *v > 0.0)
                             .ok_or_else(|| {
-                                input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)
+                                ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)
                             }),
-                        _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
+                        _ => Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
                     }
                 })
                 .unwrap_or(w);
@@ -370,13 +371,13 @@ fn parse_page_size_value(input: &mut Parser<'_, '_>) -> Option<PageSizeDecl> {
 }
 
 /// Parse a single CSS length token (dimensioned or `0`) into points.
-fn parse_length_pt_token<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
+fn parse_length_pt_token<'i>(input: &mut Parser<'i>) -> Result<f32, ParseError<()>> {
     let tok = input.next()?.clone();
     match tok {
         Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit)
-            .ok_or_else(|| input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
+            .ok_or_else(|| ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
         Token::Number { value: 0.0, .. } => Ok(0.0_f32),
-        _ => Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
     }
 }
 
@@ -385,7 +386,7 @@ fn parse_length_pt_token<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseErr
 ///
 /// Returns `None` if the value is invalid or has trailing tokens
 /// (CSS requires invalid declarations to be ignored entirely).
-fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<PartialMargin> {
+fn parse_page_margin_value(input: &mut Parser<'_>) -> Option<PartialMargin> {
     let mut values = Vec::new();
     loop {
         let result = input.try_parse(parse_length_pt_token);
@@ -419,7 +420,7 @@ fn parse_page_margin_value(input: &mut Parser<'_, '_>) -> Option<PartialMargin> 
 }
 
 /// Parse a single longhand `margin-<side>` value into points.
-fn parse_page_margin_longhand_value(input: &mut Parser<'_, '_>) -> Option<f32> {
+fn parse_page_margin_longhand_value(input: &mut Parser<'_>) -> Option<f32> {
     let v = input.try_parse(parse_length_pt_token).ok()?;
     if input.next().is_ok() {
         return None;
@@ -432,7 +433,7 @@ fn parse_page_margin_longhand_value(input: &mut Parser<'_, '_>) -> Option<f32> {
 // ---------------------------------------------------------------------------
 
 fn parse_page_block(
-    input: &mut Parser<'_, '_>,
+    input: &mut Parser<'_>,
     page_selector: &Option<String>,
     boxes: &mut Vec<MarginBoxRule>,
     size: &mut Option<PageSizeDecl>,
@@ -465,18 +466,18 @@ impl<'i, 'a> AtRuleParser<'i> for PageRuleParser<'a> {
     fn parse_prelude<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        _input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<()>> {
         MarginBoxPosition::from_at_keyword(&name)
-            .ok_or_else(|| input.new_error(BasicParseErrorKind::AtRuleInvalid(name)))
+            .ok_or_else(|| ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid))
     }
 
     fn parse_block<'t>(
         &mut self,
         position: Self::Prelude,
         _start: &cssparser::ParserState,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::AtRule, ParseError<()>> {
         let mut content_items = Vec::new();
         let mut declarations = String::new();
 
@@ -507,9 +508,9 @@ impl<'i, 'a> DeclarationParser<'i> for PageRuleParser<'a> {
     fn parse_value<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser<'i>,
         _start: &cssparser::ParserState,
-    ) -> Result<(), ParseError<'i, ()>> {
+    ) -> Result<(), ParseError<()>> {
         if name.eq_ignore_ascii_case("size") {
             if let Some(v) = parse_page_size_value(input) {
                 *self.size = Some(v);
@@ -573,9 +574,9 @@ impl<'i, 'a> DeclarationParser<'i> for MarginBoxParser<'a> {
     fn parse_value<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser<'i>,
         _start: &cssparser::ParserState,
-    ) -> Result<(), ParseError<'i, ()>> {
+    ) -> Result<(), ParseError<()>> {
         if name.eq_ignore_ascii_case("content") {
             *self.content = parse_content_value(input);
         } else {
@@ -641,15 +642,15 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
     fn parse_value<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser<'i>,
         decl_start: &cssparser::ParserState,
-    ) -> Result<(), ParseError<'i, ()>> {
+    ) -> Result<(), ParseError<()>> {
         if name.eq_ignore_ascii_case("position") {
             // Try to parse `running(<name>)`
             let result = input.try_parse(|input| {
                 let fn_name = input.expect_function()?.clone();
                 if !fn_name.eq_ignore_ascii_case("running") {
-                    return Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid));
+                    return Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid));
                 }
                 input.parse_nested_block(|input| {
                     let ident = input.expect_ident()?.clone();
@@ -852,8 +853,8 @@ impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for StyleRuleParser<'a> {
 
 /// Parse the value of a `string-set` declaration: `<name> <value>+`.
 fn parse_string_set_value<'i, 't>(
-    input: &mut Parser<'i, 't>,
-) -> Result<(String, Vec<StringSetValue>), ParseError<'i, ()>> {
+    input: &mut Parser<'i>,
+) -> Result<(String, Vec<StringSetValue>), ParseError<()>> {
     let name = input.expect_ident()?.clone().to_string();
     let mut values = Vec::new();
 
@@ -862,7 +863,7 @@ fn parse_string_set_value<'i, 't>(
             break;
         }
 
-        let result: Result<(), ParseError<'_, ()>> = input.try_parse(|input| {
+        let result: Result<(), ParseError<()>> = input.try_parse(|input| {
             let token = input.next_including_whitespace()?.clone();
             match token {
                 Token::QuotedString(ref s) => {
@@ -898,7 +899,7 @@ fn parse_string_set_value<'i, 't>(
     }
 
     if values.is_empty() {
-        return Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid));
+        return Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid));
     }
 
     Ok((name, values))
@@ -916,9 +917,9 @@ fn parse_string_set_value<'i, 't>(
 /// `"last"`, `"first-except"`) into the caller's typed policy enum. Returning
 /// `None` from `map_fn` signals an unknown identifier.
 fn parse_policy_ident<'i, T>(
-    input: &mut Parser<'i, '_>,
+    input: &mut Parser<'i>,
     map_fn: impl Fn(&str) -> Option<T>,
-) -> Result<T, ParseError<'i, ()>> {
+) -> Result<T, ParseError<()>> {
     let ident = input.expect_ident()?.clone();
     let canonical: String = if ident.eq_ignore_ascii_case("first") {
         // Try to consume a trailing `-except` (cssparser may split the hyphenated ident).
@@ -929,7 +930,7 @@ fn parse_policy_ident<'i, T>(
                 if next.eq_ignore_ascii_case("except") {
                     Ok(())
                 } else {
-                    Err(input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                    Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
                 }
             })
             .is_ok();
@@ -942,11 +943,11 @@ fn parse_policy_ident<'i, T>(
         ident.to_ascii_lowercase()
     };
 
-    map_fn(&canonical).ok_or_else(|| input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+    map_fn(&canonical).ok_or_else(|| ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
 }
 
 /// Parse the policy argument of `string(name, <policy>)`.
-fn parse_string_policy<'i>(input: &mut Parser<'i, '_>) -> Result<StringPolicy, ParseError<'i, ()>> {
+fn parse_string_policy<'i>(input: &mut Parser<'i>) -> Result<StringPolicy, ParseError<()>> {
     parse_policy_ident(input, |s| match s {
         "first" => Some(StringPolicy::First),
         "start" => Some(StringPolicy::Start),
@@ -957,7 +958,7 @@ fn parse_string_policy<'i>(input: &mut Parser<'i, '_>) -> Result<StringPolicy, P
 }
 
 /// Parse the style argument of `counter(name, <style>)`.
-fn parse_counter_style<'i>(input: &mut Parser<'i, '_>) -> Result<CounterStyle, ParseError<'i, ()>> {
+fn parse_counter_style<'i>(input: &mut Parser<'i>) -> Result<CounterStyle, ParseError<()>> {
     let ident = input.expect_ident()?.clone();
     // Handle hyphenated idents: cssparser may split "upper-roman" into
     // "upper" + "-" + "roman".
@@ -973,12 +974,12 @@ fn parse_counter_style<'i>(input: &mut Parser<'i, '_>) -> Result<CounterStyle, P
         "lower-roman" => Ok(CounterStyle::LowerRoman),
         "upper-alpha" | "upper-latin" => Ok(CounterStyle::UpperAlpha),
         "lower-alpha" | "lower-latin" => Ok(CounterStyle::LowerAlpha),
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
     }
 }
 
 /// Parse the `<url>` argument of a `target-*` function.
-fn parse_target_url(input: &mut Parser<'_, '_>) -> Option<TargetUrl> {
+fn parse_target_url(input: &mut Parser<'_>) -> Option<TargetUrl> {
     input
         .try_parse(|input| {
             let token = input.next()?.clone();
@@ -991,7 +992,7 @@ fn parse_target_url(input: &mut Parser<'_, '_>) -> Option<TargetUrl> {
                         if !inner.is_exhausted() {
                             return Err(inner.new_error_for_next_token());
                         }
-                        Ok::<_, ParseError<'_, ()>>(TargetUrl::Attr(id.to_ascii_lowercase()))
+                        Ok::<_, ParseError<()>>(TargetUrl::Attr(id.to_ascii_lowercase()))
                     }),
                 Token::QuotedString(ref s) => Ok(TargetUrl::Literal(s.to_string())),
                 Token::Function(ref name) if name.eq_ignore_ascii_case("url") => input
@@ -1004,7 +1005,7 @@ fn parse_target_url(input: &mut Parser<'_, '_>) -> Option<TargetUrl> {
                         if !inner.is_exhausted() {
                             return Err(inner.new_error_for_next_token());
                         }
-                        Ok::<_, ParseError<'_, ()>>(TargetUrl::Literal(url))
+                        Ok::<_, ParseError<()>>(TargetUrl::Literal(url))
                     }),
                 Token::UnquotedUrl(ref s) => Ok(TargetUrl::Literal(s.to_string())),
                 _ => Err(input.new_error_for_next_token()),
@@ -1015,8 +1016,8 @@ fn parse_target_url(input: &mut Parser<'_, '_>) -> Option<TargetUrl> {
 
 /// Parse the policy argument of `element(name, <policy>)`.
 fn parse_element_policy<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<ElementPolicy, ParseError<'i, ()>> {
+    input: &mut Parser<'i>,
+) -> Result<ElementPolicy, ParseError<()>> {
     parse_policy_ident(input, |s| match s {
         "first" => Some(ElementPolicy::First),
         "start" => Some(ElementPolicy::Start),
@@ -1034,20 +1035,20 @@ fn parse_element_policy<'i>(
 /// other idents — is rejected so the rule is treated as if
 /// `bookmark-level` were absent.
 fn parse_bookmark_level_value<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<BookmarkLevel, ParseError<'i, ()>> {
+    input: &mut Parser<'i>,
+) -> Result<BookmarkLevel, ParseError<()>> {
     let token = input.next()?.clone();
     match token {
         Token::Number {
             int_value: Some(n), ..
         } if n >= 1 && n <= i32::from(u8::MAX) => Ok(BookmarkLevel::Integer(n as u8)),
         Token::Ident(ref ident) if ident.eq_ignore_ascii_case("none") => Ok(BookmarkLevel::None_),
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
     }
 }
 
 /// Parse counter operations from `counter-reset`, `counter-increment`, or `counter-set`.
-fn parse_counter_ops(input: &mut Parser<'_, '_>, prop: &str) -> Vec<CounterOp> {
+fn parse_counter_ops(input: &mut Parser<'_>, prop: &str) -> Vec<CounterOp> {
     let mut ops = Vec::new();
     loop {
         let name = match input.try_parse(|input| input.expect_ident().map(|s| s.to_string())) {
@@ -1078,7 +1079,7 @@ fn parse_counter_ops(input: &mut Parser<'_, '_>, prop: &str) -> Vec<CounterOp> {
 
 /// Parse a `content` property value into a list of `ContentItem`s using cssparser.
 /// Handles: `element(<name>, <policy>)`, `counter(page)`, `counter(pages)`, `string(<name>, <policy>)`, `"string"`.
-fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
+fn parse_content_value(input: &mut Parser<'_>) -> Vec<ContentItem> {
     let mut items = Vec::new();
 
     loop {
@@ -1086,7 +1087,7 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
             break;
         }
 
-        let result: Result<(), ParseError<'_, ()>> = input.try_parse(|input| {
+        let result: Result<(), ParseError<()>> = input.try_parse(|input| {
             let token = input.next_including_whitespace()?.clone();
             match token {
                 Token::QuotedString(ref s) => {
@@ -1193,7 +1194,7 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                 None => return Ok(()),
                             };
                             let kind = input
-                                .try_parse(|input| -> Result<TargetTextKind, ParseError<'_, ()>> {
+                                .try_parse(|input| -> Result<TargetTextKind, ParseError<()>> {
                                     input.expect_comma()?;
                                     let ident = input.expect_ident()?.clone();
                                     match ident.to_ascii_lowercase().as_str() {
@@ -1201,7 +1202,7 @@ fn parse_content_value(input: &mut Parser<'_, '_>) -> Vec<ContentItem> {
                                         "before" => Ok(TargetTextKind::Before),
                                         "after" => Ok(TargetTextKind::After),
                                         "first-letter" => Ok(TargetTextKind::FirstLetter),
-                                        _ => Err(input.new_custom_error(())),
+                                        _ => Err(ParseError::custom(())),
                                     }
                                 })
                                 .unwrap_or_default();
@@ -1329,8 +1330,7 @@ pub fn parse_gcpm(css: &str) -> GcpmContext {
 
     // Run the cssparser-based parse to collect GCPM data and edit spans.
     {
-        let mut input = ParserInput::new(css);
-        let mut input = Parser::new(&mut input);
+        let mut input = Parser::new(css);
 
         let mut parser = GcpmSheetParser {
             edits: &mut edits,
@@ -1432,8 +1432,8 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
     fn parse_prelude<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<()>> {
         // Every at-rule consumes this "is it the very first rule" slot,
         // regardless of what it turns out to be — only a real `@charset`
         // cares about the value, and only if it's checked BEFORE this
@@ -1446,7 +1446,7 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
                 Token::UnquotedUrl(ref u) => u.as_ref().to_string(),
                 Token::QuotedString(ref s) => s.as_ref().to_string(),
                 Token::Function(ref f) if f.eq_ignore_ascii_case("url") => {
-                    let nested: Result<String, ParseError<'i, ()>> =
+                    let nested: Result<String, ParseError<()>> =
                         input.parse_nested_block(|input| {
                             input
                                 .expect_string()
@@ -1456,11 +1456,11 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
                     match nested {
                         Ok(href) => href,
                         Err(_) => {
-                            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+                            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
                         }
                     }
                 }
-                _ => return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name))),
+                _ => return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid)),
             };
             // Discard the rest of the prelude (media / layer() / supports()) —
             // callers of `extract_top_level_import_hrefs` don't gate on media
@@ -1482,7 +1482,7 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         // like any other.
         if name.eq_ignore_ascii_case("charset") {
             let well_formed = input
-                .try_parse(|input| -> Result<(), ParseError<'i, ()>> {
+                .try_parse(|input| -> Result<(), ParseError<()>> {
                     input.expect_string()?;
                     input.expect_exhausted().map_err(Into::into)
                 })
@@ -1492,7 +1492,7 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
                 return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
             }
             self.seen_non_import = true;
-            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
         }
         // A statement-form `@layer <name>#;` is exempt from terminating
         // the valid `@import` zone only BEFORE the first `@import` — CSS
@@ -1511,7 +1511,7 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         if name.eq_ignore_ascii_case("layer") {
             let well_formed = !self.seen_import
                 && input
-                    .try_parse(|input| -> Result<(), ParseError<'i, ()>> {
+                    .try_parse(|input| -> Result<(), ParseError<()>> {
                         loop {
                             input.expect_ident()?;
                             while input.try_parse(|input| input.expect_delim('.')).is_ok() {
@@ -1529,10 +1529,10 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
                 return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
             }
             self.seen_non_import = true;
-            return Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)));
+            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
         }
         self.seen_non_import = true;
-        Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)))
+        Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid))
     }
 
     fn rule_without_block(
@@ -1560,8 +1560,8 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         &mut self,
         _prelude: Self::Prelude,
         _start: &cssparser::ParserState,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::AtRule, ParseError<'i, ()>> {
+        _input: &mut Parser<'i>,
+    ) -> Result<Self::AtRule, ParseError<()>> {
         // Only a block-form `@layer <name> { ... }` can reach here (the
         // only scanner-recognised at-rule with a block variant at all) —
         // that DOES terminate the valid `@import` zone, unlike its
@@ -1570,7 +1570,7 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         // way: not a valid `@import`/`@charset`/statement-`@layer`, so it
         // counts as "some other rule" per spec.
         self.seen_non_import = true;
-        Err(input.new_error(BasicParseErrorKind::AtRuleBodyInvalid))
+        Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleBodyInvalid))
     }
 }
 
@@ -1581,8 +1581,8 @@ impl<'i, 'a> QualifiedRuleParser<'i> for ImportHrefScanner<'a> {
 
     fn parse_prelude<'t>(
         &mut self,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        _input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<()>> {
         // A qualified (style) rule at top level always terminates the
         // valid `@import` zone, even though this scanner otherwise
         // ignores its contents entirely. Also claims the "is this the
@@ -1590,7 +1590,7 @@ impl<'i, 'a> QualifiedRuleParser<'i> for ImportHrefScanner<'a> {
         // correctly treated as non-exempt too (see `is_first_rule`).
         self.is_first_rule = false;
         self.seen_non_import = true;
-        Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+        Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
     }
 }
 
@@ -1619,8 +1619,7 @@ pub(crate) fn extract_top_level_import_hrefs(css: &str) -> Vec<String> {
         is_first_rule: true,
         seen_import: false,
     };
-    let mut input = ParserInput::new(css);
-    let mut input = Parser::new(&mut input);
+    let mut input = Parser::new(css);
     let iter = StyleSheetParser::new(&mut input, &mut scanner);
     for item in iter {
         let _ = item;
@@ -4223,8 +4222,7 @@ mod tests {
         // private helper directly with an empty parser: the loop exits
         // immediately with values = [], `input.next()` fails (exhausted), so
         // the match falls through to `_ => None`.
-        let mut pi = ParserInput::new("");
-        let mut p = Parser::new(&mut pi);
+        let mut p = Parser::new("");
         assert!(parse_page_margin_value(&mut p).is_none());
     }
 

@@ -1,3 +1,5 @@
+use crate::blitz_adapter::NodeLayoutExt;
+use blitz_dom::CopyStyleGetters;
 use crate::asset::AssetBundle;
 use crate::blitz_adapter::Node;
 use crate::draw_primitives::BlockStyle;
@@ -25,7 +27,7 @@ pub(super) struct StyleContext<'a> {
 
 /// Extract visual style (background, borders, padding, background-image) from a node.
 pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle {
-    let layout = node.final_layout;
+    let layout = node.final_layout_or_zero();
     let mut style = BlockStyle::default();
     box_metrics::apply_to(&mut style, &layout);
 

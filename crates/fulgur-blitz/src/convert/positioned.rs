@@ -1,3 +1,4 @@
+use crate::blitz_adapter::NodeLayoutExt;
 use super::*;
 use crate::units::{F32Units, Pt, Px};
 
@@ -26,10 +27,10 @@ pub(super) fn walk_children_into_drawables(
         return;
     }
     for &child_id in child_ids {
-        let Some(child_node) = doc.get_node(child_id) else {
+        let Some(child_node) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
-        if matches!(&child_node.data, NodeData::Comment) {
+        if matches!(&child_node.data, NodeData::Comment { .. }) {
             continue;
         }
         if is_non_visual_element(child_node) {
@@ -48,21 +49,21 @@ pub(super) fn walk_children_into_drawables(
 /// Whether `node`'s computed `position` is `absolute` or `fixed`.
 pub(super) fn is_absolutely_positioned(node: &Node) -> bool {
     node.primary_styles()
-        .is_some_and(|s| s.get_box().clone_position().is_absolutely_positioned())
+        .is_some_and(|s| s.get_box().slow_clone_position().is_absolutely_positioned())
 }
 
 /// Whether `node`'s computed `position` is `fixed` (as opposed to `absolute`).
 fn is_position_fixed(node: &Node) -> bool {
     use ::style::properties::longhands::position::computed_value::T as Pos;
     node.primary_styles()
-        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed))
+        .is_some_and(|s| matches!(s.get_box().slow_clone_position(), Pos::Fixed))
 }
 
 /// Whether `node`'s computed `position` is `static`.
 fn is_position_static(node: &Node) -> bool {
     use ::style::properties::longhands::position::computed_value::T as Pos;
     node.primary_styles()
-        .is_none_or(|s| matches!(s.get_box().clone_position(), Pos::Static))
+        .is_none_or(|s| matches!(s.get_box().slow_clone_position(), Pos::Static))
 }
 
 /// Resolved containing block for an absolutely-positioned descendant.
@@ -86,8 +87,8 @@ fn cb_padding_box(node: &Node) -> ((Px, Px), (Px, Px)) {
     // attacker-controlled `box-shadow` lists. `resolve_cb_for_absolute` calls
     // this per ancestor per node with an absolute pseudo, so a full-style
     // extraction here amplifies box-shadow processing by the ancestor walk.
-    let border = node.final_layout.border;
-    let sz = node.final_layout.size;
+    let border = node.final_layout_or_zero().border;
+    let sz = node.final_layout_or_zero().size;
     let pb_w = (sz.width - border.left - border.right).max(0.0).as_px();
     let pb_h = (sz.height - border.top - border.bottom).max(0.0).as_px();
     ((pb_w, pb_h), (border.left.as_px(), border.top.as_px()))
@@ -121,7 +122,7 @@ fn resolve_cb_for_absolute(
             });
         }
         if let Some(elem) = cur.element_data() {
-            if elem.name.local.as_ref() == "body" {
+            if (&*elem.name.local) == "body" {
                 let (mut padding_box_size, border_top_left) = cb_padding_box(cur);
                 if let Some((vw, vh)) = viewport_size_px {
                     if padding_box_size.0 <= Px::ZERO {
@@ -138,8 +139,8 @@ fn resolve_cb_for_absolute(
                 });
             }
         }
-        offset_x += cur.final_layout.location.x;
-        offset_y += cur.final_layout.location.y;
+        offset_x += cur.final_layout_or_zero().location.x;
+        offset_y += cur.final_layout_or_zero().location.y;
         cur_id = cur.parent;
         depth += 1;
     }
@@ -337,7 +338,7 @@ pub(super) fn walk_absolute_pseudo_children(
     let mut cb_absolute: Option<Option<AbsCb>> = None;
     let mut cb_fixed: Option<Option<AbsCb>> = None;
     for pseudo_id in slots.iter().copied().flatten() {
-        let Some(pseudo) = doc.get_node(pseudo_id) else {
+        let Some(pseudo) = doc.get_node(crate::blitz_adapter::bid(pseudo_id)) else {
             continue;
         };
         if !is_absolutely_positioned(pseudo) {
@@ -378,7 +379,7 @@ pub(super) fn walk_absolute_pseudo_children(
                 maybe_apply_abs_pseudo_inset_correction(
                     pseudo,
                     pseudo_id,
-                    node.id,
+                    crate::blitz_adapter::uid(node.id),
                     cb_resolved,
                     img_w,
                     img_h,
@@ -415,7 +416,7 @@ pub(super) fn walk_absolute_non_pseudo_children(
         if is_pseudo_node(doc, child_node) {
             continue;
         }
-        convert_node(doc, child_id, ctx, depth + 1, out);
+        convert_node(doc, crate::blitz_adapter::uid(child_id), ctx, depth + 1, out);
     }
 }
 
@@ -428,9 +429,9 @@ pub(super) fn walk_absolute_children(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) {
-    walk_absolute_pseudo_children(doc, node, ctx, depth, &[node.before], out);
+    walk_absolute_pseudo_children(doc, node, ctx, depth, &[node.before().map(crate::blitz_adapter::uid)], out);
     walk_absolute_non_pseudo_children(doc, node, ctx, depth, out);
-    walk_absolute_pseudo_children(doc, node, ctx, depth, &[node.after], out);
+    walk_absolute_pseudo_children(doc, node, ctx, depth, &[node.after().map(crate::blitz_adapter::uid)], out);
 }
 
 /// Shortcut for the textless `content: url(...)` abs pseudo case, returning
@@ -451,8 +452,8 @@ pub(super) fn try_build_absolute_pseudo_image(
         cb.padding_box_size
     } else {
         (
-            parent.final_layout.size.width.as_px(),
-            parent.final_layout.size.height.as_px(),
+            parent.final_layout_or_zero().size.width.as_px(),
+            parent.final_layout_or_zero().size.height.as_px(),
         )
     };
     pseudo::build_pseudo_image_entry(pseudo, basis_w, basis_h, assets)
@@ -481,15 +482,15 @@ mod tests {
     }
 
     fn find_first_by_tag(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
-        let node = doc.get_node(start_id)?;
+        let node = doc.get_node(crate::blitz_adapter::bid(start_id))?;
         if node
             .element_data()
-            .is_some_and(|e| e.name.local.as_ref() == tag)
+            .is_some_and(|e| (&*e.name.local) == tag)
         {
             return Some(start_id);
         }
         for &c in &node.children {
-            if let Some(found) = find_first_by_tag(doc, c, tag) {
+            if let Some(found) = find_first_by_tag(doc, crate::blitz_adapter::uid(c), tag) {
                 return Some(found);
             }
         }
@@ -498,7 +499,7 @@ mod tests {
 
     fn find_tag(doc: &HtmlDocument, tag: &str) -> usize {
         let root = doc.root_element();
-        find_first_by_tag(doc.deref(), root.id, tag)
+        find_first_by_tag(doc.deref(), crate::blitz_adapter::uid(root.id), tag)
             .unwrap_or_else(|| panic!("<{tag}> not found in document"))
     }
 
@@ -533,7 +534,7 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:absolute">x</div></body></html>"#,
         );
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(is_absolutely_positioned(node));
     }
 
@@ -542,14 +543,14 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:fixed">x</div></body></html>"#,
         );
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(is_absolutely_positioned(node));
     }
 
     #[test]
     fn is_absolutely_positioned_false_for_default() {
         let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(!is_absolutely_positioned(node));
     }
 
@@ -558,7 +559,7 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:relative">x</div></body></html>"#,
         );
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(!is_absolutely_positioned(node));
     }
 
@@ -569,7 +570,7 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:fixed">x</div></body></html>"#,
         );
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(is_position_fixed(node));
     }
 
@@ -578,14 +579,14 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:absolute">x</div></body></html>"#,
         );
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(!is_position_fixed(node));
     }
 
     #[test]
     fn is_position_fixed_false_for_default() {
         let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(!is_position_fixed(node));
     }
 
@@ -594,7 +595,7 @@ mod tests {
     #[test]
     fn is_position_static_true_for_default() {
         let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(is_position_static(node));
     }
 
@@ -603,7 +604,7 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:absolute">x</div></body></html>"#,
         );
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(!is_position_static(node));
     }
 
@@ -612,7 +613,7 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:relative">x</div></body></html>"#,
         );
-        let node = doc.get_node(find_tag(&doc, "div")).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
         assert!(!is_position_static(node));
     }
 
@@ -624,7 +625,7 @@ mod tests {
             r#"<!doctype html><html><body><div style="position:absolute">x</div></body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let node = doc.get_node(div_id).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         // A regular element with no `content: url(...)` must return None.
         assert!(try_build_absolute_pseudo_image(node, node, None, None).is_none());
     }
@@ -649,7 +650,7 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         walk_absolute_non_pseudo_children(
             doc.deref(),
@@ -687,7 +688,7 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         walk_absolute_non_pseudo_children(doc.deref(), section_node, &mut ctx, 0, &mut out);
 
@@ -720,7 +721,7 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         walk_absolute_non_pseudo_children(doc.deref(), section_node, &mut ctx, 0, &mut out);
 
@@ -744,10 +745,10 @@ mod tests {
             false,
         );
         let div_id = find_tag(&doc, "div");
-        let child_ids: Vec<usize> = doc
-            .get_node(div_id)
+        let child_ids: Vec<usize> = crate::blitz_adapter::uids(&doc
+            .get_node(crate::blitz_adapter::bid(div_id))
             .map(|n| n.children.clone())
-            .unwrap_or_default();
+            .unwrap_or_default());
         let running_store = RunningElementStore::new();
         let mut ctx = make_ctx(&mut doc, &running_store);
         let mut out = crate::drawables::Drawables::new();
@@ -789,10 +790,10 @@ mod tests {
         let section_id = find_tag(&doc, "section");
         // Snapshot the children while we still hold the node ref, before
         // borrowing doc as immutable for walk_children_into_drawables.
-        let child_ids: Vec<usize> = doc
-            .get_node(section_id)
+        let child_ids: Vec<usize> = crate::blitz_adapter::uids(&doc
+            .get_node(crate::blitz_adapter::bid(section_id))
             .map(|n| n.children.clone())
-            .unwrap_or_default();
+            .unwrap_or_default());
 
         walk_children_into_drawables(doc.deref(), &child_ids, &mut ctx, 0, &mut out);
 
@@ -827,16 +828,16 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let child_ids: Vec<usize> = doc
-            .get_node(section_id)
+        let child_ids: Vec<usize> = crate::blitz_adapter::uids(&doc
+            .get_node(crate::blitz_adapter::bid(section_id))
             .map(|n| n.children.clone())
-            .unwrap_or_default();
+            .unwrap_or_default());
 
         walk_children_into_drawables(doc.deref(), &child_ids, &mut ctx, 0, &mut out);
 
         // Script node (if present in the DOM) must not have been registered.
         // Div with "content" should produce at least one draw entry.
-        if let Some(script_id) = find_first_by_tag(doc.deref(), doc.root_element().id, "script") {
+        if let Some(script_id) = find_first_by_tag(doc.deref(), crate::blitz_adapter::uid(doc.root_element().id), "script") {
             assert!(
                 !out.block_styles.contains_key(&script_id)
                     && !out.paragraphs.contains_key(&script_id),
@@ -862,10 +863,10 @@ mod tests {
             </body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let node = doc.get_node(div_id).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         let ((pb_w, pb_h), (bl, bt)) = cb_padding_box(node);
         let (pb_w, pb_h, bl, bt) = (pb_w.to_f32(), pb_h.to_f32(), bl.to_f32(), bt.to_f32());
-        let sz = node.final_layout.size;
+        let sz = node.final_layout_or_zero().size;
         // No border → pb_w == sz.width, pb_h == sz.height.
         assert!(
             (pb_w - sz.width).abs() < 0.01,
@@ -897,10 +898,10 @@ mod tests {
             </body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let node = doc.get_node(div_id).unwrap();
+        let node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         let ((pb_w, _pb_h), (bl, bt)) = cb_padding_box(node);
         let (pb_w, bl, bt) = (pb_w.to_f32(), bl.to_f32(), bt.to_f32());
-        let sz = node.final_layout.size;
+        let sz = node.final_layout_or_zero().size;
         // With 10px border on each side, the border-box is 120×120px and the
         // padding box (content) is 100×100px.
         assert!(
@@ -926,7 +927,7 @@ mod tests {
             </body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let div_node = doc.get_node(div_id).unwrap();
+        let div_node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         let result = resolve_cb_for_absolute(doc.deref(), div_node, false, None);
         assert!(
             result.is_some(),
@@ -951,7 +952,7 @@ mod tests {
             </body></html>"#,
         );
         let span_id = find_tag(&doc, "span");
-        let span_node = doc.get_node(span_id).unwrap();
+        let span_node = doc.get_node(crate::blitz_adapter::bid(span_id)).unwrap();
         let result = resolve_cb_for_absolute(doc.deref(), span_node, false, Some((595.0, 842.0)));
         // All ancestors are static → body fallback must be returned.
         let cb = result.expect(
@@ -981,7 +982,7 @@ mod tests {
             </body></html>"#,
         );
         let span_id = find_tag(&doc, "span");
-        let span_node = doc.get_node(span_id).unwrap();
+        let span_node = doc.get_node(crate::blitz_adapter::bid(span_id)).unwrap();
         let result = resolve_cb_for_absolute(doc.deref(), span_node, false, Some((595.0, 842.0)));
         let cb = result.expect("body fallback should produce Some");
         // Body width resolved to 0 → replaced with the viewport width (595).
@@ -1005,7 +1006,7 @@ mod tests {
             </body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let div_node = doc.get_node(div_id).unwrap();
+        let div_node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         let result = resolve_cb_for_absolute(doc.deref(), div_node, true, Some((595.0, 842.0)));
         // is_fixed=true → relative section is skipped → body fallback returned.
         let cb = result
@@ -1030,7 +1031,7 @@ mod tests {
             </body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let div_node = doc.get_node(div_id).unwrap();
+        let div_node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         let result = resolve_cb_for_absolute(doc.deref(), div_node, false, None);
         assert!(result.is_some(), "non-static node passed directly → Some");
         let cb = result.unwrap();
@@ -1066,7 +1067,7 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         walk_absolute_children(doc.deref(), section_node, &mut ctx, 0, &mut out);
 
@@ -1095,7 +1096,7 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         walk_absolute_children(doc.deref(), section_node, &mut ctx, 0, &mut out);
 
@@ -1123,7 +1124,7 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         walk_absolute_pseudo_children(doc.deref(), section_node, &mut ctx, 0, &[None], &mut out);
 
@@ -1155,7 +1156,7 @@ mod tests {
         let mut ctx = make_ctx(&mut doc, &running_store);
         let mut out = crate::drawables::Drawables::new();
 
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         // parent_is_static=true (section default) → cb_absolute branch
         walk_absolute_pseudo_children(
@@ -1195,7 +1196,7 @@ mod tests {
         let mut ctx = make_ctx(&mut doc, &running_store);
         let mut out = crate::drawables::Drawables::new();
 
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         // parent_is_static=false → else branch: AbsCb from cb_padding_box(section)
         walk_absolute_pseudo_children(
@@ -1235,7 +1236,7 @@ mod tests {
         let mut ctx = make_ctx(&mut doc, &running_store);
         let mut out = crate::drawables::Drawables::new();
 
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
 
         // is_position_fixed(pseudo)=true → cb_fixed branch
         walk_absolute_pseudo_children(
@@ -1263,7 +1264,7 @@ mod tests {
         let doc =
             parse_doc(r#"<!doctype html><html><body><div><span>text</span></div></body></html>"#);
         let span_id = find_tag(&doc, "span");
-        let span_node = doc.get_node(span_id).unwrap();
+        let span_node = doc.get_node(crate::blitz_adapter::bid(span_id)).unwrap();
         let result = resolve_cb_for_absolute(doc.deref(), span_node, false, None);
         assert!(
             result.is_some(),
@@ -1298,7 +1299,7 @@ mod tests {
         let mut ctx = make_ctx(&mut doc, &running_store);
         let mut out = crate::drawables::Drawables::new();
 
-        let section_node = doc.get_node(section_id).unwrap();
+        let section_node = doc.get_node(crate::blitz_adapter::bid(section_id)).unwrap();
         walk_absolute_pseudo_children(
             doc.deref(),
             section_node,
@@ -1335,9 +1336,9 @@ mod tests {
         </body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let div_node = doc.get_node(div_id).unwrap();
+        let div_node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         let before_id = div_node
-            .before
+            .before()
             .expect("::before pseudo-element should exist");
         let before_node = doc
             .get_node(before_id)
@@ -1375,9 +1376,9 @@ mod tests {
         </body></html>"#,
         );
         let div_id = find_tag(&doc, "div");
-        let div_node = doc.get_node(div_id).unwrap();
+        let div_node = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
         let before_id = div_node
-            .before
+            .before()
             .expect("::before pseudo-element should exist");
         let before_node = doc
             .get_node(before_id)

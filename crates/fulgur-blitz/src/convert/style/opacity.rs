@@ -3,6 +3,7 @@
 //! Free function — called directly by block / list_item / inline_root /
 //! pseudo, not from extract_block_style.
 
+use blitz_dom::CopyStyleGetters;
 use crate::blitz_adapter::Node;
 
 /// Extract CSS opacity and visibility from computed styles.

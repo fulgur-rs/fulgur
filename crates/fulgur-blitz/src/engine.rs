@@ -1113,7 +1113,7 @@ fn build_anchor_map(
     let mut map = AnchorMap::new();
     walk_anchors(
         doc,
-        doc.root_element().id,
+        crate::blitz_adapter::uid(doc.root_element().id),
         0,
         pagination_geometry,
         counter_snapshots,
@@ -1133,7 +1133,7 @@ fn walk_anchors(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     // Skip nodes that the fragmenter never assigned a page to (out-of-flow
@@ -1147,8 +1147,8 @@ fn walk_anchors(
     {
         let counters = snapshots.get(&node_id).cloned().unwrap_or_default();
         let text = collect_text_content(doc, node_id);
-        let before_text = collect_pseudo_text(doc, node.before, elem);
-        let after_text = collect_pseudo_text(doc, node.after, elem);
+        let before_text = collect_pseudo_text(doc, node.before().map(crate::blitz_adapter::uid), elem);
+        let after_text = collect_pseudo_text(doc, node.after().map(crate::blitz_adapter::uid), elem);
         out.insert(
             frag.to_string(),
             AnchorEntry {
@@ -1160,7 +1160,7 @@ fn walk_anchors(
             },
         );
     }
-    let children: Vec<usize> = node.children.clone();
+    let children: Vec<usize> = crate::blitz_adapter::uids(&node.children.clone());
     for c in children {
         walk_anchors(doc, c, depth + 1, geometry, snapshots, out);
     }
@@ -1191,13 +1191,13 @@ fn walk_anchors(
 fn collect_pseudo_text(
     doc: &BaseDocument,
     pseudo_id: Option<usize>,
-    parent_elem: &blitz_dom::node::ElementData,
+    _parent_elem: &blitz_dom::node::ElementData,
 ) -> String {
     use style::values::generics::counters::{Content, ContentItem as Sci};
     let Some(pid) = pseudo_id else {
         return String::new();
     };
-    let Some(node) = doc.get_node(pid) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(pid)) else {
         return String::new();
     };
     let Some(styles) = node.primary_styles() else {
@@ -1212,14 +1212,9 @@ fn collect_pseudo_text(
     // alt-text in CSS Level 3 Content.
     for item in &item_data.items[..item_data.alt_start] {
         match item {
+            // Stylo 0.24 substitutes `attr()` at computed-value time, so
+            // it arrives here as a plain `String` item.
             Sci::String(s) => out.push_str(s.as_ref()),
-            Sci::Attr(a) => {
-                let name = a.attribute.as_ref();
-                match get_attr(parent_elem, name) {
-                    Some(v) => out.push_str(v),
-                    None => out.push_str(a.fallback.as_ref()),
-                }
-            }
             _ => {}
         }
     }
@@ -1284,7 +1279,7 @@ fn build_implicit_href_map(
     let mut map = BTreeMap::new();
     walk_implicit_href(
         doc,
-        doc.root_element().id,
+        crate::blitz_adapter::uid(doc.root_element().id),
         0,
         None,
         pagination_geometry,
@@ -1304,7 +1299,7 @@ fn walk_implicit_href(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     // Block-level ancestors get their own fragments; inline descendants
@@ -1313,7 +1308,7 @@ fn walk_implicit_href(
     // assigned to their nearest paginated ancestor.
     let resolved_page = page_for_node(geometry, node_id).or(inherited_page);
     if let Some(elem) = node.element_data()
-        && elem.name.local.as_ref() == "a"
+        && (&*elem.name.local) == "a"
         && let Some(href) = get_attr(elem, "href")
         && fragment_id_from_href(href).is_some()
         && let Some(page_num) = resolved_page
@@ -1321,7 +1316,7 @@ fn walk_implicit_href(
         let page_idx = page_num.saturating_sub(1) as usize;
         out.entry(page_idx).or_insert_with(|| href.to_string());
     }
-    let children: Vec<usize> = node.children.clone();
+    let children: Vec<usize> = crate::blitz_adapter::uids(&node.children.clone());
     for c in children {
         walk_implicit_href(doc, c, depth + 1, resolved_page, geometry, out);
     }
@@ -1679,21 +1674,21 @@ mod tests {
     /// fixtures that don't run a real fragmenter.
     fn collect_anchor_node_ids(doc: &blitz_dom::BaseDocument) -> Vec<usize> {
         fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut Vec<usize>) {
-            let Some(node) = doc.get_node(node_id) else {
+            let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
                 return;
             };
             if let Some(elem) = node.element_data()
-                && elem.name.local.as_ref() == "a"
+                && (&*elem.name.local) == "a"
             {
                 out.push(node_id);
             }
-            let children: Vec<usize> = node.children.clone();
+            let children: Vec<usize> = crate::blitz_adapter::uids(&node.children.clone());
             for c in children {
                 walk(doc, c, out);
             }
         }
         let mut out = Vec::new();
-        walk(doc, doc.root_element().id, &mut out);
+        walk(doc, crate::blitz_adapter::uid(doc.root_element().id), &mut out);
         out
     }
 
@@ -1814,20 +1809,20 @@ mod tests {
         // it is inline and intentionally has no geometry entry.
         fn find_first_tag(doc: &blitz_dom::BaseDocument, tag: &str) -> Option<usize> {
             fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, tag: &str) -> Option<usize> {
-                let n = doc.get_node(node_id)?;
+                let n = doc.get_node(crate::blitz_adapter::bid(node_id))?;
                 if let Some(elem) = n.element_data()
-                    && elem.name.local.as_ref() == tag
+                    && (&*elem.name.local) == tag
                 {
                     return Some(node_id);
                 }
                 for c in n.children.iter().copied() {
-                    if let Some(found) = walk(doc, c, tag) {
+                    if let Some(found) = walk(doc, crate::blitz_adapter::uid(c), tag) {
                         return Some(found);
                     }
                 }
                 None
             }
-            walk(doc, doc.root_element().id, tag)
+            walk(doc, crate::blitz_adapter::uid(doc.root_element().id), tag)
         }
         let p_id = find_first_tag(&doc, "p").expect("find <p>");
         let mut geometry = PaginationGeometryTable::new();

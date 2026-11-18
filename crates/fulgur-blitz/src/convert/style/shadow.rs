@@ -10,7 +10,7 @@ use crate::draw_primitives::BlockStyle;
 use crate::units::F32Units;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
-    let shadow_list = ctx.styles.clone_box_shadow();
+    let shadow_list = ctx.styles.slow_clone_box_shadow();
     for shadow in shadow_list.0.iter() {
         if shadow.inset {
             log::warn!("box-shadow: inset is not yet supported; skipping");

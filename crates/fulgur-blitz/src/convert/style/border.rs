@@ -9,7 +9,7 @@ use crate::units::F32Units;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     // Border color (use top border color for all sides for simplicity)
-    let bc = ctx.styles.clone_border_top_color();
+    let bc = ctx.styles.slow_clone_border_top_color();
     style.border_color = absolute_to_rgba(bc.resolve_to_absolute(ctx.current_color));
 
     // Border radii. Stylo evaluates length-percentage values in CSS px
@@ -19,10 +19,10 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     let width = ctx.layout.size.width;
     let height = ctx.layout.size.height;
 
-    let tl = ctx.styles.clone_border_top_left_radius();
-    let tr = ctx.styles.clone_border_top_right_radius();
-    let br = ctx.styles.clone_border_bottom_right_radius();
-    let bl = ctx.styles.clone_border_bottom_left_radius();
+    let tl = ctx.styles.slow_clone_border_top_left_radius();
+    let tr = ctx.styles.slow_clone_border_top_right_radius();
+    let br = ctx.styles.slow_clone_border_bottom_right_radius();
+    let bl = ctx.styles.slow_clone_border_bottom_left_radius();
 
     style.border_radii = [
         [
@@ -44,10 +44,10 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     ];
 
     style.border_styles = [
-        map_border_style(ctx.styles.clone_border_top_style()),
-        map_border_style(ctx.styles.clone_border_right_style()),
-        map_border_style(ctx.styles.clone_border_bottom_style()),
-        map_border_style(ctx.styles.clone_border_left_style()),
+        map_border_style(ctx.styles.slow_clone_border_top_style()),
+        map_border_style(ctx.styles.slow_clone_border_right_style()),
+        map_border_style(ctx.styles.slow_clone_border_bottom_style()),
+        map_border_style(ctx.styles.slow_clone_border_left_style()),
     ];
 }
 

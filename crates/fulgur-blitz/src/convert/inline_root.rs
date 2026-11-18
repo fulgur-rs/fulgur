@@ -1,3 +1,4 @@
+use crate::blitz_adapter::NodeLayoutExt;
 use super::*;
 use super::{list_marker, positioned, pseudo};
 use crate::paragraph::{InlineBoxItem, ParagraphRender};
@@ -20,13 +21,13 @@ pub(super) fn try_convert(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
     if !node.flags.is_inline_root() {
         return false;
     }
-    let (width, height) = size_in_pt(node.final_layout.size);
+    let (width, height) = size_in_pt(node.final_layout_or_zero().size);
 
     // Snapshot must be taken BEFORE `extract_paragraph` because the latter
     // recurses into inline-box children (registering their drawable
@@ -58,25 +59,25 @@ pub(super) fn try_convert(
 
     // Inline pseudo images.
     let before_inline = node
-        .before
+        .before()
         .and_then(|id| doc.get_node(id))
         .filter(|p| !pseudo::is_block_pseudo(p))
         .and_then(|p| {
             pseudo::build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
         })
         .map(|mut img| {
-            pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
+            pseudo::attach_link_to_inline_image(&mut img, doc, crate::blitz_adapter::uid(node.id));
             img
         });
     let after_inline = node
-        .after
+        .after()
         .and_then(|id| doc.get_node(id))
         .filter(|p| !pseudo::is_block_pseudo(p))
         .and_then(|p| {
             pseudo::build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
         })
         .map(|mut img| {
-            pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
+            pseudo::attach_link_to_inline_image(&mut img, doc, crate::blitz_adapter::uid(node.id));
             img
         });
 
@@ -287,9 +288,9 @@ pub(super) fn resolve_enclosing_anchor(
         if depth >= MAX_DOM_DEPTH {
             return None;
         }
-        let node = doc.get_node(id)?;
+        let node = doc.get_node(crate::blitz_adapter::bid(id))?;
         if let NodeData::Element(el) = &node.data {
-            if el.name.local.as_ref() == "a" {
+            if (&*el.name.local) == "a" {
                 let href = crate::blitz_adapter::get_attr(el, "href")?.trim();
                 if href.is_empty() {
                     return None;
@@ -304,7 +305,7 @@ pub(super) fn resolve_enclosing_anchor(
                 return Some((id, LinkSpan { target, alt_text }));
             }
         }
-        cur = node.parent;
+        cur = node.parent.map(crate::blitz_adapter::uid);
         depth += 1;
     }
     None
@@ -372,16 +373,16 @@ fn pageable_last_baseline_from_drawables(
     // 2) Otherwise walk DOM children in REVERSE. Use Blitz's
     //    `layout_children` when available so anonymous block wrappers
     //    around inline-level siblings are visited correctly.
-    let node = doc.get_node(node_id)?;
+    let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
     let layout_children_borrow = node.layout_children.borrow();
     // An explicit `Some([])` from Blitz means "no in-flow children" and is
     // authoritative — fall back to `node.children` only when Blitz has not
     // populated `layout_children` at all. Otherwise an inline-block whose
     // only descendants are absolutely-positioned would walk those out-of-flow
     // nodes here and report a bogus baseline.
-    let walk_children: &[usize] = layout_children_borrow.as_deref().unwrap_or(&node.children);
+    let walk_children: &[usize] = &crate::blitz_adapter::uids(layout_children_borrow.as_deref().unwrap_or(&node.children));
     for &child_id in walk_children.iter().rev() {
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
         if let Some(inner) = pageable_last_baseline_from_drawables(doc, out, child_id, depth + 1) {
@@ -389,7 +390,7 @@ fn pageable_last_baseline_from_drawables(
             // recursively returns its inner baseline relative to its
             // own top edge; the container's own `top_inset` is folded
             // in by branch (1) above.
-            return Some(child.final_layout.location.y.as_px().in_pt() + inner);
+            return Some(child.final_layout_or_zero().location.y.as_px().in_pt() + inner);
         }
     }
     None
@@ -420,7 +421,7 @@ fn convert_inline_box_node(
     // them register here would double-paint via the inline-box dispatch.
     // Returning `None` causes `paragraph::draw_shaped_lines` to skip the
     // inline-box dispatch for this item.
-    if let Some(node) = doc.get_node(node_id) {
+    if let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) {
         if positioned::is_absolutely_positioned(node) && is_pseudo_node(doc, node) {
             return None;
         }
@@ -480,12 +481,12 @@ pub(super) fn extract_paragraph(
                     let font_size = font_size_parley.as_px().in_pt();
 
                     let brush = &glyph_run.style().brush;
-                    let color = get_text_color(doc, brush.id);
-                    let decoration = get_text_decoration(doc, brush.id);
-                    let link = ctx.link_cache.lookup(doc, brush.id);
+                    let color = get_text_color(doc, crate::blitz_adapter::uid(brush.id));
+                    let decoration = get_text_decoration(doc, crate::blitz_adapter::uid(brush.id));
+                    let link = ctx.link_cache.lookup(doc, crate::blitz_adapter::uid(brush.id));
 
                     // Advance or reset the per-Run offset counter.
-                    let run_key = run.cluster_range().start;
+                    let run_key = run.index();
                     if run_key != prev_run_key {
                         prev_run_key = run_key;
                         run_glyph_offset = 0;
@@ -545,7 +546,7 @@ pub(super) fn extract_paragraph(
                 }
                 parley::PositionedLayoutItem::InlineBox(positioned) => {
                     let node_id = positioned.id as usize;
-                    if let Some(box_node) = doc.get_node(node_id) {
+                    if let Some(box_node) = doc.get_node(crate::blitz_adapter::bid(node_id)) {
                         if positioned::is_absolutely_positioned(box_node)
                             && is_pseudo_node(doc, box_node)
                         {
@@ -584,7 +585,7 @@ pub(super) fn extract_paragraph(
                     let computed_y =
                         positioned.y.as_px().in_pt() - accumulated_line_top + baseline_shift;
                     let visible = doc
-                        .get_node(node_id)
+                        .get_node(crate::blitz_adapter::bid(node_id))
                         .map(super::style::extract_opacity_visible)
                         .map(|(_, v)| v)
                         .unwrap_or(true);
@@ -1090,15 +1091,15 @@ mod tests {
     }
 
     fn find_first_by_tag(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
-        let node = doc.get_node(start_id)?;
+        let node = doc.get_node(crate::blitz_adapter::bid(start_id))?;
         if node
             .element_data()
-            .is_some_and(|e| e.name.local.as_ref() == tag)
+            .is_some_and(|e| (&*e.name.local) == tag)
         {
             return Some(start_id);
         }
         for &c in &node.children {
-            if let Some(found) = find_first_by_tag(doc, c, tag) {
+            if let Some(found) = find_first_by_tag(doc, crate::blitz_adapter::uid(c), tag) {
                 return Some(found);
             }
         }
@@ -1107,7 +1108,7 @@ mod tests {
 
     fn find_tag(doc: &HtmlDocument, tag: &str) -> usize {
         let root = doc.root_element();
-        find_first_by_tag(doc.deref(), root.id, tag)
+        find_first_by_tag(doc.deref(), crate::blitz_adapter::uid(root.id), tag)
             .unwrap_or_else(|| panic!("<{tag}> not found in document"))
     }
 

@@ -27,6 +27,22 @@ pub(crate) fn sandboxed_options() -> usvg::Options<'static> {
     }
 }
 
+/// [`sandboxed_options`] plus the system font database (loaded once per
+/// process), so `<text>` inside an inline `<svg>` can resolve its fonts the
+/// way Blitz's own parse of the same element does.
+pub(crate) fn sandboxed_options_with_system_fonts() -> usvg::Options<'static> {
+    static FONT_DB: std::sync::LazyLock<std::sync::Arc<usvg::fontdb::Database>> =
+        std::sync::LazyLock::new(|| {
+            let mut db = usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            std::sync::Arc::new(db)
+        });
+    usvg::Options {
+        fontdb: FONT_DB.clone(),
+        ..sandboxed_options()
+    }
+}
+
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
 pub struct SvgRender {

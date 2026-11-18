@@ -1,3 +1,4 @@
+use blitz_dom::CopyStyleGetters;
 use super::inline_root;
 use super::positioned::{is_absolutely_positioned, walk_absolute_children};
 use super::replaced::{make_image_entry, resolve_image_dimensions};
@@ -22,8 +23,8 @@ pub(super) fn build_pseudo_image_entry(
     let format = ImageRender::detect_format(&data)?;
 
     let styles = pseudo_node.primary_styles()?;
-    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);
-    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_content_height);
+    let css_w = resolve_pseudo_size(&styles.slow_clone_width(), parent_content_width);
+    let css_h = resolve_pseudo_size(&styles.slow_clone_height(), parent_content_height);
 
     let (opacity, visible) = extract_opacity_visible(pseudo_node);
     Some(make_image_entry(
@@ -82,7 +83,7 @@ pub(super) fn register_pseudo_content(
 /// Cheap probe: does `node` have at least one `::before` / `::after` pseudo
 /// slot whose computed `content` resolves to a block-display image URL?
 pub(super) fn node_has_block_pseudo_image(doc: &BaseDocument, node: &Node) -> bool {
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+    for pseudo_id in [node.before(), node.after()].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && is_block_pseudo(pseudo)
             && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
@@ -101,7 +102,7 @@ pub(super) fn node_has_block_pseudo_image(doc: &BaseDocument, node: &Node) -> bo
 /// detects inline pseudos directly via `build_inline_pseudo_image` instead.
 #[allow(dead_code)]
 pub(super) fn node_has_inline_pseudo_image(doc: &BaseDocument, node: &Node) -> bool {
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+    for pseudo_id in [node.before(), node.after()].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && !is_block_pseudo(pseudo)
             && crate::blitz_adapter::extract_content_image_url(pseudo).is_some()
@@ -115,7 +116,7 @@ pub(super) fn node_has_inline_pseudo_image(doc: &BaseDocument, node: &Node) -> b
 /// Returns `true` if `node` has a `::before` or `::after` pseudo-element
 /// whose computed `position` is `absolute` or `fixed`.
 pub(super) fn node_has_absolute_pseudo(doc: &BaseDocument, node: &Node) -> bool {
-    for pseudo_id in [node.before, node.after].into_iter().flatten() {
+    for pseudo_id in [node.before(), node.after()].into_iter().flatten() {
         if let Some(pseudo) = doc.get_node(pseudo_id)
             && is_absolutely_positioned(pseudo)
         {
@@ -143,7 +144,7 @@ fn build_block_pseudo_image_entries(
     }
     let load = |pseudo_id: Option<usize>| -> BlockPseudoImageSlot {
         let id = pseudo_id?;
-        let pseudo = doc.get_node(id)?;
+        let pseudo = doc.get_node(crate::blitz_adapter::bid(id))?;
         if !is_block_pseudo(pseudo) {
             return None;
         }
@@ -153,7 +154,7 @@ fn build_block_pseudo_image_entries(
         let entry = build_pseudo_image_entry(pseudo, parent_cb.width, parent_cb.height, assets)?;
         Some((id, entry))
     };
-    (load(parent.before), load(parent.after))
+    (load(parent.before().map(crate::blitz_adapter::uid)), load(parent.after().map(crate::blitz_adapter::uid)))
 }
 
 /// Build an `InlineImage` for a `::before`/`::after` pseudo whose
@@ -172,8 +173,8 @@ pub(super) fn build_inline_pseudo_image(
     let format = ImageRender::detect_format(&data)?;
 
     let styles = pseudo_node.primary_styles()?;
-    let css_w = resolve_pseudo_size(&styles.clone_width(), parent_content_width);
-    let css_h = resolve_pseudo_size(&styles.clone_height(), parent_content_height);
+    let css_w = resolve_pseudo_size(&styles.slow_clone_width(), parent_content_width);
+    let css_h = resolve_pseudo_size(&styles.slow_clone_height(), parent_content_height);
     let (w, h) = resolve_image_dimensions(&data, format, css_w, css_h);
     let (opacity, visible) = extract_opacity_visible(pseudo_node);
     let vertical_align = crate::blitz_adapter::extract_vertical_align(pseudo_node);
@@ -939,15 +940,15 @@ mod tests {
         start_id: usize,
         tag: &str,
     ) -> Option<&'a crate::blitz_adapter::Node> {
-        let node = base.get_node(start_id)?;
+        let node = base.get_node(crate::blitz_adapter::bid(start_id))?;
         if node
             .element_data()
-            .is_some_and(|e| e.name.local.as_ref() == tag)
+            .is_some_and(|e| (&*e.name.local) == tag)
         {
             return Some(node);
         }
         for &child in &node.children {
-            if let Some(found) = find_elem_by_tag_in_pseudo_tests(base, child, tag) {
+            if let Some(found) = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(child), tag) {
                 return Some(found);
             }
         }
@@ -963,7 +964,7 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
             .expect("div element must be present");
         assert!(
             super::node_has_inline_pseudo_image(base, div_node),
@@ -980,7 +981,7 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
             .expect("div element must be present");
         assert!(
             super::node_has_inline_pseudo_image(base, div_node),
@@ -997,7 +998,7 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
             .expect("div element must be present");
         assert!(
             !super::node_has_inline_pseudo_image(base, div_node),
@@ -1012,7 +1013,7 @@ mod tests {
             r#"<!DOCTYPE html><html><body><div>No pseudo here</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
             .expect("div element must be present");
         assert!(
             !super::node_has_inline_pseudo_image(base, div_node),
@@ -1029,7 +1030,7 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, doc.root_element().id, "div")
+        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
             .expect("div element must be present");
         assert!(
             !super::node_has_inline_pseudo_image(base, div_node),
