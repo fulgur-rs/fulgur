@@ -354,8 +354,8 @@ mod tests {
     #[test]
     fn format_filter_decimal_numeric_direct() {
         // ".Nf": numeric value — verify the happy path directly.
-        let v = minijinja::Value::from(3.14159_f64);
-        assert_eq!(format_filter(&v, ".2f"), "3.14");
+        let v = minijinja::Value::from(12.345_f64);
+        assert_eq!(format_filter(&v, ".2f"), "12.35");
     }
 
     #[test]
