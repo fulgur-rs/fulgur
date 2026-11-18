@@ -315,4 +315,53 @@ mod tests {
         let result = render_template("test.html", tmpl, &data).unwrap();
         assert_eq!(result, "");
     }
+
+    // The following tests call format_filter directly (bypassing MiniJinja filter
+    // dispatch) to ensure LLVM region counters are attributed to the branches
+    // inside format_filter itself, not to the MiniJinja call site.
+
+    #[test]
+    fn format_filter_comma_decimal_non_numeric_direct() {
+        // ",.Nf": prec parses but as_f64 is None — covers the fall-through at
+        // the closing braces of the inner if-let chain (lines 62-63).
+        let v = minijinja::Value::from("text");
+        assert_eq!(format_filter(&v, ",.2f"), "text");
+    }
+
+    #[test]
+    fn format_filter_decimal_non_numeric_direct() {
+        // ".Nf": prec parses but as_f64 is None — covers the fall-through closing
+        // brace of the inner if-let (line 72).
+        let v = minijinja::Value::from("not-a-number");
+        assert_eq!(format_filter(&v, ".3f"), "not-a-number");
+    }
+
+    #[test]
+    fn format_filter_zero_pad_float_direct() {
+        // "0Nd": width parses but as_i64 is None for a float — covers the
+        // fall-through closing brace (line 81).
+        let v = minijinja::Value::from(1.5_f64);
+        assert_eq!(format_filter(&v, "04d"), "1.5");
+    }
+
+    #[test]
+    fn format_filter_comma_decimal_numeric_direct() {
+        // ",.Nf": numeric value — verify the happy path directly.
+        let v = minijinja::Value::from(1234567.89_f64);
+        assert_eq!(format_filter(&v, ",.2f"), "1,234,567.89");
+    }
+
+    #[test]
+    fn format_filter_decimal_numeric_direct() {
+        // ".Nf": numeric value — verify the happy path directly.
+        let v = minijinja::Value::from(3.14159_f64);
+        assert_eq!(format_filter(&v, ".2f"), "3.14");
+    }
+
+    #[test]
+    fn format_filter_zero_pad_integer_direct() {
+        // "0Nd": integer value — verify the happy path directly.
+        let v = minijinja::Value::from(7_i64);
+        assert_eq!(format_filter(&v, "03d"), "007");
+    }
 }
