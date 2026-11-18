@@ -926,3 +926,40 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod outside_marker_whitespace {
+    use crate::units::F32Units;
+
+    /// The UA stylesheet gives `::marker` `white-space: pre`, so the outside
+    /// marker for a decimal list is "1. " with its trailing space. With
+    /// collapsing whitespace the space is dropped, the marker is measured one
+    /// space too narrow and ends flush against the item text ("1.Author").
+    #[test]
+    fn decimal_outside_marker_keeps_trailing_space() {
+        let doc = crate::blitz_adapter::parse_and_layout(
+            "<html><body><ol><li>Author</li></ol></body></html>",
+            600.0_f32.as_px(),
+            800.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let layout = doc
+            .tree()
+            .iter()
+            .find_map(|(_, n)| {
+                let li = n.element_data()?.list_item_data.as_ref()?;
+                crate::blitz_adapter::list_position_outside_layout(&li.position)
+            })
+            .expect("an outside marker layout");
+        let line = layout.lines().next().expect("one marker line");
+        assert_eq!(line.text_range(), 0..3, "marker text must be \"1. \" including the space");
+        let glyphs: usize = line
+            .items()
+            .filter_map(|i| match i {
+                parley::PositionedLayoutItem::GlyphRun(g) => Some(g.glyphs().count()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(glyphs, 3, "'1', '.', and the trailing space are all shaped");
+    }
+}
