@@ -658,16 +658,23 @@ fn record_multicol_rule(
     if !crate::blitz_adapter::is_multicol_container(node) {
         return;
     }
-    let Some(rule) = ctx
-        .column_styles
-        .get(&node_id)
-        .and_then(|props| props.rule)
-        .filter(|r| {
-            r.style != crate::column_css::ColumnRuleStyle::None && r.width > crate::units::Pt::ZERO
-        })
-    else {
+    let props = ctx.column_styles.get(&node_id);
+    let Some(mut rule) = props.and_then(|props| props.rule).filter(|r| {
+        r.style != crate::column_css::ColumnRuleStyle::None && r.width > crate::units::Pt::ZERO
+    }) else {
         return;
     };
+    if let Some(source) = props.and_then(|p| p.rule_color_source.as_deref()) {
+        // A `var()` that does not resolve makes the value invalid at
+        // computed-value time, which falls back to the initial value,
+        // `currentcolor`.
+        if let Some(rgba) = node.primary_styles().and_then(|styles| {
+            resolve_css_color(source, &styles)
+                .or_else(|| resolve_css_color("currentcolor", &styles))
+        }) {
+            rule.color = rgba;
+        }
+    }
     let Some(geometry) = ctx.multicol_geometry.get(&node_id) else {
         return;
     };
@@ -1104,6 +1111,70 @@ impl LinkCache {
             }
         }
     }
+}
+
+/// Resolve a CSS colour written for `styles`' element: `var()` references
+/// are replaced by the element's computed custom properties (whose own
+/// `var()`s Stylo has already substituted), then Stylo's colour parser
+/// computes the value, `currentcolor` included. For properties Stylo does
+/// not compute for Servo, such as `column-rule-color`.
+pub(crate) fn resolve_css_color(
+    source: &str,
+    styles: &::style::properties::ComputedValues,
+) -> Option<[u8; 4]> {
+    use blitz_dom::CopyStyleGetters;
+
+    let text = substitute_css_vars(source, |name| {
+        styles
+            .custom_properties()
+            .get_for_cssom(&::style::Atom::from(name))
+            .map(::style_traits::ToCss::to_css_string)
+    })?;
+    let computed = crate::column_css::parse_stylo_color(&text)?;
+    let rgba = style::absolute_to_rgba(computed.resolve_to_absolute(&styles.clone_color()));
+    Some(rgba)
+}
+
+/// Replace every `var(--name[, fallback])` in `css` with `lookup(name)`
+/// (the name without its leading `--`), or with the fallback when the
+/// lookup fails. Returns `None` when a reference has neither. Nesting
+/// (`var(--a, var(--b))`) is handled by repeating the pass, a bounded
+/// number of times.
+fn substitute_css_vars(css: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    const MAX_PASSES: usize = 16;
+    let mut text = css.to_string();
+    for _ in 0..MAX_PASSES {
+        let lower = text.to_ascii_lowercase();
+        let Some(start) = lower.find("var(") else {
+            return Some(text);
+        };
+        // The matching close parenthesis, and the first top-level comma.
+        let mut depth = 0usize;
+        let mut comma = None;
+        let mut end = None;
+        for (i, c) in text[start + 4..].char_indices() {
+            let i = start + 4 + i;
+            match c {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                ')' => depth -= 1,
+                ',' if depth == 0 && comma.is_none() => comma = Some(i),
+                _ => {}
+            }
+        }
+        let end = end?;
+        let name_end = comma.unwrap_or(end);
+        let name = text[start + 4..name_end].trim();
+        let value = name
+            .strip_prefix("--")
+            .and_then(&lookup)
+            .or_else(|| comma.map(|c| text[c + 1..end].trim().to_string()))?;
+        text.replace_range(start..=end, &value);
+    }
+    None
 }
 
 /// Extract the asset name from a URL that Stylo may have resolved to absolute.
@@ -2356,5 +2427,78 @@ mod edge_case_tests {
             "whitespace-only id must not be stored in block entries; found {}",
             bad_block_ids.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod css_color_tests {
+    use super::{resolve_css_color, substitute_css_vars};
+
+    fn lookup(name: &str) -> Option<String> {
+        match name {
+            "a" => Some("red".into()),
+            "b" => Some("var(--a)".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn substitutes_vars_fallbacks_and_nesting() {
+        assert_eq!(
+            substitute_css_vars("var(--a)", lookup).as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            substitute_css_vars("var(--b)", lookup).as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            substitute_css_vars("var(--x, var(--a))", lookup).as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            substitute_css_vars("color-mix(in srgb, var(--a) 50%, var(--x, blue))", lookup)
+                .as_deref(),
+            Some("color-mix(in srgb, red 50%, blue)")
+        );
+        assert_eq!(substitute_css_vars("var(--x)", lookup), None);
+        assert_eq!(substitute_css_vars("var(--a", lookup), None);
+    }
+
+    fn styles_of_body(html: &str) -> ::style::servo_arc::Arc<::style::properties::ComputedValues> {
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let body = (0..10_000)
+            .filter_map(|id| doc.get_node(crate::blitz_adapter::bid(id)))
+            .find(|n| n.element_data().is_some_and(|e| &*e.name.local == "body"))
+            .expect("body");
+        body.primary_styles().expect("styles").clone()
+    }
+
+    #[test]
+    fn resolves_custom_properties_modern_colours_and_currentcolor() {
+        let styles = styles_of_body(
+            r#"<!doctype html><html><head><style>
+            :root { --ink: rgb(0 0 255); --line: color-mix(in srgb, var(--ink) 50%, white); }
+            body { color: rgb(0 128 0); }
+            </style></head><body>x</body></html>"#,
+        );
+        assert_eq!(
+            resolve_css_color("var(--ink)", &styles),
+            Some([0, 0, 255, 255])
+        );
+        let mixed = resolve_css_color("var(--line)", &styles).expect("color-mix");
+        assert!(mixed[0].abs_diff(128) <= 1 && mixed[2] == 255, "{mixed:?}");
+        assert_eq!(
+            resolve_css_color("currentcolor", &styles),
+            Some([0, 128, 0, 255])
+        );
+        let oklch = resolve_css_color("oklch(62.8% 0.2577 29.23)", &styles).expect("oklch");
+        assert!(
+            oklch[0] >= 250 && oklch[1] <= 5 && oklch[2] <= 5,
+            "{oklch:?}"
+        );
+        assert_eq!(resolve_css_color("var(--missing)", &styles), None);
+        assert_eq!(resolve_css_color("not-a-colour", &styles), None);
     }
 }

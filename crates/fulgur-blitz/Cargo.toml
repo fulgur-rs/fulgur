@@ -34,6 +34,9 @@ taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "a3997d55bacd1fb6cd
 parley = "0.13"
 skrifa = "0.47"
 stylo = "0.24.0"
+# Stylo's own traits (`ToCss`, `ParsingMode`), for resolving colours Stylo
+# does not compute for Servo (`column-rule-color`). Already built by stylo.
+stylo_traits = "0.24.0"
 thiserror = "2"
 minijinja = { version = "=2.24.0", features = ["unstable_machinery"] }
 serde_json = "1"

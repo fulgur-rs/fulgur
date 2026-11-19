@@ -118,6 +118,14 @@ pub enum PageName {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnStyleProps {
     pub rule: Option<ColumnRuleSpec>,
+    /// `column-rule-color` text this sniffer cannot turn into RGBA on its
+    /// own: `var()`, `currentcolor`, `oklch()`, `color-mix()` and every
+    /// other form beyond hex, named, `rgb()` and `hsl()`. Also
+    /// `currentcolor` when a rule declares no colour (its initial value).
+    /// Resolved per element at convert time, against the element's
+    /// computed custom properties and `color`, with Stylo's own colour
+    /// parser. `None` means `rule.color` is final.
+    pub rule_color_source: Option<String>,
     pub fill: Option<ColumnFill>,
     /// `break-inside` as resolved by the fulgur-ftp sniffer. `None` means the
     /// author did not set the property — consumers should treat that as the
@@ -142,6 +150,7 @@ impl ColumnStyleProps {
     fn merge(&mut self, other: ColumnStyleProps) {
         if other.rule.is_some() {
             self.rule = other.rule;
+            self.rule_color_source = other.rule_color_source;
         }
         if other.fill.is_some() {
             self.fill = other.fill;
@@ -592,6 +601,20 @@ struct ColumnDeclParser<'a> {
     props: &'a mut ColumnStyleProps,
 }
 
+impl ColumnDeclParser<'_> {
+    /// The rule a longhand modifies: the one declared so far, or a new one
+    /// whose colour is `currentcolor` (the initial value).
+    fn default_rule(&mut self) -> ColumnRuleSpec {
+        match self.props.rule {
+            Some(spec) => spec,
+            None => {
+                self.props.rule_color_source = Some("currentcolor".to_string());
+                ColumnRuleSpec::default()
+            }
+        }
+    }
+}
+
 impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
     type Declaration = ();
     type Error = ();
@@ -603,15 +626,16 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
         _decl_start: &cssparser::ParserState,
     ) -> Result<(), ParseError<()>> {
         if name.eq_ignore_ascii_case("column-rule") {
-            if let Some(spec) = parse_column_rule_shorthand(input) {
+            if let Some((spec, color_source)) = parse_column_rule_shorthand(input) {
                 // A shorthand with `style: None` is equivalent to "don't
                 // draw" — we store it anyway so a later longhand can read
                 // the width/colour the author still wanted.
                 self.props.rule = Some(spec);
+                self.props.rule_color_source = color_source;
             }
         } else if name.eq_ignore_ascii_case("column-rule-width") {
             if let Ok(w) = input.parse_entirely(parse_length) {
-                let mut spec = self.props.rule.unwrap_or_default();
+                let mut spec = self.default_rule();
                 spec.width = w.as_pt();
                 self.props.rule = Some(spec);
             }
@@ -623,15 +647,19 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
                 })
             });
             if let Ok(style) = result {
-                let mut spec = self.props.rule.unwrap_or_default();
+                let mut spec = self.default_rule();
                 spec.style = style;
                 self.props.rule = Some(spec);
             }
         } else if name.eq_ignore_ascii_case("column-rule-color") {
-            if let Ok(color) = input.parse_entirely(parse_color) {
+            if let Ok(color) = input.try_parse(|input| input.parse_entirely(parse_color)) {
                 let mut spec = self.props.rule.unwrap_or_default();
                 spec.color = color;
                 self.props.rule = Some(spec);
+                self.props.rule_color_source = None;
+            } else if let Ok(source) = input.parse_entirely(parse_color_source) {
+                self.props.rule = Some(self.props.rule.unwrap_or_default());
+                self.props.rule_color_source = Some(source);
             }
         } else if name.eq_ignore_ascii_case("column-fill") {
             if let Ok(fill) = input.parse_entirely(parse_column_fill_value) {
@@ -698,10 +726,11 @@ impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for ColumnDeclParser<'a> {
 /// — per CSS rules a malformed shorthand is "ignored entirely" and we
 /// mirror that strict behaviour. Missing components fall back to the
 /// defaults in [`ColumnRuleSpec::default`].
-fn parse_column_rule_shorthand(input: &mut Parser<'_>) -> Option<ColumnRuleSpec> {
+fn parse_column_rule_shorthand(input: &mut Parser<'_>) -> Option<(ColumnRuleSpec, Option<String>)> {
     let mut width: Option<f32> = None;
     let mut style: Option<ColumnRuleStyle> = None;
     let mut color: Option<[u8; 4]> = None;
+    let mut color_source: Option<String> = None;
 
     // The shorthand accepts the three components in any order but at most
     // one of each. Loop up to three times and try each slot in turn.
@@ -734,10 +763,14 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_>) -> Option<ColumnRuleSpec>
         }
 
         // Try color.
-        if color.is_none() {
+        if color.is_none() && color_source.is_none() {
             let parsed = input.try_parse(parse_color);
             if let Ok(c) = parsed {
                 color = Some(c);
+                continue;
+            }
+            if let Ok(source) = input.try_parse(parse_color_source) {
+                color_source = Some(source);
                 continue;
             }
         }
@@ -758,10 +791,63 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_>) -> Option<ColumnRuleSpec>
     if let Some(s) = style {
         spec.style = s;
     }
-    if let Some(c) = color {
-        spec.color = c;
+    match color {
+        Some(c) => spec.color = c,
+        // The initial value of `column-rule-color` is `currentcolor`.
+        None if color_source.is_none() => color_source = Some("currentcolor".to_string()),
+        None => {}
     }
-    Some(spec)
+    Some((spec, color_source))
+}
+
+/// The source text of one colour value that [`parse_color`] cannot
+/// resolve without the element: a function (`var()`, `oklch()`,
+/// `color-mix()`, ...) or a keyword (`currentcolor`). Resolved later by
+/// the convert pass.
+fn parse_color_source<'i>(input: &mut Parser<'i>) -> Result<String, ParseError<()>> {
+    let start = input.position();
+    let err = || ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid);
+    match input.next()?.clone() {
+        Token::Function(_) => {
+            input.parse_nested_block(|nested| {
+                while nested.next().is_ok() {}
+                Ok::<(), ParseError<()>>(())
+            })?;
+        }
+        Token::Ident(ref name) if parse_rule_style_ident(name).is_none() => {}
+        _ => return Err(err()),
+    }
+    let source = input.slice_from(start).trim().to_string();
+    // A value with `var()` is valid at parse time and checked once the
+    // variables are known; anything else must already be a colour, or the
+    // declaration drops.
+    if !source.to_ascii_lowercase().contains("var(") && parse_stylo_color(&source).is_none() {
+        return Err(err());
+    }
+    Ok(source)
+}
+
+/// Parse `text` as one CSS colour with Stylo's parser: every syntax Stylo
+/// knows (`oklch()`, `color-mix()`, `currentcolor`, ...), but no `var()`.
+pub(crate) fn parse_stylo_color(text: &str) -> Option<::style::values::computed::Color> {
+    use ::style::stylesheets::{CssRuleType, Origin, UrlExtraData};
+
+    let url = UrlExtraData(::style::servo_arc::Arc::new(
+        blitz_traits::net::Url::parse("about:blank").ok()?,
+    ));
+    let context = ::style::parser::ParserContext::new(
+        Origin::Author,
+        &url,
+        Some(CssRuleType::Style),
+        ::style_traits::ParsingMode::DEFAULT,
+        ::style::context::QuirksMode::NoQuirks,
+        Default::default(),
+        None,
+        None,
+        Default::default(),
+    );
+    let mut parser = Parser::new(text);
+    ::style::values::specified::Color::parse_and_compute(&context, &mut parser, None).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,6 +1229,37 @@ mod tests {
     // -------- declaration parsing --------
 
     #[test]
+    fn colours_the_sniffer_cannot_resolve_are_kept_as_source() {
+        let props = parse_declaration_block(
+            "column-rule: 1px solid color-mix(in oklch, var(--ink) 12%, white);",
+        );
+        assert_eq!(props.rule.expect("rule").style, ColumnRuleStyle::Solid);
+        assert_eq!(
+            props.rule_color_source.as_deref(),
+            Some("color-mix(in oklch, var(--ink) 12%, white)")
+        );
+
+        let props = parse_declaration_block("column-rule-color: var(--line);");
+        assert_eq!(props.rule_color_source.as_deref(), Some("var(--line)"));
+
+        // A resolvable colour clears an earlier source.
+        let props =
+            parse_declaration_block("column-rule-color: var(--line); column-rule-color: red;");
+        assert_eq!(props.rule_color_source, None);
+        assert_eq!(props.rule.expect("rule").color, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_rule_without_a_colour_uses_currentcolor() {
+        let props = parse_declaration_block("column-rule: 2px solid;");
+        assert_eq!(props.rule_color_source.as_deref(), Some("currentcolor"));
+        let props = parse_declaration_block("column-rule-style: dotted;");
+        assert_eq!(props.rule_color_source.as_deref(), Some("currentcolor"));
+        let props = parse_declaration_block("column-rule: 2px solid blue;");
+        assert_eq!(props.rule_color_source, None);
+    }
+
+    #[test]
     fn parses_column_rule_longhand_triplet() {
         let css = "column-rule-width: 2pt; column-rule-style: solid; column-rule-color: red;";
         let props = parse_declaration_block(css);
@@ -1308,11 +1425,12 @@ mod tests {
     }
 
     #[test]
-    fn currentcolor_drops_color_longhand() {
+    fn currentcolor_is_kept_for_the_convert_pass() {
+        // `currentcolor` needs the element's `color`, so it is resolved
+        // at convert time.
         let props = parse_declaration_block("column-rule-color: currentcolor;");
-        // cssparser doesn't know `currentcolor` as a named colour; we
-        // return `None` which drops this declaration silently.
-        assert!(props.rule.is_none());
+        assert!(props.rule.is_some());
+        assert_eq!(props.rule_color_source.as_deref(), Some("currentcolor"));
     }
 
     #[test]
@@ -2367,14 +2485,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_rgb_no_comma_between_channels_drops_declaration() {
-        // Space-separated `rgb(r g b)` (CSS Color 4 syntax) is not supported
-        // by this parser; missing comma triggers `input.expect_comma()? Err`.
+    fn parse_rgb_space_separated_channels_falls_back_to_stylo() {
+        // Space-separated `rgb(r g b)` (CSS Color 4) is beyond the built-in
+        // parser; Stylo validates it and the convert pass resolves it.
         let props = parse_declaration_block("column-rule-color: rgb(255 0 0);");
-        assert!(
-            props.rule.is_none(),
-            "space-separated rgb must drop the declaration"
-        );
+        assert_eq!(props.rule_color_source.as_deref(), Some("rgb(255 0 0)"));
     }
 
     #[test]
