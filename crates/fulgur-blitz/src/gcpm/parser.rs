@@ -67,7 +67,9 @@ impl<'i, 'a> AtRuleParser<'i> for GcpmSheetParser<'a> {
         input: &mut Parser<'i>,
     ) -> Result<Self::Prelude, ParseError<()>> {
         if !name.eq_ignore_ascii_case("page") {
-            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::AtRuleInvalid,
+            ));
         }
 
         // Optional page selector like `:first`
@@ -161,7 +163,9 @@ impl<'i, 'a> QualifiedRuleParser<'i> for GcpmSheetParser<'a> {
                 } else if ident.eq_ignore_ascii_case("after") {
                     Ok(PseudoElement::After)
                 } else {
-                    Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
+                    Err(ParseError::<()>::from_basic_kind(
+                        BasicParseErrorKind::QualifiedRuleInvalid,
+                    ))
                 }
             })
             .ok();
@@ -334,7 +338,9 @@ fn parse_page_size_value(input: &mut Parser<'_>) -> Option<PageSizeDecl> {
                                 ))
                             }
                         }
-                        _ => Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
+                        _ => Err(ParseError::<()>::from_basic_kind(
+                            BasicParseErrorKind::QualifiedRuleInvalid,
+                        )),
                     }
                 });
                 match orientation {
@@ -353,9 +359,13 @@ fn parse_page_size_value(input: &mut Parser<'_>) -> Option<PageSizeDecl> {
                         Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit)
                             .filter(|v| *v > 0.0)
                             .ok_or_else(|| {
-                                ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)
+                                ParseError::<()>::from_basic_kind(
+                                    BasicParseErrorKind::QualifiedRuleInvalid,
+                                )
                             }),
-                        _ => Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
+                        _ => Err(ParseError::<()>::from_basic_kind(
+                            BasicParseErrorKind::QualifiedRuleInvalid,
+                        )),
                     }
                 })
                 .unwrap_or(w);
@@ -374,10 +384,13 @@ fn parse_page_size_value(input: &mut Parser<'_>) -> Option<PageSizeDecl> {
 fn parse_length_pt_token<'i>(input: &mut Parser<'i>) -> Result<f32, ParseError<()>> {
     let tok = input.next()?.clone();
     match tok {
-        Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit)
-            .ok_or_else(|| ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
+        Token::Dimension { value, unit, .. } => css_unit_to_pt(value, &unit).ok_or_else(|| {
+            ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)
+        }),
         Token::Number { value: 0.0, .. } => Ok(0.0_f32),
-        _ => Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::<()>::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
@@ -650,7 +663,9 @@ impl<'i, 'a> DeclarationParser<'i> for StyleRuleParser<'a> {
             let result = input.try_parse(|input| {
                 let fn_name = input.expect_function()?.clone();
                 if !fn_name.eq_ignore_ascii_case("running") {
-                    return Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid));
+                    return Err(ParseError::<()>::from_basic_kind(
+                        BasicParseErrorKind::QualifiedRuleInvalid,
+                    ));
                 }
                 input.parse_nested_block(|input| {
                     let ident = input.expect_ident()?.clone();
@@ -852,7 +867,7 @@ impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for StyleRuleParser<'a> {
 // ---------------------------------------------------------------------------
 
 /// Parse the value of a `string-set` declaration: `<name> <value>+`.
-fn parse_string_set_value<'i, 't>(
+fn parse_string_set_value<'i>(
     input: &mut Parser<'i>,
 ) -> Result<(String, Vec<StringSetValue>), ParseError<()>> {
     let name = input.expect_ident()?.clone().to_string();
@@ -899,7 +914,9 @@ fn parse_string_set_value<'i, 't>(
     }
 
     if values.is_empty() {
-        return Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid));
+        return Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        ));
     }
 
     Ok((name, values))
@@ -930,7 +947,9 @@ fn parse_policy_ident<'i, T>(
                 if next.eq_ignore_ascii_case("except") {
                     Ok(())
                 } else {
-                    Err(ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
+                    Err(ParseError::<()>::from_basic_kind(
+                        BasicParseErrorKind::QualifiedRuleInvalid,
+                    ))
                 }
             })
             .is_ok();
@@ -943,7 +962,8 @@ fn parse_policy_ident<'i, T>(
         ident.to_ascii_lowercase()
     };
 
-    map_fn(&canonical).ok_or_else(|| ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
+    map_fn(&canonical)
+        .ok_or_else(|| ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
 }
 
 /// Parse the policy argument of `string(name, <policy>)`.
@@ -974,7 +994,9 @@ fn parse_counter_style<'i>(input: &mut Parser<'i>) -> Result<CounterStyle, Parse
         "lower-roman" => Ok(CounterStyle::LowerRoman),
         "upper-alpha" | "upper-latin" => Ok(CounterStyle::UpperAlpha),
         "lower-alpha" | "lower-latin" => Ok(CounterStyle::LowerAlpha),
-        _ => Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
@@ -1015,9 +1037,7 @@ fn parse_target_url(input: &mut Parser<'_>) -> Option<TargetUrl> {
 }
 
 /// Parse the policy argument of `element(name, <policy>)`.
-fn parse_element_policy<'i>(
-    input: &mut Parser<'i>,
-) -> Result<ElementPolicy, ParseError<()>> {
+fn parse_element_policy<'i>(input: &mut Parser<'i>) -> Result<ElementPolicy, ParseError<()>> {
     parse_policy_ident(input, |s| match s {
         "first" => Some(ElementPolicy::First),
         "start" => Some(ElementPolicy::Start),
@@ -1034,27 +1054,23 @@ fn parse_element_policy<'i>(
 /// identifier `none`. Any other value — floats, negative numbers, zero,
 /// other idents — is rejected so the rule is treated as if
 /// `bookmark-level` were absent.
-fn parse_bookmark_level_value<'i>(
-    input: &mut Parser<'i>,
-) -> Result<BookmarkLevel, ParseError<()>> {
+fn parse_bookmark_level_value<'i>(input: &mut Parser<'i>) -> Result<BookmarkLevel, ParseError<()>> {
     let token = input.next()?.clone();
     match token {
         Token::Number {
             int_value: Some(n), ..
         } if n >= 1 && n <= i32::from(u8::MAX) => Ok(BookmarkLevel::Integer(n as u8)),
         Token::Ident(ref ident) if ident.eq_ignore_ascii_case("none") => Ok(BookmarkLevel::None_),
-        _ => Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
 /// Parse counter operations from `counter-reset`, `counter-increment`, or `counter-set`.
 fn parse_counter_ops(input: &mut Parser<'_>, prop: &str) -> Vec<CounterOp> {
     let mut ops = Vec::new();
-    loop {
-        let name = match input.try_parse(|input| input.expect_ident().map(|s| s.to_string())) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
+    while let Ok(name) = input.try_parse(|input| input.expect_ident().map(|s| s.to_string())) {
         if name.eq_ignore_ascii_case("none") {
             break;
         }
@@ -1456,11 +1472,17 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
                     match nested {
                         Ok(href) => href,
                         Err(_) => {
-                            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
+                            return Err(ParseError::from_basic_kind(
+                                BasicParseErrorKind::AtRuleInvalid,
+                            ));
                         }
                     }
                 }
-                _ => return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid)),
+                _ => {
+                    return Err(ParseError::from_basic_kind(
+                        BasicParseErrorKind::AtRuleInvalid,
+                    ));
+                }
             };
             // Discard the rest of the prelude (media / layer() / supports()) —
             // callers of `extract_top_level_import_hrefs` don't gate on media
@@ -1492,7 +1514,9 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
                 return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
             }
             self.seen_non_import = true;
-            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::AtRuleInvalid,
+            ));
         }
         // A statement-form `@layer <name>#;` is exempt from terminating
         // the valid `@import` zone only BEFORE the first `@import` — CSS
@@ -1529,10 +1553,14 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
                 return Ok(ScannedAtRulePrelude::CharsetOrLayerStatement);
             }
             self.seen_non_import = true;
-            return Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid));
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::AtRuleInvalid,
+            ));
         }
         self.seen_non_import = true;
-        Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleInvalid))
+        Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::AtRuleInvalid,
+        ))
     }
 
     fn rule_without_block(
@@ -1570,7 +1598,9 @@ impl<'i, 'a> AtRuleParser<'i> for ImportHrefScanner<'a> {
         // way: not a valid `@import`/`@charset`/statement-`@layer`, so it
         // counts as "some other rule" per spec.
         self.seen_non_import = true;
-        Err(ParseError::from_basic_kind(BasicParseErrorKind::AtRuleBodyInvalid))
+        Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::AtRuleBodyInvalid,
+        ))
     }
 }
 
@@ -1590,7 +1620,9 @@ impl<'i, 'a> QualifiedRuleParser<'i> for ImportHrefScanner<'a> {
         // correctly treated as non-exempt too (see `is_first_rule`).
         self.is_first_rule = false;
         self.seen_non_import = true;
-        Err(ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid))
+        Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        ))
     }
 }
 

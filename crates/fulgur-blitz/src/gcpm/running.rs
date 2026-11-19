@@ -122,7 +122,7 @@ fn write_node(
 
             for attr in elem.attrs() {
                 writer.push(' ');
-                writer.push_str(&*attr.name.local);
+                writer.push_str(&attr.name.local);
                 writer.push_str("=\"");
                 escape_attribute_value(&attr.value, writer);
                 writer.push('"');
@@ -134,7 +134,13 @@ fn write_node(
                 writer.push('>');
                 let children_are_raw_text = is_raw_text_element(elem);
                 for &child_id in &node.children {
-                    write_node(doc, crate::blitz_adapter::uid(child_id), writer, depth + 1, children_are_raw_text);
+                    write_node(
+                        doc,
+                        crate::blitz_adapter::uid(child_id),
+                        writer,
+                        depth + 1,
+                        children_are_raw_text,
+                    );
                 }
                 writer.push_str("</");
                 writer.push_str(tag);
@@ -308,7 +314,8 @@ mod tests {
         let html = format!("<html><body>{body_html}</body></html>");
         let doc = crate::blitz_adapter::parse(&html, 600.0, &[]);
         let root_id = doc.root_element().id;
-        let div_id = find_first_tag(&doc, crate::blitz_adapter::uid(root_id), "div", 0).expect("no <div> in fixture");
+        let div_id = find_first_tag(&doc, crate::blitz_adapter::uid(root_id), "div", 0)
+            .expect("no <div> in fixture");
         serialize_node(&doc, div_id)
     }
 
@@ -323,13 +330,13 @@ mod tests {
         }
         let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
         if let Some(elem) = node.element_data() {
-            if (&*elem.name.local) == tag {
+            if (&elem.name.local) == tag {
                 return Some(node_id);
             }
         }
-        node.children
-            .iter()
-            .find_map(|&child| find_first_tag(doc, crate::blitz_adapter::uid(child), tag, depth + 1))
+        node.children.iter().find_map(|&child| {
+            find_first_tag(doc, crate::blitz_adapter::uid(child), tag, depth + 1)
+        })
     }
 
     /// Text that reached the DOM as escaped markup — the shape produced by

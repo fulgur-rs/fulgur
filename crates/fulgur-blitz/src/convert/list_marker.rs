@@ -952,7 +952,11 @@ mod outside_marker_whitespace {
             })
             .expect("an outside marker layout");
         let line = layout.lines().next().expect("one marker line");
-        assert_eq!(line.text_range(), 0..3, "marker text must be \"1. \" including the space");
+        assert_eq!(
+            line.text_range(),
+            0..3,
+            "marker text must be \"1. \" including the space"
+        );
         let glyphs: usize = line
             .items()
             .filter_map(|i| match i {

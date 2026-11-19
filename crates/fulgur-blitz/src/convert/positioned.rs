@@ -1,5 +1,5 @@
-use crate::blitz_adapter::NodeLayoutExt;
 use super::*;
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::units::{F32Units, Pt, Px};
 
 /// Walk a parent node's child id list, recursing into each via
@@ -122,7 +122,7 @@ fn resolve_cb_for_absolute(
             });
         }
         if let Some(elem) = cur.element_data() {
-            if (&*elem.name.local) == "body" {
+            if (&elem.name.local) == "body" {
                 let (mut padding_box_size, border_top_left) = cb_padding_box(cur);
                 if let Some((vw, vh)) = viewport_size_px {
                     if padding_box_size.0 <= Px::ZERO {
@@ -416,7 +416,13 @@ pub(super) fn walk_absolute_non_pseudo_children(
         if is_pseudo_node(doc, child_node) {
             continue;
         }
-        convert_node(doc, crate::blitz_adapter::uid(child_id), ctx, depth + 1, out);
+        convert_node(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            ctx,
+            depth + 1,
+            out,
+        );
     }
 }
 
@@ -429,9 +435,23 @@ pub(super) fn walk_absolute_children(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) {
-    walk_absolute_pseudo_children(doc, node, ctx, depth, &[node.before().map(crate::blitz_adapter::uid)], out);
+    walk_absolute_pseudo_children(
+        doc,
+        node,
+        ctx,
+        depth,
+        &[node.before().map(crate::blitz_adapter::uid)],
+        out,
+    );
     walk_absolute_non_pseudo_children(doc, node, ctx, depth, out);
-    walk_absolute_pseudo_children(doc, node, ctx, depth, &[node.after().map(crate::blitz_adapter::uid)], out);
+    walk_absolute_pseudo_children(
+        doc,
+        node,
+        ctx,
+        depth,
+        &[node.after().map(crate::blitz_adapter::uid)],
+        out,
+    );
 }
 
 /// Shortcut for the textless `content: url(...)` abs pseudo case, returning
@@ -483,10 +503,7 @@ mod tests {
 
     fn find_first_by_tag(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
         let node = doc.get_node(crate::blitz_adapter::bid(start_id))?;
-        if node
-            .element_data()
-            .is_some_and(|e| (&*e.name.local) == tag)
-        {
+        if node.element_data().is_some_and(|e| (&e.name.local) == tag) {
             return Some(start_id);
         }
         for &c in &node.children {
@@ -534,7 +551,9 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:absolute">x</div></body></html>"#,
         );
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(is_absolutely_positioned(node));
     }
 
@@ -543,14 +562,18 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:fixed">x</div></body></html>"#,
         );
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(is_absolutely_positioned(node));
     }
 
     #[test]
     fn is_absolutely_positioned_false_for_default() {
         let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(!is_absolutely_positioned(node));
     }
 
@@ -559,7 +582,9 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:relative">x</div></body></html>"#,
         );
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(!is_absolutely_positioned(node));
     }
 
@@ -570,7 +595,9 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:fixed">x</div></body></html>"#,
         );
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(is_position_fixed(node));
     }
 
@@ -579,14 +606,18 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:absolute">x</div></body></html>"#,
         );
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(!is_position_fixed(node));
     }
 
     #[test]
     fn is_position_fixed_false_for_default() {
         let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(!is_position_fixed(node));
     }
 
@@ -595,7 +626,9 @@ mod tests {
     #[test]
     fn is_position_static_true_for_default() {
         let doc = parse_doc(r#"<!doctype html><html><body><div>x</div></body></html>"#);
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(is_position_static(node));
     }
 
@@ -604,7 +637,9 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:absolute">x</div></body></html>"#,
         );
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(!is_position_static(node));
     }
 
@@ -613,7 +648,9 @@ mod tests {
         let doc = parse_doc(
             r#"<!doctype html><html><body><div style="position:relative">x</div></body></html>"#,
         );
-        let node = doc.get_node(crate::blitz_adapter::bid(find_tag(&doc, "div"))).unwrap();
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(find_tag(&doc, "div")))
+            .unwrap();
         assert!(!is_position_static(node));
     }
 
@@ -745,10 +782,11 @@ mod tests {
             false,
         );
         let div_id = find_tag(&doc, "div");
-        let child_ids: Vec<usize> = crate::blitz_adapter::uids(&doc
-            .get_node(crate::blitz_adapter::bid(div_id))
-            .map(|n| n.children.clone())
-            .unwrap_or_default());
+        let child_ids: Vec<usize> = crate::blitz_adapter::uids(
+            &doc.get_node(crate::blitz_adapter::bid(div_id))
+                .map(|n| n.children.clone())
+                .unwrap_or_default(),
+        );
         let running_store = RunningElementStore::new();
         let mut ctx = make_ctx(&mut doc, &running_store);
         let mut out = crate::drawables::Drawables::new();
@@ -790,10 +828,11 @@ mod tests {
         let section_id = find_tag(&doc, "section");
         // Snapshot the children while we still hold the node ref, before
         // borrowing doc as immutable for walk_children_into_drawables.
-        let child_ids: Vec<usize> = crate::blitz_adapter::uids(&doc
-            .get_node(crate::blitz_adapter::bid(section_id))
-            .map(|n| n.children.clone())
-            .unwrap_or_default());
+        let child_ids: Vec<usize> = crate::blitz_adapter::uids(
+            &doc.get_node(crate::blitz_adapter::bid(section_id))
+                .map(|n| n.children.clone())
+                .unwrap_or_default(),
+        );
 
         walk_children_into_drawables(doc.deref(), &child_ids, &mut ctx, 0, &mut out);
 
@@ -828,16 +867,21 @@ mod tests {
         let mut out = crate::drawables::Drawables::new();
 
         let section_id = find_tag(&doc, "section");
-        let child_ids: Vec<usize> = crate::blitz_adapter::uids(&doc
-            .get_node(crate::blitz_adapter::bid(section_id))
-            .map(|n| n.children.clone())
-            .unwrap_or_default());
+        let child_ids: Vec<usize> = crate::blitz_adapter::uids(
+            &doc.get_node(crate::blitz_adapter::bid(section_id))
+                .map(|n| n.children.clone())
+                .unwrap_or_default(),
+        );
 
         walk_children_into_drawables(doc.deref(), &child_ids, &mut ctx, 0, &mut out);
 
         // Script node (if present in the DOM) must not have been registered.
         // Div with "content" should produce at least one draw entry.
-        if let Some(script_id) = find_first_by_tag(doc.deref(), crate::blitz_adapter::uid(doc.root_element().id), "script") {
+        if let Some(script_id) = find_first_by_tag(
+            doc.deref(),
+            crate::blitz_adapter::uid(doc.root_element().id),
+            "script",
+        ) {
             assert!(
                 !out.block_styles.contains_key(&script_id)
                     && !out.paragraphs.contains_key(&script_id),

@@ -6,9 +6,8 @@
 //! read from their respective stores by the fragmenter and render pass
 //! independently.
 
-use crate::blitz_adapter::NodeLayoutExt;
-use blitz_dom::CopyStyleGetters;
 use crate::asset::AssetBundle;
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::blitz_adapter::{BaseDocument, Node, NodeData};
 use crate::draw_primitives::{BlockStyle, Size};
 use crate::drawables::{ImageMarker, ListItemMarker};
@@ -20,6 +19,7 @@ use crate::paragraph::{
     ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,
 };
 use crate::units::{F32Units, Pt, Px};
+use blitz_dom::CopyStyleGetters;
 use blitz_html::HtmlDocument;
 use skrifa::MetadataProvider;
 use std::collections::HashMap;
@@ -168,7 +168,13 @@ pub fn dom_to_drawables(
     if std::env::var("FULGUR_DEBUG").is_ok() {
         debug_print_tree(doc.deref(), crate::blitz_adapter::uid(root.id), 0);
     }
-    convert_node(doc.deref(), crate::blitz_adapter::uid(root.id), ctx, 0, &mut drawables);
+    convert_node(
+        doc.deref(),
+        crate::blitz_adapter::uid(root.id),
+        ctx,
+        0,
+        &mut drawables,
+    );
     drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
     drawables.body_offset_pt = extract_body_offset_pt(doc);
     drawables.root_dir_rtl = extract_root_dir_rtl(doc);
@@ -191,7 +197,7 @@ fn find_body_id_in_dom(doc: &HtmlDocument) -> Option<usize> {
             continue;
         };
         if let blitz_dom::NodeData::Element(elem) = &child.data
-            && (&*elem.name.local) == "body"
+            && (&elem.name.local) == "body"
         {
             return Some(crate::blitz_adapter::uid(child_id));
         }
@@ -216,9 +222,9 @@ fn extract_body_offset_pt(doc: &HtmlDocument) -> (crate::units::Pt, crate::units
             continue;
         };
         if let blitz_dom::NodeData::Element(elem) = &child.data
-            && (&*elem.name.local) == "body"
+            && (&elem.name.local) == "body"
         {
-            let (x, y, _, _) = layout_in_pt(&child.final_layout_or_zero());
+            let (x, y, _, _) = layout_in_pt(child.final_layout_or_zero());
             return (x, y);
         }
     }
@@ -284,7 +290,7 @@ fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
     let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
-    let (x, y, width, height) = layout_in_pt(&node.final_layout_or_zero());
+    let (x, y, width, height) = layout_in_pt(node.final_layout_or_zero());
     let indent = "  ".repeat(depth);
     let tag = match &node.data {
         NodeData::Element(e) => e.name.local.to_string(),
@@ -407,7 +413,7 @@ fn walk_semantics(
     };
 
     let child_override = if let Some(elem) = node.element_data() {
-        if let Some(mut tag) = crate::tagging::classify_element(&*elem.name.local) {
+        if let Some(mut tag) = crate::tagging::classify_element(&elem.name.local) {
             // CSS list-style-type を読んで ListNumbering をオーバーライド
             if matches!(tag, crate::tagging::PdfTag::L { .. }) {
                 if let Some(styles) = node.primary_styles() {
@@ -437,11 +443,12 @@ fn walk_semantics(
                 let mut p = node.parent;
                 loop {
                     let Some(pid) = p else { break None };
-                    if out.semantics.contains_key(&crate::blitz_adapter::uid(*&pid)) {
+                    if out.semantics.contains_key(&crate::blitz_adapter::uid(pid)) {
                         break Some(pid);
                     }
                     p = doc.get_node(pid).and_then(|n| n.parent);
-                }.map(crate::blitz_adapter::uid)
+                }
+                .map(crate::blitz_adapter::uid)
             };
 
             // `visibility: hidden` / `collapse` excludes the subtree from
@@ -517,7 +524,13 @@ fn walk_semantics(
                 out.li_lbody_ids.insert(node_id, lbody_id);
                 // li の子は lbody_id を parent として再帰
                 for &child_id in &node.children {
-                    walk_semantics(doc, crate::blitz_adapter::uid(child_id), depth + 1, Some(lbody_id), out);
+                    walk_semantics(
+                        doc,
+                        crate::blitz_adapter::uid(child_id),
+                        depth + 1,
+                        Some(lbody_id),
+                        out,
+                    );
                 }
                 return; // 通常の再帰をスキップ
             }
@@ -531,7 +544,13 @@ fn walk_semantics(
     };
 
     for &child_id in &node.children {
-        walk_semantics(doc, crate::blitz_adapter::uid(child_id), depth + 1, child_override, out);
+        walk_semantics(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            depth + 1,
+            child_override,
+            out,
+        );
     }
 }
 
@@ -900,7 +919,9 @@ fn shape_paragraph_glyph_runs(
                 let brush = &glyph_run.style().brush;
                 let color = get_text_color(doc, crate::blitz_adapter::uid(brush.id));
                 let decoration = get_text_decoration(doc, crate::blitz_adapter::uid(brush.id));
-                let link = ctx.link_cache.lookup(doc, crate::blitz_adapter::uid(brush.id));
+                let link = ctx
+                    .link_cache
+                    .lookup(doc, crate::blitz_adapter::uid(brush.id));
 
                 let run_key = run.index();
                 if run_key != prev_run_key {
@@ -1757,7 +1778,11 @@ mod debug_print_tree_tests {
         // pathologically deep DOM or running a large-stack thread.
         let doc = parsed_doc("<!DOCTYPE html><html><body><p>x</p></body></html>");
         let root_id = doc.root_element().id;
-        super::debug_print_tree(doc.deref(), crate::blitz_adapter::uid(root_id), crate::MAX_DOM_DEPTH);
+        super::debug_print_tree(
+            doc.deref(),
+            crate::blitz_adapter::uid(root_id),
+            crate::MAX_DOM_DEPTH,
+        );
     }
 }
 
@@ -1974,14 +1999,12 @@ mod utility_fn_tests {
 
     fn find_first_by_tag_in_tests(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
         let node = doc.get_node(crate::blitz_adapter::bid(start_id))?;
-        if node
-            .element_data()
-            .is_some_and(|e| (&*e.name.local) == tag)
-        {
+        if node.element_data().is_some_and(|e| (&e.name.local) == tag) {
             return Some(start_id);
         }
         for &c in &node.children {
-            if let Some(found) = find_first_by_tag_in_tests(doc, crate::blitz_adapter::uid(c), tag) {
+            if let Some(found) = find_first_by_tag_in_tests(doc, crate::blitz_adapter::uid(c), tag)
+            {
                 return Some(found);
             }
         }

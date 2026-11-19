@@ -3,9 +3,9 @@
 //! CSS3 axis-independent interpretation: PDF has no scroll concept, so
 //! `hidden` / `clip` / `scroll` / `auto` all collapse to [`Overflow::Clip`].
 
-use blitz_dom::CopyStyleGetters;
 use super::StyleContext;
 use crate::draw_primitives::{BlockStyle, Overflow};
+use blitz_dom::CopyStyleGetters;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
     style.overflow_x = map(ctx.styles.clone_overflow_x());

@@ -20,8 +20,8 @@ use blitz_dom::{BaseDocument, LayoutPassState};
 use std::collections::BTreeMap;
 use taffy::{
     AvailableSpace, CacheTree, CollapsibleMarginSet, CoreStyle, LayoutContainingBlock,
-    LayoutPartialTree, Line, NodeId, Point, RequestedAxis, ResolveOrZero, RoundTree, RunMode,
-    Size, SizingMode, TraversePartialTree, TraverseTree,
+    LayoutPartialTree, Line, NodeId, Point, RequestedAxis, ResolveOrZero, RoundTree, RunMode, Size,
+    SizingMode, TraversePartialTree, TraverseTree,
 };
 
 /// Per-column slice of an inline-root paragraph distributed across
@@ -145,10 +145,11 @@ pub(crate) fn partition_children_into_segments(
     doc: &BaseDocument,
     container_id: usize,
 ) -> Vec<Segment> {
-    let children: Vec<usize> = crate::blitz_adapter::uids(&doc
-        .get_node(crate::blitz_adapter::bid(container_id))
-        .map(|n| n.children.clone())
-        .unwrap_or_default());
+    let children: Vec<usize> = crate::blitz_adapter::uids(
+        &doc.get_node(crate::blitz_adapter::bid(container_id))
+            .map(|n| n.children.clone())
+            .unwrap_or_default(),
+    );
 
     let mut out: Vec<Segment> = Vec::new();
     let mut group: Vec<NodeId> = Vec::new();
@@ -279,7 +280,8 @@ impl<'a> FulgurLayoutTree<'a> {
             let prior_final = self
                 .doc
                 .get_node(crate::blitz_adapter::bid(*id))
-                .map(|n| *n.final_layout_or_zero()).unwrap_or_default();
+                .map(|n| *n.final_layout_or_zero())
+                .unwrap_or_default();
             let prior = prior_layout.size;
             let available_space = taffy::Size {
                 width: AvailableSpace::Definite(prior.width),
@@ -341,7 +343,11 @@ impl<'d> TraversePartialTree for FulgurLayoutTree<'d> {
 impl TraverseTree for FulgurLayoutTree<'_> {}
 
 impl CacheTree for FulgurLayoutTree<'_> {
-    fn cache_get(&self, node_id: NodeId, input: &taffy::LayoutInput) -> Option<taffy::LayoutOutput> {
+    fn cache_get(
+        &self,
+        node_id: NodeId,
+        input: &taffy::LayoutInput,
+    ) -> Option<taffy::LayoutOutput> {
         self.doc.cache_get(node_id, input)
     }
 
@@ -571,7 +577,10 @@ pub fn compute_multicol_layout(
             width: Some(col_w),
             height: None,
         },
-        known_dimensions_are_definite: Size { width: true, height: true },
+        known_dimensions_are_definite: Size {
+            width: true,
+            height: true,
+        },
         parent_size: Size {
             width: Some(col_w),
             height: inputs.parent_size.height,
@@ -595,7 +604,10 @@ pub fn compute_multicol_layout(
             width: Some(content_w),
             height: None,
         },
-        known_dimensions_are_definite: Size { width: true, height: true },
+        known_dimensions_are_definite: Size {
+            width: true,
+            height: true,
+        },
         parent_size: Size {
             width: Some(content_w),
             height: inputs.parent_size.height,
@@ -784,7 +796,12 @@ pub fn compute_multicol_layout(
             height: container_h,
         },
         scrollable_overflow_rect: taffy::ScrollableOverflow::new(
-            taffy::Rect { left: 0.0, right: container_w, top: 0.0, bottom: container_h },
+            taffy::Rect {
+                left: 0.0,
+                right: container_w,
+                top: 0.0,
+                bottom: container_h,
+            },
             Point { x: false, y: false },
         ),
         baselines: taffy::Baselines::NONE,
@@ -853,7 +870,10 @@ fn layout_self_inline_root_container(
     //    break positions are deterministic given identical `max_advance`,
     //    so Task 7's indices match the ones we record here.
     let mut rebroken = cloned_layout;
-    rebroken.set_alignment(parley::Alignment::default(), parley::AlignmentOptions::default());
+    rebroken.set_alignment(
+        parley::Alignment::default(),
+        parley::AlignmentOptions::default(),
+    );
     rebroken.break_all_lines(Some(col_w));
 
     // fulgur-6q5 Fix 2: when the rebroken layout contains inline-box
@@ -915,17 +935,22 @@ fn layout_self_inline_root_container(
                 height: container_h,
             },
             scrollable_overflow_rect: taffy::ScrollableOverflow::new(
-            taffy::Rect { left: 0.0, right: container_w, top: 0.0, bottom: container_h },
-            Point { x: false, y: false },
-        ),
-        baselines: taffy::Baselines::NONE,
-        top_margin: CollapsibleMarginSet::ZERO,
-        bottom_margin: CollapsibleMarginSet::ZERO,
-        margins_can_collapse_through: false,
-        // TODO(blitz-0.3 port): out-of-flow candidates bubbled up from
-        // the column children are dropped here.
-        oof_candidates: taffy::OofCandidates::NONE,
-        oof_positioning_area: None,
+                taffy::Rect {
+                    left: 0.0,
+                    right: container_w,
+                    top: 0.0,
+                    bottom: container_h,
+                },
+                Point { x: false, y: false },
+            ),
+            baselines: taffy::Baselines::NONE,
+            top_margin: CollapsibleMarginSet::ZERO,
+            bottom_margin: CollapsibleMarginSet::ZERO,
+            margins_can_collapse_through: false,
+            // TODO(blitz-0.3 port): out-of-flow candidates bubbled up from
+            // the column children are dropped here.
+            oof_candidates: taffy::OofCandidates::NONE,
+            oof_positioning_area: None,
         };
     }
 
@@ -1042,7 +1067,12 @@ fn layout_self_inline_root_container(
             height: container_h,
         },
         scrollable_overflow_rect: taffy::ScrollableOverflow::new(
-            taffy::Rect { left: 0.0, right: container_w, top: 0.0, bottom: container_h },
+            taffy::Rect {
+                left: 0.0,
+                right: container_w,
+                top: 0.0,
+                bottom: container_h,
+            },
             Point { x: false, y: false },
         ),
         baselines: taffy::Baselines::NONE,
@@ -1156,7 +1186,7 @@ fn layout_column_group(
             .get_node(crate::blitz_adapter::bid(id_u))
             .filter(|n| n.flags.is_inline_root())
             .and_then(|n| n.element_data())
-            .filter(|e| (&*e.name.local) == "p")
+            .filter(|e| (&e.name.local) == "p")
             .and_then(|e| e.inline_layout_data.as_ref())
             .map(|tl| &tl.layout);
 
@@ -1602,15 +1632,22 @@ fn clear_subtree_cache_inner(doc: &mut BaseDocument, node_id: usize, depth: usiz
 /// corrected positions.
 fn propagate_height_delta(doc: &mut BaseDocument, node_id: usize, delta: f32) {
     let mut current = node_id;
-    while let Some(parent_id) = doc.get_node(crate::blitz_adapter::bid(current)).and_then(|n| n.parent) {
+    while let Some(parent_id) = doc
+        .get_node(crate::blitz_adapter::bid(current))
+        .and_then(|n| n.parent)
+    {
         let siblings_after: Vec<usize> = {
             let Some(parent_node) = doc.get_node(parent_id) else {
                 break;
             };
-            let Some(idx) = parent_node.children.iter().position(|&c| c == crate::blitz_adapter::bid(current)) else {
+            let Some(idx) = parent_node
+                .children
+                .iter()
+                .position(|&c| c == crate::blitz_adapter::bid(current))
+            else {
                 break;
             };
-            crate::blitz_adapter::uids(&parent_node.children[idx + 1..].to_vec())
+            crate::blitz_adapter::uids(&parent_node.children[idx + 1..])
         };
         for sibling in siblings_after {
             if let Some(node) = doc.get_node_mut(crate::blitz_adapter::bid(sibling)) {
@@ -1653,7 +1690,12 @@ fn collect_multicol_node_ids(doc: &BaseDocument) -> Vec<usize> {
         }
     }
     let mut out = Vec::new();
-    walk(doc, crate::blitz_adapter::uid(doc.root_element().id), 0, &mut out);
+    walk(
+        doc,
+        crate::blitz_adapter::uid(doc.root_element().id),
+        0,
+        &mut out,
+    );
     out
 }
 
@@ -1802,8 +1844,7 @@ mod tests {
             fn walk(doc: &BaseDocument, node_id: usize, target: &str) -> Option<usize> {
                 let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
                 if let Some(ed) = node.element_data() {
-                    if let Some(attr_id) = ed.attrs().iter().find(|a| (&*a.name.local) == "id")
-                    {
+                    if let Some(attr_id) = ed.attrs().iter().find(|a| (&a.name.local) == "id") {
                         if attr_id.value.as_str() == target {
                             return Some(node_id);
                         }
@@ -1822,10 +1863,25 @@ mod tests {
         let mc_id = find_by_id(&doc, "mc").expect("multicol node");
         let after_id = find_by_id(&doc, "after").expect("after paragraph");
 
-        let mc_y_before = doc.get_node(crate::blitz_adapter::bid(mc_id)).unwrap().unrounded_layout_or_zero().location.y;
-        let mc_h_before = doc.get_node(crate::blitz_adapter::bid(mc_id)).unwrap().unrounded_layout_or_zero().size.height;
+        let mc_y_before = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
+        let mc_h_before = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
         let mc_bottom_before = mc_y_before + mc_h_before;
-        let after_y_before = doc.get_node(crate::blitz_adapter::bid(after_id)).unwrap().unrounded_layout_or_zero().location.y;
+        let after_y_before = doc
+            .get_node(crate::blitz_adapter::bid(after_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
         // Assert blitz stacked them in order with no overlap. CSS margins
         // can widen the gap, so just require `after` to start at or below
         // multicol's bottom.
@@ -1838,9 +1894,25 @@ mod tests {
         let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
-        let mc_h_after = doc.get_node(crate::blitz_adapter::bid(mc_id)).unwrap().unrounded_layout_or_zero().size.height;
-        let mc_bottom_after = doc.get_node(crate::blitz_adapter::bid(mc_id)).unwrap().unrounded_layout_or_zero().location.y + mc_h_after;
-        let after_y_after = doc.get_node(crate::blitz_adapter::bid(after_id)).unwrap().unrounded_layout_or_zero().location.y;
+        let mc_h_after = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
+        let mc_bottom_after = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y
+            + mc_h_after;
+        let after_y_after = doc
+            .get_node(crate::blitz_adapter::bid(after_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
 
         // After balance, the multicol is shorter and the sibling below
         // it has moved up by the same delta (propagate_height_delta).
@@ -2183,7 +2255,9 @@ mod tests {
     fn node_layouts(doc: &BaseDocument) -> Vec<(usize, f32, f32)> {
         let mut out = Vec::new();
         fn walk(doc: &BaseDocument, id: usize, out: &mut Vec<(usize, f32, f32)>) {
-            let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else { return };
+            let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
+                return;
+            };
             let sz = node.unrounded_layout_or_zero().size;
             if sz.width > 0.0 || sz.height > 0.0 {
                 out.push((id, node.unrounded_layout_or_zero().location.y, sz.height));
@@ -2192,7 +2266,11 @@ mod tests {
                 walk(doc, crate::blitz_adapter::uid(c), out);
             }
         }
-        walk(doc, crate::blitz_adapter::uid(doc.root_element().id), &mut out);
+        walk(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut out,
+        );
         out
     }
 
@@ -2242,12 +2320,14 @@ mod tests {
                 if out.is_some() {
                     return;
                 }
-                let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else { return };
+                let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
+                    return;
+                };
                 if let Some(ed) = node.element_data()
                     && ed
                         .attrs()
                         .iter()
-                        .any(|a| (&*a.name.local) == "id" && a.value.as_str() == "before")
+                        .any(|a| (&a.name.local) == "id" && a.value.as_str() == "before")
                 {
                     *out = Some(id);
                     return;
@@ -2256,17 +2336,31 @@ mod tests {
                     walk(doc, crate::blitz_adapter::uid(c), out);
                 }
             }
-            walk(&doc, crate::blitz_adapter::uid(doc.root_element().id), &mut found);
+            walk(
+                &doc,
+                crate::blitz_adapter::uid(doc.root_element().id),
+                &mut found,
+            );
             found.expect("before node")
         };
 
-        let before_y_pre = doc.get_node(crate::blitz_adapter::bid(before_id)).unwrap().unrounded_layout_or_zero().location.y;
+        let before_y_pre = doc
+            .get_node(crate::blitz_adapter::bid(before_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
 
         let column_styles = crate::column_css::ColumnStyleTable::new();
         let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
-        let before_y_post = doc.get_node(crate::blitz_adapter::bid(before_id)).unwrap().unrounded_layout_or_zero().location.y;
+        let before_y_post = doc
+            .get_node(crate::blitz_adapter::bid(before_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
         assert!(
             (before_y_pre - before_y_post).abs() < 0.01,
             "earlier sibling y should not move: pre={before_y_pre}, post={before_y_post}"
@@ -2433,12 +2527,14 @@ mod tests {
                 if out.is_some() {
                     return;
                 }
-                let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else { return };
+                let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
+                    return;
+                };
                 if let Some(ed) = node.element_data()
                     && ed
                         .attrs()
                         .iter()
-                        .any(|a| (&*a.name.local) == "id" && a.value.as_str() == "outer")
+                        .any(|a| (&a.name.local) == "id" && a.value.as_str() == "outer")
                 {
                     *out = Some(id);
                     return;
@@ -2447,17 +2543,31 @@ mod tests {
                     walk(doc, crate::blitz_adapter::uid(c), out);
                 }
             }
-            walk(&doc, crate::blitz_adapter::uid(doc.root_element().id), &mut found);
+            walk(
+                &doc,
+                crate::blitz_adapter::uid(doc.root_element().id),
+                &mut found,
+            );
             found.expect("outer div")
         };
 
-        let outer_h_pre = doc.get_node(crate::blitz_adapter::bid(outer_id)).unwrap().unrounded_layout_or_zero().size.height;
+        let outer_h_pre = doc
+            .get_node(crate::blitz_adapter::bid(outer_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
 
         let column_styles = crate::column_css::ColumnStyleTable::new();
         let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
-        let outer_h_post = doc.get_node(crate::blitz_adapter::bid(outer_id)).unwrap().unrounded_layout_or_zero().size.height;
+        let outer_h_post = doc
+            .get_node(crate::blitz_adapter::bid(outer_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
         assert!(
             (outer_h_pre - outer_h_post).abs() > 0.1,
             "the multicol's ancestor should have absorbed the height delta: \
@@ -2511,7 +2621,7 @@ mod tests {
                 && ed
                     .attrs()
                     .iter()
-                    .any(|a| (&*a.name.local) == "id" && a.value.as_str() == target)
+                    .any(|a| (&a.name.local) == "id" && a.value.as_str() == target)
             {
                 return Some(node_id);
             }
@@ -2522,7 +2632,12 @@ mod tests {
             }
             None
         }
-        let id = walk(doc, crate::blitz_adapter::uid(doc.root_element().id), html_id).expect("id not found");
+        let id = walk(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            html_id,
+        )
+        .expect("id not found");
         doc.get_unrounded_layout(NodeId::from(id))
     }
 
@@ -3239,7 +3354,9 @@ mod tests {
         // collide on the same column and the BTreeMap-backed
         // `by_col[idx] = Some(...)` collector would clobber the earlier
         // one, dropping its lines.
-        let source_node = doc.get_node(crate::blitz_adapter::bid(split.source_node_id)).expect("source node");
+        let source_node = doc
+            .get_node(crate::blitz_adapter::bid(split.source_node_id))
+            .expect("source node");
         let elem = source_node.element_data().expect("element data");
         let text_layout = elem
             .inline_layout_data
@@ -3777,7 +3894,11 @@ mod tests {
         );
 
         // Depth-limit call: cache must be unchanged (still non-empty).
-        clear_subtree_cache_inner(&mut doc, crate::blitz_adapter::uid(root), crate::MAX_DOM_DEPTH);
+        clear_subtree_cache_inner(
+            &mut doc,
+            crate::blitz_adapter::uid(root),
+            crate::MAX_DOM_DEPTH,
+        );
         let after_limit = doc.get_node(root).is_none_or(|n| n.cache().is_empty());
         assert!(
             !after_limit,

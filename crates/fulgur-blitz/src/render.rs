@@ -4026,7 +4026,7 @@ fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> 
             for &child_id in &root_node.children {
                 if let Some(child) = base_doc.get_node(child_id) {
                     if let blitz_dom::NodeData::Element(elem) = &child.data {
-                        if (&*elem.name.local) == "body" {
+                        if (&elem.name.local) == "body" {
                             for &body_child_id in &child.children {
                                 if let Some(body_child) = base_doc.get_node(body_child_id) {
                                     let size = &body_child.final_layout_or_zero().size;

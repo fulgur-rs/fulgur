@@ -1,5 +1,5 @@
-use crate::blitz_adapter::NodeLayoutExt;
 use super::*;
+use crate::blitz_adapter::NodeLayoutExt;
 
 /// Dispatcher entry for replaced elements (img / svg / `content: url(...)`).
 ///
@@ -384,9 +384,7 @@ mod tests {
 
     fn find_by_tag_inner(doc: &BaseDocument, id: usize, tag: &str) -> Option<usize> {
         let n = doc.get_node(crate::blitz_adapter::bid(id))?;
-        if n.element_data()
-            .is_some_and(|e| (&*e.name.local) == tag)
-        {
+        if n.element_data().is_some_and(|e| (&e.name.local) == tag) {
             return Some(id);
         }
         for &c in &n.children {

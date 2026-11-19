@@ -1147,8 +1147,10 @@ fn walk_anchors(
     {
         let counters = snapshots.get(&node_id).cloned().unwrap_or_default();
         let text = collect_text_content(doc, node_id);
-        let before_text = collect_pseudo_text(doc, node.before().map(crate::blitz_adapter::uid), elem);
-        let after_text = collect_pseudo_text(doc, node.after().map(crate::blitz_adapter::uid), elem);
+        let before_text =
+            collect_pseudo_text(doc, node.before().map(crate::blitz_adapter::uid), elem);
+        let after_text =
+            collect_pseudo_text(doc, node.after().map(crate::blitz_adapter::uid), elem);
         out.insert(
             frag.to_string(),
             AnchorEntry {
@@ -1211,11 +1213,10 @@ fn collect_pseudo_text(
     // Only the "main" items (before `alt_start`); content after is
     // alt-text in CSS Level 3 Content.
     for item in &item_data.items[..item_data.alt_start] {
-        match item {
-            // Stylo 0.24 substitutes `attr()` at computed-value time, so
-            // it arrives here as a plain `String` item.
-            Sci::String(s) => out.push_str(s.as_ref()),
-            _ => {}
+        // Stylo 0.24 substitutes `attr()` at computed-value time, so it
+        // arrives here as a plain `String` item.
+        if let Sci::String(s) = item {
+            out.push_str(s.as_ref());
         }
     }
     collapse_ws_keep_edges(&out)
@@ -1308,7 +1309,7 @@ fn walk_implicit_href(
     // assigned to their nearest paginated ancestor.
     let resolved_page = page_for_node(geometry, node_id).or(inherited_page);
     if let Some(elem) = node.element_data()
-        && (&*elem.name.local) == "a"
+        && (&elem.name.local) == "a"
         && let Some(href) = get_attr(elem, "href")
         && fragment_id_from_href(href).is_some()
         && let Some(page_num) = resolved_page
@@ -1678,7 +1679,7 @@ mod tests {
                 return;
             };
             if let Some(elem) = node.element_data()
-                && (&*elem.name.local) == "a"
+                && (&elem.name.local) == "a"
             {
                 out.push(node_id);
             }
@@ -1688,7 +1689,11 @@ mod tests {
             }
         }
         let mut out = Vec::new();
-        walk(doc, crate::blitz_adapter::uid(doc.root_element().id), &mut out);
+        walk(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut out,
+        );
         out
     }
 
@@ -1811,7 +1816,7 @@ mod tests {
             fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, tag: &str) -> Option<usize> {
                 let n = doc.get_node(crate::blitz_adapter::bid(node_id))?;
                 if let Some(elem) = n.element_data()
-                    && (&*elem.name.local) == tag
+                    && (&elem.name.local) == tag
                 {
                     return Some(node_id);
                 }

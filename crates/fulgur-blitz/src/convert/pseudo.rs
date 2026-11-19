@@ -1,9 +1,9 @@
-use blitz_dom::CopyStyleGetters;
 use super::inline_root;
 use super::positioned::{is_absolutely_positioned, walk_absolute_children};
 use super::replaced::{make_image_entry, resolve_image_dimensions};
 use super::*;
 use crate::units::{F32Units, Px};
+use blitz_dom::CopyStyleGetters;
 
 /// Build an `ImageEntry` for a `::before`/`::after` pseudo-element node
 /// whose computed `content` resolves to a single `url(...)` image.
@@ -154,7 +154,10 @@ fn build_block_pseudo_image_entries(
         let entry = build_pseudo_image_entry(pseudo, parent_cb.width, parent_cb.height, assets)?;
         Some((id, entry))
     };
-    (load(parent.before().map(crate::blitz_adapter::uid)), load(parent.after().map(crate::blitz_adapter::uid)))
+    (
+        load(parent.before().map(crate::blitz_adapter::uid)),
+        load(parent.after().map(crate::blitz_adapter::uid)),
+    )
 }
 
 /// Build an `InlineImage` for a `::before`/`::after` pseudo whose
@@ -941,14 +944,13 @@ mod tests {
         tag: &str,
     ) -> Option<&'a crate::blitz_adapter::Node> {
         let node = base.get_node(crate::blitz_adapter::bid(start_id))?;
-        if node
-            .element_data()
-            .is_some_and(|e| (&*e.name.local) == tag)
-        {
+        if node.element_data().is_some_and(|e| (&e.name.local) == tag) {
             return Some(node);
         }
         for &child in &node.children {
-            if let Some(found) = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(child), tag) {
+            if let Some(found) =
+                find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(child), tag)
+            {
                 return Some(found);
             }
         }
@@ -964,8 +966,12 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
-            .expect("div element must be present");
+        let div_node = find_elem_by_tag_in_pseudo_tests(
+            base,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            "div",
+        )
+        .expect("div element must be present");
         assert!(
             super::node_has_inline_pseudo_image(base, div_node),
             "inline ::before with url() must return true"
@@ -981,8 +987,12 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
-            .expect("div element must be present");
+        let div_node = find_elem_by_tag_in_pseudo_tests(
+            base,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            "div",
+        )
+        .expect("div element must be present");
         assert!(
             super::node_has_inline_pseudo_image(base, div_node),
             "inline ::after with url() must return true"
@@ -998,8 +1008,12 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
-            .expect("div element must be present");
+        let div_node = find_elem_by_tag_in_pseudo_tests(
+            base,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            "div",
+        )
+        .expect("div element must be present");
         assert!(
             !super::node_has_inline_pseudo_image(base, div_node),
             "block ::before must not be reported as inline pseudo image"
@@ -1013,8 +1027,12 @@ mod tests {
             r#"<!DOCTYPE html><html><body><div>No pseudo here</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
-            .expect("div element must be present");
+        let div_node = find_elem_by_tag_in_pseudo_tests(
+            base,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            "div",
+        )
+        .expect("div element must be present");
         assert!(
             !super::node_has_inline_pseudo_image(base, div_node),
             "element with no pseudo must return false"
@@ -1030,8 +1048,12 @@ mod tests {
             </style></head><body><div>Text</div></body></html>"#,
         );
         let base = doc.deref();
-        let div_node = find_elem_by_tag_in_pseudo_tests(base, crate::blitz_adapter::uid(doc.root_element().id), "div")
-            .expect("div element must be present");
+        let div_node = find_elem_by_tag_in_pseudo_tests(
+            base,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            "div",
+        )
+        .expect("div element must be present");
         assert!(
             !super::node_has_inline_pseudo_image(base, div_node),
             "::before with text content must return false (no url())"

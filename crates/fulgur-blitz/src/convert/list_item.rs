@@ -1,8 +1,8 @@
-use crate::blitz_adapter::NodeLayoutExt;
-use blitz_dom::CopyStyleGetters;
 use super::*;
 use super::{inline_root, list_marker, positioned, pseudo};
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::units::F32Units;
+use blitz_dom::CopyStyleGetters;
 
 /// Dispatcher entry for list-item nodes.
 ///
@@ -81,7 +81,12 @@ pub(super) fn try_convert(
 
         let line_height = {
             use ::style::values::computed::font::LineHeight;
-            let font_size_pt = styles.slow_clone_font_size().used_size().px().as_px().in_pt();
+            let font_size_pt = styles
+                .slow_clone_font_size()
+                .used_size()
+                .px()
+                .as_px()
+                .in_pt();
             match styles.clone_line_height() {
                 LineHeight::Normal => font_size_pt * DEFAULT_LINE_HEIGHT_RATIO,
                 LineHeight::Number(num) => font_size_pt * num.0,
@@ -133,7 +138,12 @@ pub(super) fn try_convert(
         let content_box = compute_content_box(node, &style);
 
         let (font_size_pt, line_height) = if let Some(styles) = node.primary_styles() {
-            let fs = styles.slow_clone_font_size().used_size().px().as_px().in_pt();
+            let fs = styles
+                .slow_clone_font_size()
+                .used_size()
+                .px()
+                .as_px()
+                .in_pt();
             let lh = {
                 use ::style::values::computed::font::LineHeight;
                 match styles.clone_line_height() {
@@ -151,9 +161,11 @@ pub(super) fn try_convert(
         let color = get_text_color(doc, node_id);
 
         let layout_children_guard_inside = node.layout_children.borrow();
-        let children: &[usize] = &crate::blitz_adapter::uids(layout_children_guard_inside
-            .as_deref()
-            .unwrap_or(&node.children));
+        let children: &[usize] = &crate::blitz_adapter::uids(
+            layout_children_guard_inside
+                .as_deref()
+                .unwrap_or(&node.children),
+        );
 
         // For the empty-li case we need the marker BEFORE walking; the
         // non-empty case computes its marker after the child walk so the
@@ -362,7 +374,11 @@ fn build_list_item_body(
                 )
             })
             .map(|mut img| {
-                pseudo::attach_link_to_inline_image(&mut img, doc, crate::blitz_adapter::uid(node.id));
+                pseudo::attach_link_to_inline_image(
+                    &mut img,
+                    doc,
+                    crate::blitz_adapter::uid(node.id),
+                );
                 img
             });
         let after_inline = node
@@ -378,7 +394,11 @@ fn build_list_item_body(
                 )
             })
             .map(|mut img| {
-                pseudo::attach_link_to_inline_image(&mut img, doc, crate::blitz_adapter::uid(node.id));
+                pseudo::attach_link_to_inline_image(
+                    &mut img,
+                    doc,
+                    crate::blitz_adapter::uid(node.id),
+                );
                 img
             });
 
@@ -432,13 +452,17 @@ fn build_list_item_body(
             // Inline root with no text and no inline pseudo images — fall
             // through to non-inline-root walk.
             let layout_children_guard_1 = node.layout_children.borrow();
-            let children: &[usize] = &crate::blitz_adapter::uids(layout_children_guard_1.as_deref().unwrap_or(&node.children));
+            let children: &[usize] = &crate::blitz_adapter::uids(
+                layout_children_guard_1.as_deref().unwrap_or(&node.children),
+            );
             positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
         }
     } else {
         let layout_children_guard_2 = node.layout_children.borrow();
-        let children: &[usize] = &crate::blitz_adapter::uids(layout_children_guard_2.as_deref().unwrap_or(&node.children));
+        let children: &[usize] = &crate::blitz_adapter::uids(
+            layout_children_guard_2.as_deref().unwrap_or(&node.children),
+        );
         positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
         pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
     }

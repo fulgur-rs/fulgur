@@ -1,6 +1,6 @@
-use crate::blitz_adapter::NodeLayoutExt;
 use super::*;
 use super::{positioned, pseudo};
+use crate::blitz_adapter::NodeLayoutExt;
 
 /// Catch-all dispatch for nodes not matched by list_item / table / replaced /
 /// inline_root. Inserts a `BlockEntry` into `out.block_styles` (and walks
@@ -20,7 +20,8 @@ pub(super) fn convert(
     let (width, height) = size_in_pt(node.final_layout_or_zero().size);
 
     let layout_children_guard = node.layout_children.borrow();
-    let children: &[usize] = &crate::blitz_adapter::uids(layout_children_guard.as_deref().unwrap_or(&node.children));
+    let children: &[usize] =
+        &crate::blitz_adapter::uids(layout_children_guard.as_deref().unwrap_or(&node.children));
 
     if children.is_empty() {
         let style = extract_block_style(node, ctx.assets);

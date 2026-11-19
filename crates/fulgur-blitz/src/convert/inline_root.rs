@@ -1,6 +1,6 @@
-use crate::blitz_adapter::NodeLayoutExt;
 use super::*;
 use super::{list_marker, positioned, pseudo};
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::paragraph::{InlineBoxItem, ParagraphRender};
 use crate::units::F32Units;
 use std::sync::Arc;
@@ -290,7 +290,7 @@ pub(super) fn resolve_enclosing_anchor(
         }
         let node = doc.get_node(crate::blitz_adapter::bid(id))?;
         if let NodeData::Element(el) = &node.data {
-            if (&*el.name.local) == "a" {
+            if (&el.name.local) == "a" {
                 let href = crate::blitz_adapter::get_attr(el, "href")?.trim();
                 if href.is_empty() {
                     return None;
@@ -380,7 +380,8 @@ fn pageable_last_baseline_from_drawables(
     // populated `layout_children` at all. Otherwise an inline-block whose
     // only descendants are absolutely-positioned would walk those out-of-flow
     // nodes here and report a bogus baseline.
-    let walk_children: &[usize] = &crate::blitz_adapter::uids(layout_children_borrow.as_deref().unwrap_or(&node.children));
+    let walk_children: &[usize] =
+        &crate::blitz_adapter::uids(layout_children_borrow.as_deref().unwrap_or(&node.children));
     for &child_id in walk_children.iter().rev() {
         let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
@@ -483,7 +484,9 @@ pub(super) fn extract_paragraph(
                     let brush = &glyph_run.style().brush;
                     let color = get_text_color(doc, crate::blitz_adapter::uid(brush.id));
                     let decoration = get_text_decoration(doc, crate::blitz_adapter::uid(brush.id));
-                    let link = ctx.link_cache.lookup(doc, crate::blitz_adapter::uid(brush.id));
+                    let link = ctx
+                        .link_cache
+                        .lookup(doc, crate::blitz_adapter::uid(brush.id));
 
                     // Advance or reset the per-Run offset counter.
                     let run_key = run.index();
@@ -1092,10 +1095,7 @@ mod tests {
 
     fn find_first_by_tag(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
         let node = doc.get_node(crate::blitz_adapter::bid(start_id))?;
-        if node
-            .element_data()
-            .is_some_and(|e| (&*e.name.local) == tag)
-        {
+        if node.element_data().is_some_and(|e| (&e.name.local) == tag) {
             return Some(start_id);
         }
         for &c in &node.children {

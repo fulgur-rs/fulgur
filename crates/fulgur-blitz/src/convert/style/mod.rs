@@ -1,8 +1,8 @@
-use crate::blitz_adapter::NodeLayoutExt;
-use blitz_dom::CopyStyleGetters;
 use crate::asset::AssetBundle;
 use crate::blitz_adapter::Node;
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::draw_primitives::BlockStyle;
+use blitz_dom::CopyStyleGetters;
 
 mod background;
 mod border;
@@ -29,7 +29,7 @@ pub(super) struct StyleContext<'a> {
 pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> BlockStyle {
     let layout = node.final_layout_or_zero();
     let mut style = BlockStyle::default();
-    box_metrics::apply_to(&mut style, &layout);
+    box_metrics::apply_to(&mut style, layout);
 
     // Extract colors from computed styles
     if let Some(styles) = node.primary_styles() {
@@ -37,7 +37,7 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
         let ctx = StyleContext {
             styles: &styles,
             current_color: &current_color,
-            layout: &layout,
+            layout,
             assets,
         };
 

@@ -526,7 +526,7 @@ pub fn resolve(doc: &mut HtmlDocument) {
 fn sanitize_inline_svgs(doc: &mut HtmlDocument) {
     let is_svg = |node: &blitz_dom::Node| {
         node.element_data()
-            .is_some_and(|elem| (&*elem.name.local) == "svg")
+            .is_some_and(|elem| (&elem.name.local) == "svg")
     };
     // Blitz parses only the outermost `<svg>`: construction stops there, so
     // a nested one is never parsed on its own and is covered by its root.
@@ -571,14 +571,14 @@ fn sanitize_inline_svg(doc: &mut HtmlDocument, svg_id: usize) {
     let mut attrs_to_clear = Vec::new();
     let mut texts_to_escape = Vec::new();
     for &node_id in &subtree {
-        let node = doc.get_node(crate::blitz_adapter::bid(node_id)).expect("collected above");
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(node_id))
+            .expect("collected above");
         if let Some(elem) = node.element_data() {
             let element = &*elem.name.local;
             if matches!(element, "image" | "feImage") {
                 for attr in elem.attrs() {
-                    if (&*attr.name.local) == "href"
-                        && !crate::svg::is_data_url_href(&attr.value)
-                    {
+                    if (&attr.name.local) == "href" && !crate::svg::is_data_url_href(&attr.value) {
                         attrs_to_clear.push((node_id, attr.name.clone()));
                     }
                 }
@@ -610,7 +610,8 @@ fn drop_inline_svg_content_if_unsafe(doc: &mut HtmlDocument, svg_id: usize) {
         .is_some_and(|scan| !scan.unsafe_attrs.is_empty());
     if still_unsafe {
         log::warn!("dropping inline <svg> content that references local files");
-        doc.mutate().remove_and_drop_all_children(crate::blitz_adapter::bid(svg_id));
+        doc.mutate()
+            .remove_and_drop_all_children(crate::blitz_adapter::bid(svg_id));
     }
 }
 
@@ -847,7 +848,7 @@ fn walk_for_inline_styles(
         return;
     };
     if let Some(el) = node.element_data()
-        && (&*el.name.local) == "style"
+        && (&el.name.local) == "style"
     {
         let mut css = String::new();
         for &child_id in &node.children {
@@ -885,7 +886,13 @@ fn collect_inline_gcpm_by_node(
 ) -> std::collections::BTreeMap<usize, crate::gcpm::GcpmContext> {
     let mut out = std::collections::BTreeMap::new();
     let root = doc.root_element();
-    walk_for_inline_styles_by_node(doc, crate::blitz_adapter::uid(root.id), &mut out, 0, base_path);
+    walk_for_inline_styles_by_node(
+        doc,
+        crate::blitz_adapter::uid(root.id),
+        &mut out,
+        0,
+        base_path,
+    );
     out
 }
 
@@ -903,7 +910,7 @@ fn walk_for_inline_styles_by_node(
         return;
     };
     if let Some(el) = node.element_data()
-        && (&*el.name.local) == "style"
+        && (&el.name.local) == "style"
     {
         let mut css = String::new();
         for &child_id in &node.children {
@@ -919,7 +926,13 @@ fn walk_for_inline_styles_by_node(
         return;
     }
     for &child_id in &node.children {
-        walk_for_inline_styles_by_node(doc, crate::blitz_adapter::uid(child_id), out, depth + 1, base_path);
+        walk_for_inline_styles_by_node(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            out,
+            depth + 1,
+            base_path,
+        );
     }
 }
 
@@ -959,7 +972,7 @@ fn walk_for_style_import_presence(doc: &HtmlDocument, node_id: usize, depth: usi
         return false;
     };
     if let Some(el) = node.element_data()
-        && (&*el.name.local) == "style"
+        && (&el.name.local) == "style"
     {
         let mut css = String::new();
         for &child_id in &node.children {
@@ -971,9 +984,9 @@ fn walk_for_style_import_presence(doc: &HtmlDocument, node_id: usize, depth: usi
         }
         return !crate::gcpm::parser::extract_top_level_import_hrefs(&css).is_empty();
     }
-    node.children
-        .iter()
-        .any(|&child_id| walk_for_style_import_presence(doc, crate::blitz_adapter::uid(child_id), depth + 1))
+    node.children.iter().any(|&child_id| {
+        walk_for_style_import_presence(doc, crate::blitz_adapter::uid(child_id), depth + 1)
+    })
 }
 
 /// Bound on recursive `@import` resolution DEPTH for
@@ -1291,7 +1304,7 @@ fn fold_gcpm_by_document_order(
         return;
     };
     if let Some(el) = node.element_data()
-        && (&*el.name.local) == "link"
+        && (&el.name.local) == "link"
         && el
             .attr(blitz_dom::LocalName::from("rel"))
             .is_some_and(|rel| {
@@ -1305,7 +1318,7 @@ fn fold_gcpm_by_document_order(
         return;
     }
     if let Some(el) = node.element_data()
-        && (&*el.name.local) == "style"
+        && (&el.name.local) == "style"
     {
         if let Some(ctx) = node_gcpm.get(&node_id) {
             out.extend_from(ctx.clone());
@@ -1313,7 +1326,13 @@ fn fold_gcpm_by_document_order(
         return;
     }
     for &child_id in &node.children {
-        fold_gcpm_by_document_order(doc, crate::blitz_adapter::uid(child_id), node_gcpm, out, depth + 1);
+        fold_gcpm_by_document_order(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            node_gcpm,
+            out,
+            depth + 1,
+        );
     }
 }
 
@@ -1462,7 +1481,13 @@ pub(crate) fn document_ordered_gcpm_mappings(
 
     let mut ordered = crate::gcpm::GcpmContext::default();
     let root_id = doc.root_element().id;
-    fold_gcpm_by_document_order(doc, crate::blitz_adapter::uid(root_id), &node_gcpm, &mut ordered, 0);
+    fold_gcpm_by_document_order(
+        doc,
+        crate::blitz_adapter::uid(root_id),
+        &node_gcpm,
+        &mut ordered,
+        0,
+    );
 
     let mut bookmark_mappings = ua_bookmark_mappings;
     bookmark_mappings.extend(ordered.bookmark_mappings);
@@ -1504,7 +1529,13 @@ pub(crate) fn extract_column_style_table(
         .iter()
         .map(|(id, text)| (*id, text.as_str()))
         .collect();
-    walk_for_column_styles(doc, crate::blitz_adapter::uid(root_id), &mut css, &external_by_node, 0);
+    walk_for_column_styles(
+        doc,
+        crate::blitz_adapter::uid(root_id),
+        &mut css,
+        &external_by_node,
+        0,
+    );
 
     // 2. Parse the aggregate as a stylesheet. `parse_stylesheet` silently
     //    drops malformed rules / unsupported selectors — matches the
@@ -1521,7 +1552,7 @@ pub(crate) fn extract_column_style_table(
 pub fn extract_html_lang(doc: &HtmlDocument) -> Option<String> {
     let root = doc.root_element();
     let el = root.element_data()?;
-    if (&*el.name.local) != "html" {
+    if (&el.name.local) != "html" {
         return None;
     }
     let lang = el.attr(blitz_dom::LocalName::from("lang"))?.trim();
@@ -1541,7 +1572,7 @@ pub fn extract_html_title(doc: &HtmlDocument) -> Option<String> {
         }
         let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
         if let Some(el) = node.element_data() {
-            if (&*el.name.local) == "title" && el.name.ns == blitz_dom::ns!(html) {
+            if (&el.name.local) == "title" && el.name.ns == blitz_dom::ns!(html) {
                 return Some(node_id);
             }
         }
@@ -1636,7 +1667,14 @@ pub fn compute_used_page_names(
 ) -> UsedPageNameTable {
     let mut out = UsedPageNameTable::new();
     let root_id = doc.root_element().id;
-    walk_used_page_names(doc, table, crate::blitz_adapter::uid(root_id), None, &mut out, 0);
+    walk_used_page_names(
+        doc,
+        table,
+        crate::blitz_adapter::uid(root_id),
+        None,
+        &mut out,
+        0,
+    );
     out
 }
 
@@ -1685,8 +1723,14 @@ fn walk_used_page_names(
     let mut first_child_start: Option<Option<String>> = None;
     let mut last_child_end: Option<Option<String>> = None;
     for &child_id in &node.children {
-        let (child_start, child_end) =
-            walk_used_page_names(doc, table, crate::blitz_adapter::uid(child_id), space_name.as_deref(), out, depth + 1);
+        let (child_start, child_end) = walk_used_page_names(
+            doc,
+            table,
+            crate::blitz_adapter::uid(child_id),
+            space_name.as_deref(),
+            out,
+            depth + 1,
+        );
         if suppress_propagation {
             continue;
         }
@@ -1712,7 +1756,7 @@ fn walk_used_page_names(
         let (effective_start, effective_end) = if is_orthogonal_to_parent(node, child) {
             let child_space = if is_block_level_outside(child) {
                 table
-                    .get(&crate::blitz_adapter::uid(*&child_id))
+                    .get(&crate::blitz_adapter::uid(child_id))
                     .and_then(|props| props.page.as_ref())
                     .and_then(|p| match p {
                         crate::column_css::PageName::Named(s) => Some(s.clone()),
@@ -1833,8 +1877,10 @@ pub fn is_out_of_flow_node(node: &Node) -> bool {
 fn child_is_out_of_flow(node: &Node) -> bool {
     use ::style::properties::longhands::position::computed_value::T as Pos;
     node.primary_styles().is_some_and(|s| {
-        matches!(s.get_box().slow_clone_position(), Pos::Absolute | Pos::Fixed)
-            || s.get_box().slow_clone_float().is_floating()
+        matches!(
+            s.get_box().slow_clone_position(),
+            Pos::Absolute | Pos::Fixed
+        ) || s.get_box().slow_clone_float().is_floating()
     })
 }
 
@@ -1874,7 +1920,7 @@ fn walk_for_column_styles(
         return;
     };
     if let Some(el) = node.element_data()
-        && (&*el.name.local) == "link"
+        && (&el.name.local) == "link"
         && el
             .attr(blitz_dom::LocalName::from("rel"))
             .is_some_and(|rel| {
@@ -1895,7 +1941,7 @@ fn walk_for_column_styles(
         return;
     }
     if let Some(el) = node.element_data()
-        && (&*el.name.local) == "style"
+        && (&el.name.local) == "style"
     {
         // Honour `<style media="...">`: skip sheets whose media query
         // excludes the PDF render target. Phase A uses a simple token scan
@@ -1928,7 +1974,13 @@ fn walk_for_column_styles(
         return;
     }
     for &child_id in &node.children {
-        walk_for_column_styles(doc, crate::blitz_adapter::uid(child_id), out, external_css, depth + 1);
+        walk_for_column_styles(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            out,
+            external_css,
+            depth + 1,
+        );
     }
 }
 
@@ -1952,12 +2004,14 @@ fn find_element_by_tag_recursive(
     }
     let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
     if let Some(el) = node.element_data() {
-        if (&*el.name.local) == tag {
+        if (&el.name.local) == tag {
             return Some(node_id);
         }
     }
     for &child_id in &node.children {
-        if let Some(found) = find_element_by_tag_recursive(doc, crate::blitz_adapter::uid(child_id), tag, depth + 1) {
+        if let Some(found) =
+            find_element_by_tag_recursive(doc, crate::blitz_adapter::uid(child_id), tag, depth + 1)
+        {
             return Some(found);
         }
     }
@@ -1968,7 +2022,7 @@ fn find_element_by_tag_recursive(
 pub fn get_attr<'a>(elem: &'a blitz_dom::node::ElementData, name: &str) -> Option<&'a str> {
     elem.attrs()
         .iter()
-        .find(|a| (&*a.name.local) == name)
+        .find(|a| (&a.name.local) == name)
         .map(|a| a.value.as_ref())
 }
 
@@ -2035,7 +2089,7 @@ pub fn element_text(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
         for &child_id in &node.children {
             if let Some(child) = doc.get_node(child_id) {
                 if let blitz_dom::node::NodeData::Element(el) = &child.data {
-                    if is_block_boundary_tag(&*el.name.local) {
+                    if is_block_boundary_tag(&el.name.local) {
                         push_separator(out);
                     }
                 }
@@ -2245,7 +2299,9 @@ pub fn extract_multicol_props(node: &blitz_dom::Node) -> Option<MulticolProps> {
         // CSS Multi-column Level 1 `§4 column-gap`: used value of `normal`
         // is `1em`. Resolve against the element's computed font-size so a
         // column-gap-less multicol still has visual separation.
-        NonNegativeLengthPercentageOrNormal::Normal => styles.slow_clone_font_size().used_size().px(),
+        NonNegativeLengthPercentageOrNormal::Normal => {
+            styles.slow_clone_font_size().used_size().px()
+        }
     };
 
     Some(MulticolProps {
@@ -2336,12 +2392,12 @@ fn collect_caption_tables_recursive(
     };
     let is_table = node
         .element_data()
-        .is_some_and(|el| (&*el.name.local) == "table");
+        .is_some_and(|el| (&el.name.local) == "table");
     if is_table {
         if let Some(&caption_id) = node.children.iter().find(|&&child_id| {
             doc.get_node(child_id)
                 .and_then(|c| c.element_data())
-                .is_some_and(|el| (&*el.name.local) == "caption")
+                .is_some_and(|el| (&el.name.local) == "caption")
         }) {
             out.push((node_id, crate::blitz_adapter::uid(caption_id)));
         }
@@ -2430,16 +2486,32 @@ impl DomPass for CaptionRestructurePass {
             // is a plain block (otherwise Stylo wraps it in an anonymous
             // table box again).
             if force_block {
-                mutator.set_style_property(crate::blitz_adapter::bid(caption_id), "display", "block");
+                mutator.set_style_property(
+                    crate::blitz_adapter::bid(caption_id),
+                    "display",
+                    "block",
+                );
             }
             // Put the wrapper where the table was, then move caption + table
             // into it. `caption-side: top` (default) → caption first;
             // `bottom` → table first.
             mutator.replace_node_with(crate::blitz_adapter::bid(table_id), &[wrapper_id]);
             if on_bottom {
-                mutator.append_children(wrapper_id, &[crate::blitz_adapter::bid(table_id), crate::blitz_adapter::bid(caption_id)]);
+                mutator.append_children(
+                    wrapper_id,
+                    &[
+                        crate::blitz_adapter::bid(table_id),
+                        crate::blitz_adapter::bid(caption_id),
+                    ],
+                );
             } else {
-                mutator.append_children(wrapper_id, &[crate::blitz_adapter::bid(caption_id), crate::blitz_adapter::bid(table_id)]);
+                mutator.append_children(
+                    wrapper_id,
+                    &[
+                        crate::blitz_adapter::bid(caption_id),
+                        crate::blitz_adapter::bid(table_id),
+                    ],
+                );
             }
         }
     }
@@ -2449,7 +2521,9 @@ impl DomPass for CaptionRestructurePass {
 /// (`width: 100%` → `Some(1.0)`); `None` for `auto`, lengths and mixed `calc()`.
 fn table_percentage_width(doc: &HtmlDocument, table_id: usize) -> Option<f32> {
     use ::style::values::generics::length::GenericSize;
-    let styles = doc.get_node(crate::blitz_adapter::bid(table_id))?.primary_styles()?;
+    let styles = doc
+        .get_node(crate::blitz_adapter::bid(table_id))?
+        .primary_styles()?;
     match styles.slow_clone_width() {
         GenericSize::LengthPercentage(lp) => lp.0.to_percentage().map(|p| p.0),
         _ => None,
@@ -2507,7 +2581,7 @@ mod caption_restructure_tests {
     fn tag_of(doc: &HtmlDocument, id: usize) -> Option<String> {
         doc.get_node(crate::blitz_adapter::bid(id))
             .and_then(|n| n.element_data())
-            .map(|el| (&*el.name.local).to_string())
+            .map(|el| (*el.name.local).to_string())
     }
 
     #[test]
@@ -2826,7 +2900,7 @@ fn selector_matches(selector: &ParsedSelector, elem: &blitz_dom::node::ElementDa
         ParsedSelector::Class(name) => get_attr(elem, "class")
             .is_some_and(|cls| cls.split_whitespace().any(|c| c == name.as_str())),
         ParsedSelector::Id(name) => get_attr(elem, "id") == Some(name.as_str()),
-        ParsedSelector::Tag(name) => (&*elem.name.local).eq_ignore_ascii_case(name),
+        ParsedSelector::Tag(name) => (*elem.name.local).eq_ignore_ascii_case(name),
     }
 }
 
@@ -2870,7 +2944,7 @@ impl RunningElementPass {
         };
 
         if let Some(elem) = node.element_data() {
-            if is_non_visual_tag(&*elem.name.local) {
+            if is_non_visual_tag(&elem.name.local) {
                 return;
             }
             if let Some(running_name) = self.find_running_name(elem) {
@@ -3017,7 +3091,7 @@ impl StringSetPass {
         };
 
         if let Some(elem) = node.element_data() {
-            if is_non_visual_tag(&*elem.name.local) {
+            if is_non_visual_tag(&elem.name.local) {
                 return;
             }
             // Fold every matching mapping in cascade order. A single
@@ -3279,7 +3353,7 @@ impl CounterPass {
                 return;
             };
 
-            if is_non_visual_tag(&*elem.name.local) {
+            if is_non_visual_tag(&elem.name.local) {
                 return;
             }
 
@@ -3336,7 +3410,9 @@ impl CounterPass {
             let parent_id = doc
                 .get_node(crate::blitz_adapter::bid(node_id))
                 .and_then(|n| n.parent)
-                .unwrap_or(crate::blitz_adapter::bid(crate::gcpm::counter::COUNTER_ROOT_PARENT));
+                .unwrap_or(crate::blitz_adapter::bid(
+                    crate::gcpm::counter::COUNTER_ROOT_PARENT,
+                ));
             let mut state = self.state.borrow_mut();
             for op in &matched_ops {
                 match op {
@@ -3346,7 +3422,9 @@ impl CounterPass {
                     CounterOp::Increment { name, value } => {
                         state.increment_in_scope(name, *value, crate::blitz_adapter::uid(parent_id))
                     }
-                    CounterOp::Set { name, value } => state.set_in_scope(name, *value, crate::blitz_adapter::uid(parent_id)),
+                    CounterOp::Set { name, value } => {
+                        state.set_in_scope(name, *value, crate::blitz_adapter::uid(parent_id))
+                    }
                 }
             }
             drop(state);
@@ -3414,7 +3492,9 @@ impl CounterPass {
         // Resolve ::before now (before child traversal)
         if let Some(ref cid) = attr_value {
             use std::fmt::Write;
-            let element = doc.get_node(crate::blitz_adapter::bid(node_id)).and_then(|n| n.element_data());
+            let element = doc
+                .get_node(crate::blitz_adapter::bid(node_id))
+                .and_then(|n| n.element_data());
             let mut css = self.generated_css.borrow_mut();
             for idx in &before_indices {
                 // Total-output budget: once the generated CSS reaches the cap,
@@ -3438,10 +3518,11 @@ impl CounterPass {
         }
 
         // Recurse into children (re-read children since we may have mutated doc)
-        let children: Vec<usize> = crate::blitz_adapter::uids(&doc
-            .get_node(crate::blitz_adapter::bid(node_id))
-            .map(|n| n.children.clone())
-            .unwrap_or_default());
+        let children: Vec<usize> = crate::blitz_adapter::uids(
+            &doc.get_node(crate::blitz_adapter::bid(node_id))
+                .map(|n| n.children.clone())
+                .unwrap_or_default(),
+        );
         for child_id in children {
             self.walk_tree(doc, child_id, depth + 1);
         }
@@ -3449,7 +3530,9 @@ impl CounterPass {
         // Resolve ::after now (after child traversal, sees descendant counter changes)
         if let Some(ref cid) = attr_value {
             use std::fmt::Write;
-            let element = doc.get_node(crate::blitz_adapter::bid(node_id)).and_then(|n| n.element_data());
+            let element = doc
+                .get_node(crate::blitz_adapter::bid(node_id))
+                .and_then(|n| n.element_data());
             let mut css = self.generated_css.borrow_mut();
             for idx in &after_indices {
                 // Total-output budget (see the `::before` loop above).
@@ -3699,7 +3782,7 @@ impl BookmarkPass {
         };
 
         if let Some(elem) = node.element_data() {
-            if is_non_visual_tag(&*elem.name.local) {
+            if is_non_visual_tag(&elem.name.local) {
                 return;
             }
             self.resolve_node(doc, node_id, elem);
@@ -4026,7 +4109,7 @@ fn element_specificity_prefix(element: Option<&blitz_dom::node::ElementData>) ->
     let Some(elem) = element else {
         return String::new();
     };
-    let tag_lower = (&*elem.name.local).to_ascii_lowercase();
+    let tag_lower = (*elem.name.local).to_ascii_lowercase();
     let mut prefix = if css_escape_ident(&tag_lower) == tag_lower {
         tag_lower
     } else {
@@ -4528,7 +4611,7 @@ pub(crate) fn collect_link_media_rewrites(doc: &HtmlDocument) -> Vec<LinkMediaRe
             return;
         };
         if let Some(el) = node.element_data() {
-            if (&*el.name.local) == "link" {
+            if (&el.name.local) == "link" {
                 let rel_ok = get_attr(el, "rel")
                     .map(|rel| {
                         rel.split_ascii_whitespace()
@@ -4578,7 +4661,10 @@ impl TaffyDocExt for blitz_dom::BaseDocument {
         blitz_dom::taffy_node_id(self.get_node(blitz_dom::dom_node_id(id)).unwrap().children[i])
     }
     fn get_unrounded_layout(&self, id: taffy::NodeId) -> taffy::Layout {
-        *self.get_node(blitz_dom::dom_node_id(id)).unwrap().unrounded_layout_or_zero()
+        *self
+            .get_node(blitz_dom::dom_node_id(id))
+            .unwrap()
+            .unrounded_layout_or_zero()
     }
 }
 
@@ -4599,11 +4685,13 @@ static ZERO_LAYOUT: taffy::Layout = taffy::Layout::new();
 impl NodeLayoutExt for blitz_dom::Node {
     #[inline]
     fn final_layout_or_zero(&self) -> &taffy::Layout {
-        self.try_layout_data().map_or(&ZERO_LAYOUT, |ld| &ld.final_layout)
+        self.try_layout_data()
+            .map_or(&ZERO_LAYOUT, |ld| &ld.final_layout)
     }
     #[inline]
     fn unrounded_layout_or_zero(&self) -> &taffy::Layout {
-        self.try_layout_data().map_or(&ZERO_LAYOUT, |ld| &ld.unrounded_layout)
+        self.try_layout_data()
+            .map_or(&ZERO_LAYOUT, |ld| &ld.unrounded_layout)
     }
 }
 
@@ -4626,7 +4714,7 @@ fn match_link_fetches(
             return;
         };
         if let Some(el) = node.element_data() {
-            if (&*el.name.local) == "link" {
+            if (&el.name.local) == "link" {
                 let rel_ok = get_attr(el, "rel").is_some_and(|rel| {
                     rel.split_ascii_whitespace()
                         .any(|t| t.eq_ignore_ascii_case("stylesheet"))
@@ -4770,7 +4858,7 @@ mod tests {
             .iter()
             .find_map(|(_, node)| {
                 node.element_data()
-                    .filter(|elem| (&*elem.name.local) == "svg")
+                    .filter(|elem| (&elem.name.local) == "svg")
                     .map(|_| node)
             })
             .expect("inline svg element");
@@ -4801,7 +4889,7 @@ mod tests {
             .iter()
             .find(|(_, node)| {
                 node.element_data()
-                    .is_some_and(|elem| (&*elem.name.local) == "svg")
+                    .is_some_and(|elem| (&elem.name.local) == "svg")
             })
             .map(|(node_id, _)| node_id)
             .expect("inline svg element");
@@ -4828,7 +4916,7 @@ mod tests {
             .iter()
             .find(|(_, node)| {
                 node.element_data()
-                    .is_some_and(|elem| (&*elem.name.local) == "svg")
+                    .is_some_and(|elem| (&elem.name.local) == "svg")
             })
             .map(|(node_id, _)| node_id)
             .expect("inline svg element");
@@ -4849,7 +4937,7 @@ mod tests {
             .tree()
             .iter()
             .filter_map(|(_, node)| node.element_data())
-            .find(|elem| (&*elem.name.local) == "image")
+            .find(|elem| (&elem.name.local) == "image")
             .and_then(|elem| get_attr(elem, "href").map(str::to_owned));
         assert_eq!(href, None);
     }
@@ -4865,7 +4953,7 @@ mod tests {
             doc.tree()
                 .iter()
                 .filter_map(|(_, node)| node.element_data())
-                .filter(|elem| (&*elem.name.local) == local)
+                .filter(|elem| (&elem.name.local) == local)
                 .map(|elem| get_attr(elem, "href").map(str::to_owned))
                 .collect()
         };
@@ -4922,7 +5010,12 @@ mod tests {
             walk(doc, crate::blitz_adapter::uid(doc.root_element().id), id)
         }
         let fix_id = find_by_id(&doc, "fix").expect("fixed div id=fix");
-        let pre_width = doc.get_node(crate::blitz_adapter::bid(fix_id)).unwrap().final_layout_or_zero().size.width;
+        let pre_width = doc
+            .get_node(crate::blitz_adapter::bid(fix_id))
+            .unwrap()
+            .final_layout_or_zero()
+            .size
+            .width;
         // blitz-dom 0.2 flattened `fixed` to `absolute`, so its first pass
         // capped this box at the abs ancestor's 50px. 0.3 lays fixed boxes
         // out against the viewport itself, so the first pass is already
@@ -4934,7 +5027,12 @@ mod tests {
 
         // Now run the second pass with a 600 × 800 viewport and recheck.
         relayout_position_fixed(&mut doc, 600.0, 800.0);
-        let post_width = doc.get_node(crate::blitz_adapter::bid(fix_id)).unwrap().final_layout_or_zero().size.width;
+        let post_width = doc
+            .get_node(crate::blitz_adapter::bid(fix_id))
+            .unwrap()
+            .final_layout_or_zero()
+            .size
+            .width;
         assert!(
             post_width > 50.5,
             "viewport relayout should widen the fixed box past the 50px parent; \
@@ -4982,7 +5080,12 @@ mod tests {
         let fix_id = find_by_id(&doc, "fix").expect("fixed div id=fix");
 
         relayout_position_fixed(&mut doc, 600.0, 800.0);
-        let post_width = doc.get_node(crate::blitz_adapter::bid(fix_id)).unwrap().final_layout_or_zero().size.width;
+        let post_width = doc
+            .get_node(crate::blitz_adapter::bid(fix_id))
+            .unwrap()
+            .final_layout_or_zero()
+            .size
+            .width;
         assert!(
             post_width < 600.0,
             "shrink-to-fit per CSS 2.1 §10.3.7: right:0 + width:auto must \
@@ -5038,7 +5141,12 @@ mod tests {
         // max-content width is well over 600, so the box must clamp at
         // 600 and wrap, not stretch to max-content.
         relayout_position_fixed(&mut doc, 600.0, 800.0);
-        let post_width = doc.get_node(crate::blitz_adapter::bid(fix_id)).unwrap().final_layout_or_zero().size.width;
+        let post_width = doc
+            .get_node(crate::blitz_adapter::bid(fix_id))
+            .unwrap()
+            .final_layout_or_zero()
+            .size
+            .width;
         assert!(
             post_width <= 600.5,
             "shrink-to-fit must clamp at the available width (600); \
@@ -5416,7 +5524,7 @@ mod tests {
                 return;
             };
             if let Some(el) = node.element_data()
-                && (&*el.name.local) == "style"
+                && (&el.name.local) == "style"
             {
                 out.push(node_id);
             }
@@ -5425,7 +5533,11 @@ mod tests {
             }
         }
         let mut live_style_ids = Vec::new();
-        collect_style_ids(doc.deref(), crate::blitz_adapter::uid(doc.root_element().id), &mut live_style_ids);
+        collect_style_ids(
+            doc.deref(),
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut live_style_ids,
+        );
         assert_eq!(
             live_style_ids.len(),
             2,
@@ -5504,7 +5616,9 @@ mod tests {
         // still carries content read from the correct file at fetch time,
         // i.e. content and key would point at two different links.
         fn style_import_href(doc: &blitz_dom::BaseDocument, style_id: usize) -> String {
-            let node = doc.get_node(crate::blitz_adapter::bid(style_id)).expect("style node");
+            let node = doc
+                .get_node(crate::blitz_adapter::bid(style_id))
+                .expect("style node");
             let mut text = String::new();
             for &child_id in &node.children {
                 if let Some(child) = doc.get_node(child_id)
@@ -5592,7 +5706,7 @@ mod tests {
                 return;
             };
             if let Some(el) = node.element_data()
-                && (&*el.name.local) == "style"
+                && (&el.name.local) == "style"
             {
                 out.push(node_id);
             }
@@ -5601,7 +5715,11 @@ mod tests {
             }
         }
         let mut live_style_ids = Vec::new();
-        collect_style_ids(doc.deref(), crate::blitz_adapter::uid(doc.root_element().id), &mut live_style_ids);
+        collect_style_ids(
+            doc.deref(),
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut live_style_ids,
+        );
         assert_eq!(
             live_style_ids.len(),
             3,
@@ -6553,7 +6671,7 @@ mod tests {
         fn walk(doc: &HtmlDocument, id: usize, out: &mut Vec<usize>) {
             if let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) {
                 if let Some(el) = node.element_data() {
-                    if (&*el.name.local) == "h1" {
+                    if (&el.name.local) == "h1" {
                         out.push(id);
                     }
                 }
@@ -6562,7 +6680,11 @@ mod tests {
                 }
             }
         }
-        walk(&doc, crate::blitz_adapter::uid(doc.root_element().id), &mut h1_ids);
+        walk(
+            &doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut h1_ids,
+        );
         assert_eq!(h1_ids.len(), 2);
         let a = snapshots.get(&h1_ids[0]).expect("snapshot at first h1");
         let b = snapshots.get(&h1_ids[1]).expect("snapshot at second h1");
@@ -6723,14 +6845,14 @@ mod tests {
         fn find_inner_li(doc: &HtmlDocument, id: usize, ol_depth: usize) -> Option<usize> {
             if let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) {
                 if let Some(el) = node.element_data() {
-                    if (&*el.name.local) == "li" && ol_depth >= 2 {
+                    if (&el.name.local) == "li" && ol_depth >= 2 {
                         return Some(id);
                     }
                 }
                 let next_depth = node
                     .element_data()
                     .map(|el| {
-                        if (&*el.name.local) == "ol" {
+                        if (&el.name.local) == "ol" {
                             ol_depth + 1
                         } else {
                             ol_depth
@@ -6738,7 +6860,9 @@ mod tests {
                     })
                     .unwrap_or(ol_depth);
                 for &c in &node.children {
-                    if let Some(found) = find_inner_li(doc, crate::blitz_adapter::uid(c), next_depth) {
+                    if let Some(found) =
+                        find_inner_li(doc, crate::blitz_adapter::uid(c), next_depth)
+                    {
                         return Some(found);
                     }
                 }
@@ -6746,7 +6870,8 @@ mod tests {
             None
         }
 
-        let inner_id = find_inner_li(&doc, crate::blitz_adapter::uid(doc.root_element().id), 0).expect("inner li");
+        let inner_id = find_inner_li(&doc, crate::blitz_adapter::uid(doc.root_element().id), 0)
+            .expect("inner li");
         let snap = snapshots.get(&inner_id).expect("snapshot at inner li");
         let chain = snap.get("item").expect("item chain at inner li");
         assert_eq!(
@@ -7364,7 +7489,7 @@ mod tests {
         fn find_h1(doc: &HtmlDocument, id: usize) -> Option<usize> {
             if let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) {
                 if let Some(el) = node.element_data() {
-                    if (&*el.name.local) == "h1" {
+                    if (&el.name.local) == "h1" {
                         return Some(id);
                     }
                 }
@@ -7376,7 +7501,8 @@ mod tests {
             }
             None
         }
-        let h1_id = find_h1(&doc, crate::blitz_adapter::uid(doc.root_element().id)).expect("h1 node");
+        let h1_id =
+            find_h1(&doc, crate::blitz_adapter::uid(doc.root_element().id)).expect("h1 node");
 
         let mut counter_snapshots = BTreeMap::new();
         let mut chain_for_h1 = BTreeMap::new();
@@ -7416,13 +7542,16 @@ mod tests {
             let node = doc.get_node(crate::blitz_adapter::bid(id))?;
             if node
                 .element_data()
-                .is_some_and(|el| (&*el.name.local) == "h1")
+                .is_some_and(|el| (&el.name.local) == "h1")
             {
                 return Some(id);
             }
-            node.children.iter().find_map(|&c| find_h1(doc, crate::blitz_adapter::uid(c)))
+            node.children
+                .iter()
+                .find_map(|&c| find_h1(doc, crate::blitz_adapter::uid(c)))
         }
-        let h1_id = find_h1(&doc, crate::blitz_adapter::uid(doc.root_element().id)).expect("h1 node");
+        let h1_id =
+            find_h1(&doc, crate::blitz_adapter::uid(doc.root_element().id)).expect("h1 node");
 
         // Length-2 chain so the (long) separator appears in each item.
         let mut counter_snapshots = BTreeMap::new();
@@ -7483,7 +7612,7 @@ mod tests {
             if let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) {
                 if node
                     .element_data()
-                    .is_some_and(|el| (&*el.name.local) == "div")
+                    .is_some_and(|el| (&el.name.local) == "div")
                 {
                     out.push(id);
                 }
@@ -7493,7 +7622,11 @@ mod tests {
             }
         }
         let mut div_ids = Vec::new();
-        collect_divs(&doc, crate::blitz_adapter::uid(doc.root_element().id), &mut div_ids);
+        collect_divs(
+            &doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut div_ids,
+        );
         assert_eq!(div_ids.len(), SIBLINGS);
 
         // Give every div a 2-entry chain so the resolved label (with a long
@@ -7560,7 +7693,7 @@ mod tests {
         fn walk(doc: &HtmlDocument, id: usize, out: &mut Vec<(String, usize)>) {
             if let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) {
                 if let Some(el) = node.element_data() {
-                    let tag = (&*el.name.local).to_string();
+                    let tag = (*el.name.local).to_string();
                     if matches!(tag.as_str(), "h1" | "p") {
                         out.push((tag, id));
                     }
@@ -7570,7 +7703,11 @@ mod tests {
                 }
             }
         }
-        walk(&doc, crate::blitz_adapter::uid(doc.root_element().id), &mut tag_ids);
+        walk(
+            &doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut tag_ids,
+        );
 
         let p_ids: Vec<usize> = tag_ids
             .iter()
@@ -8094,7 +8231,7 @@ mod tests {
             }
             if let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) {
                 if let Some(el) = node.element_data() {
-                    if (&*el.name.local) == "p" {
+                    if (&el.name.local) == "p" {
                         *out = Some(id);
                         return;
                     }
@@ -8104,7 +8241,11 @@ mod tests {
                 }
             }
         }
-        walk(&doc, crate::blitz_adapter::uid(doc.root_element().id), &mut p_id);
+        walk(
+            &doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut p_id,
+        );
         let p = p_id.expect("<p> in fixture");
 
         let snap = snapshots.get(&p).expect("snapshot at <p>");
@@ -8118,7 +8259,7 @@ mod tests {
         fn walk(doc: &blitz_dom::BaseDocument, id: usize, name: &str) -> Option<usize> {
             let node = doc.get_node(crate::blitz_adapter::bid(id))?;
             if let Some(ed) = node.element_data() {
-                if (&*ed.name.local) == name {
+                if (&ed.name.local) == name {
                     return Some(id);
                 }
             }
@@ -8130,7 +8271,11 @@ mod tests {
             None
         }
         use std::ops::Deref;
-        walk(doc.deref(), crate::blitz_adapter::uid(doc.root_element().id), name)
+        walk(
+            doc.deref(),
+            crate::blitz_adapter::uid(doc.root_element().id),
+            name,
+        )
     }
 
     #[test]
@@ -8353,12 +8498,14 @@ mod tests {
             }
             let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
             if let Some(el) = node.element_data() {
-                if (&*el.name.local).contains('{') {
+                if (*el.name.local).contains('{') {
                     return Some(node_id);
                 }
             }
             for &child_id in &node.children {
-                if let Some(hit) = find_crafted_tag(doc, crate::blitz_adapter::uid(child_id), depth + 1) {
+                if let Some(hit) =
+                    find_crafted_tag(doc, crate::blitz_adapter::uid(child_id), depth + 1)
+                {
                     return Some(hit);
                 }
             }
@@ -8366,7 +8513,9 @@ mod tests {
         }
         let node_id = find_crafted_tag(&doc, crate::blitz_adapter::uid(doc.root_element().id), 0)
             .expect("html5ever preserves the crafted tag name verbatim");
-        let elem = doc.get_node(crate::blitz_adapter::bid(node_id)).and_then(|n| n.element_data());
+        let elem = doc
+            .get_node(crate::blitz_adapter::bid(node_id))
+            .and_then(|n| n.element_data());
         let prefix = element_specificity_prefix(elem);
         assert!(
             !prefix.contains('{') && !prefix.contains('}'),
@@ -8443,7 +8592,7 @@ mod tests {
         for &cid in &head_node.children {
             let child = doc.get_node(cid).unwrap();
             if let Some(el) = child.element_data() {
-                match (&*el.name.local) {
+                match &*el.name.local {
                     "style" => {
                         style_node_id_found = Some(crate::blitz_adapter::uid(cid));
                         for &gc in &child.children {
@@ -8542,7 +8691,8 @@ mod tests {
                 }
             }
             for &child_id in &node.children {
-                if let Some(found) = walk(doc, crate::blitz_adapter::uid(child_id), want, depth + 1) {
+                if let Some(found) = walk(doc, crate::blitz_adapter::uid(child_id), want, depth + 1)
+                {
                     return Some(found);
                 }
             }
@@ -8641,7 +8791,9 @@ mod tests {
         let html = r#"<html><body><div id="p">plain</div></body></html>"#;
         let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
-        assert!(extract_multicol_props(doc.get_node(crate::blitz_adapter::bid(id)).unwrap()).is_none());
+        assert!(
+            extract_multicol_props(doc.get_node(crate::blitz_adapter::bid(id)).unwrap()).is_none()
+        );
     }
 
     #[test]
@@ -8651,7 +8803,8 @@ mod tests {
         </body></html>"#;
         let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
-        let props = extract_multicol_props(doc.get_node(crate::blitz_adapter::bid(id)).unwrap()).expect("should be multicol");
+        let props = extract_multicol_props(doc.get_node(crate::blitz_adapter::bid(id)).unwrap())
+            .expect("should be multicol");
         assert_eq!(props.column_count, Some(3));
         assert_eq!(props.column_width, None);
         assert!((props.column_gap - 12.0).abs() < 0.01);
@@ -8664,7 +8817,8 @@ mod tests {
         </body></html>"#;
         let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let id = find_element_by_local_name(&doc, "div").expect("div");
-        let props = extract_multicol_props(doc.get_node(crate::blitz_adapter::bid(id)).unwrap()).expect("should be multicol");
+        let props = extract_multicol_props(doc.get_node(crate::blitz_adapter::bid(id)).unwrap())
+            .expect("should be multicol");
         assert_eq!(props.column_count, None);
         assert_eq!(props.column_width, Some(180.0));
         // CSS Multi-column Level 1: `column-gap: normal` is `1em`. At the
@@ -8724,8 +8878,12 @@ mod tests {
         let doc = parse_and_layout(html, 400.0_f32.as_px(), 2000.0_f32.as_px(), &[], true);
         let h1 = find_element_by_local_name(&doc, "h1").expect("h1");
         let p = find_element_by_local_name(&doc, "p").expect("p");
-        assert!(has_column_span_all(doc.get_node(crate::blitz_adapter::bid(h1)).unwrap()));
-        assert!(!has_column_span_all(doc.get_node(crate::blitz_adapter::bid(p)).unwrap()));
+        assert!(has_column_span_all(
+            doc.get_node(crate::blitz_adapter::bid(h1)).unwrap()
+        ));
+        assert!(!has_column_span_all(
+            doc.get_node(crate::blitz_adapter::bid(p)).unwrap()
+        ));
     }
 
     // ── extract_column_style_table (fulgur-v7a Task 2) ─────────────
@@ -8953,7 +9111,7 @@ mod tests {
         fn find_p(doc: &HtmlDocument, node_id: usize) -> Option<usize> {
             let n = doc.get_node(crate::blitz_adapter::bid(node_id))?;
             if let Some(elem) = n.element_data()
-                && (&*elem.name.local) == "p"
+                && (&elem.name.local) == "p"
             {
                 return Some(node_id);
             }
@@ -8964,7 +9122,8 @@ mod tests {
             }
             None
         }
-        let p_id = find_p(&doc, crate::blitz_adapter::uid(doc.root_element().id)).expect("<p> must exist");
+        let p_id =
+            find_p(&doc, crate::blitz_adapter::uid(doc.root_element().id)).expect("<p> must exist");
         let parley_layout = &doc
             .get_node(crate::blitz_adapter::bid(p_id))
             .unwrap()
@@ -9161,7 +9320,7 @@ mod marker_rewrite_tests {
         fn walk(doc: &blitz_dom::BaseDocument, id: usize, name: &str) -> Option<usize> {
             let node = doc.get_node(crate::blitz_adapter::bid(id))?;
             if let Some(ed) = node.element_data() {
-                if (&*ed.name.local) == name {
+                if (&ed.name.local) == name {
                     return Some(id);
                 }
             }
@@ -9173,7 +9332,11 @@ mod marker_rewrite_tests {
             None
         }
         use std::ops::Deref;
-        walk(doc.deref(), crate::blitz_adapter::uid(doc.root_element().id), name)
+        walk(
+            doc.deref(),
+            crate::blitz_adapter::uid(doc.root_element().id),
+            name,
+        )
     }
 
     #[test]
