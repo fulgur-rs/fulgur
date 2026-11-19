@@ -70,7 +70,15 @@ pub fn render_v2(
     // (shared node_id case — see `convert::replaced` /
     // `convert::inline_root`); paragraph wins so the shared-id case
     // resolves to the inline-root's anchor.
+    // The layout works on the page divided by `config.scale` (see
+    // `resolve_page_settings`); each page is drawn scaled back onto the real
+    // page, and the link and destination coordinates scaled with it.
+    let scale = config.scale;
+    let page_scale = crate::draw_primitives::Affine2D::scale(scale, scale);
     let mut dest_registry = crate::draw_primitives::DestinationRegistry::new();
+    if scale != 1.0 {
+        dest_registry.push_transform(page_scale);
+    }
     for (&node_id, geom) in geometry {
         let Some(first_frag) = geom.fragments.first() else {
             continue;
@@ -126,6 +134,10 @@ pub fn render_v2(
     // unclipped so `@page @bottom-*` anchors remain clickable.
     let mut body_link_collector = crate::draw_primitives::LinkCollector::new();
     let mut margin_link_collector = crate::draw_primitives::LinkCollector::new();
+    if scale != 1.0 {
+        body_link_collector.push_transform(page_scale);
+        margin_link_collector.push_transform(page_scale);
+    }
 
     let mut link_annot_ids: BTreeMap<usize, Vec<krilla::tagging::Identifier>> = BTreeMap::new();
 
@@ -198,8 +210,9 @@ pub fn render_v2(
         } else {
             resolved_size
         };
-        let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
-            .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
+        let settings =
+            krilla::page::PageSettings::from_wh(page_size.width * scale, page_size.height * scale)
+                .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
         let content_area = resolved_content_area(page_size, resolved_margin);
         let mut page = document.start_page_with(settings);
         if let Some(c) = bookmark_collector.as_mut() {
@@ -210,6 +223,9 @@ pub fn render_v2(
         let page_has_margin_box_paint;
         {
             let mut surface = page.surface();
+            if scale != 1.0 {
+                surface.push_transform(&krilla::geom::Transform::from_scale(scale, scale));
+            }
             {
                 let mut canvas = crate::draw_primitives::Canvas {
                     surface: &mut surface,
@@ -322,6 +338,9 @@ pub fn render_v2(
                 anchor_map,
             );
             page_has_margin_box_paint = any_margin_box_painted;
+            if scale != 1.0 {
+                surface.pop();
+            }
         }
         // Body occurrences are clipped to the content area rect ONLY
         // when at least one `@page` margin box actually painted on
@@ -337,7 +356,14 @@ pub fn render_v2(
         // used earlier this iteration — see `resolved_content_area`.
         let raw_body_page = body_link_collector.take_page(page_idx);
         let body_per_page = if page_has_margin_box_paint {
-            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &content_area)
+            // The occurrences are already scaled to the real page.
+            let scaled_area = crate::draw_primitives::Rect {
+                x: content_area.x * scale,
+                y: content_area.y * scale,
+                width: content_area.width * scale,
+                height: content_area.height * scale,
+            };
+            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &scaled_area)
         } else {
             raw_body_page
         };
@@ -373,7 +399,10 @@ pub fn render_v2(
     }
 
     if let Some(c) = bookmark_collector {
-        let entries = c.into_entries();
+        let mut entries = c.into_entries();
+        for entry in &mut entries {
+            entry.y_pt *= scale;
+        }
         if !entries.is_empty() {
             document.set_outline(crate::outline::build_outline(&entries));
         }

@@ -131,6 +131,10 @@ impl Engine {
         // discarded on the 2-pass path (fulgur-6vl0). Mirrors `layout()`'s
         // 2-pass loop; the final PDF serialization happens exactly once.
         let pass1 = self.layout_to_drawables(html, None)?;
+        if let Some(shrunk) = self.shrunk_to_fit(&pass1) {
+            drop(pass1);
+            return shrunk.render(html);
+        }
         if !pass1.needs_pass_two {
             return self.render_artifacts(pass1, None);
         }
@@ -143,6 +147,53 @@ impl Engine {
         } = pass1;
         let pass2 = self.layout_to_drawables(html, Some(&anchor_map))?;
         self.render_artifacts(pass2, Some(&anchor_map))
+    }
+
+    /// With [`Config::shrink_to_fit`] set and `artifacts` laid out wider than
+    /// the first page's content area: this engine at the scale that fits the
+    /// content (no lower than the minimum), to lay the document out again
+    /// with. The returned engine does not shrink again, so a document whose
+    /// content grows with the viewport is laid out at most twice.
+    fn shrunk_to_fit(&self, artifacts: &LayoutArtifacts) -> Option<Engine> {
+        let min_scale = self.config.shrink_to_fit?;
+        let (size, margin, landscape) = crate::gcpm::page_settings::resolve_page_settings(
+            &artifacts.gcpm.page_settings,
+            1,
+            0,
+            &self.config,
+            artifacts.drawables.root_dir_rtl,
+        );
+        let size = if landscape { size.landscape() } else { size };
+        let content_px = (size.width - margin.left - margin.right)
+            .as_pt()
+            .in_px()
+            .to_f32();
+        // Fragments are relative to the content area's left edge.
+        let right = artifacts
+            .pagination_geometry
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.x.to_f32() + f.width.to_f32())
+            .fold(0.0_f32, f32::max);
+        if content_px <= 0.0 || content_px.is_nan() || right <= content_px + 0.5 {
+            return None;
+        }
+        let scale = (self.config.scale * content_px / right).max(min_scale);
+        if scale >= self.config.scale * 0.999 {
+            return None;
+        }
+        let mut config = self.config.clone();
+        config.scale = scale;
+        config.shrink_to_fit = None;
+        Some(Engine {
+            config,
+            assets: self.assets.clone(),
+            base_path: self.base_path.clone(),
+            template: self.template.clone(),
+            data: self.data.clone(),
+            serialize_settings: self.serialize_settings.clone(),
+            system_fonts: self.system_fonts,
+        })
     }
 
     /// Run the full parse → style → layout → convert pipeline for a single
@@ -861,6 +912,10 @@ impl Engine {
         // `target-*` cross-references, pass 2 re-lays-out with the pass-1
         // AnchorMap so those resolve. Project the final artifacts once.
         let pass1 = self.layout_to_drawables(html, None)?;
+        if let Some(shrunk) = self.shrunk_to_fit(&pass1) {
+            drop(pass1);
+            return shrunk.layout(html);
+        }
         let artifacts = if pass1.needs_pass_two {
             // Retain only the AnchorMap across passes (as `render`'s loop
             // does — its pass-1 drawables/geometry are dropped when only
@@ -1392,6 +1447,19 @@ impl EngineBuilder {
     /// independent of the page height. See `Config::viewport_height`.
     pub fn viewport_height(mut self, height_px: f32) -> Self {
         self.config_builder = self.config_builder.viewport_height(height_px);
+        self
+    }
+
+    /// Content scale. See `Config::scale`.
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.config_builder = self.config_builder.scale(scale);
+        self
+    }
+
+    /// Shrink content wider than the page, down to `min_scale`. See
+    /// `Config::shrink_to_fit`.
+    pub fn shrink_to_fit(mut self, min_scale: f32) -> Self {
+        self.config_builder = self.config_builder.shrink_to_fit(min_scale);
         self
     }
 

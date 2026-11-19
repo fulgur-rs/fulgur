@@ -2509,6 +2509,69 @@ fn multicol_starting_mid_page_fills_the_rest_of_the_page_first() {
     );
 }
 
+/// `scale` lays the document out on a page `1 / scale` times larger and
+/// prints it scaled onto the real paper: the same page size, fewer pages.
+#[test]
+fn scale_prints_more_per_page_on_the_same_paper() {
+    let html = format!(
+        "<!doctype html><html><body>{}</body></html>",
+        "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>".repeat(200)
+    );
+    let pages = |scale: f32| {
+        let pdf = Engine::builder()
+            .scale(scale)
+            .build()
+            .render(&html)
+            .expect("render");
+        let doc = lopdf::Document::load_mem(&pdf).expect("PDF must parse");
+        for (_, page) in doc.get_pages() {
+            let media_box = doc
+                .get_dictionary(page)
+                .and_then(|d| d.get(b"MediaBox"))
+                .and_then(|b| b.as_array())
+                .expect("MediaBox")
+                .clone();
+            let width = media_box[2].as_float().unwrap_or_default();
+            assert!(
+                (width - 595.28).abs() < 0.1,
+                "A4 paper at any scale: {width}"
+            );
+        }
+        page_count(&pdf)
+    };
+    let full = pages(1.0);
+    let scaled = pages(0.5);
+    assert!(
+        full >= 2 && scaled < full,
+        "{full} pages at 1, {scaled} at 0.5"
+    );
+}
+
+/// With `shrink_to_fit`, content wider than the page is laid out again on a
+/// wider page so it fits; without it, the page keeps its width.
+#[test]
+fn content_wider_than_the_page_is_shrunk_to_fit() {
+    let html = r#"<!doctype html><html><body style="margin:0"><div id=wide style="width:800px;height:20px"></div></body></html>"#;
+    let body_width = |engine: Engine| {
+        let layout = engine.layout(html).expect("layout");
+        let body = layout.drawables.body_id.expect("body");
+        layout.geometry[&body].fragments[0].width.to_f32()
+    };
+    // A4 with 20 mm margins: about 642 CSS px of content.
+    let plain = body_width(Engine::builder().build());
+    assert!(plain < 700.0, "{plain}");
+    let fitted = body_width(Engine::builder().shrink_to_fit(0.5).build());
+    assert!(
+        (fitted - 800.0).abs() < 1.0,
+        "laid out 800px wide: {fitted}"
+    );
+    let floor = body_width(Engine::builder().shrink_to_fit(0.9).build());
+    assert!(
+        (floor - plain / 0.9).abs() < 1.0,
+        "no lower than the minimum: {floor}"
+    );
+}
+
 /// Tables in the collapsing border model draw their borders. Blitz lays the
 /// borders out as gutters and leaves the cells without a border, so nothing
 /// was drawn; now each cell draws its own border centred on the gutter, in

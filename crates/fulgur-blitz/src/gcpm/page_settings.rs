@@ -295,6 +295,9 @@ pub fn resolve_page_settings(
         m
     };
 
+    // The layout sees the page divided by the content scale; the renderer
+    // draws it back at the real size.
+    let (size, margin) = config.scale_for_layout(size, margin);
     (size, margin, landscape)
 }
 
