@@ -409,6 +409,13 @@ fn pageable_last_baseline_from_drawables(
 ///
 /// The side-effect call to `convert_node` registers the inline-box subtree
 /// into `out` so the v2 dispatcher can find it.
+/// `node` is floated.
+fn is_floated(node: &Node) -> bool {
+    use ::style::properties::longhands::float::computed_value::T as Float;
+    node.primary_styles()
+        .is_some_and(|s| !matches!(s.get_box().slow_clone_float(), Float::None))
+}
+
 fn convert_inline_box_node(
     doc: &BaseDocument,
     node_id: usize,
@@ -554,6 +561,15 @@ pub(super) fn extract_paragraph(
                         if positioned::is_absolutely_positioned(box_node)
                             && is_pseudo_node(doc, box_node)
                         {
+                            continue;
+                        }
+                        // A float in the line is only a placeholder in
+                        // Parley's layout; Blitz places the float itself
+                        // (its Taffy layout, relative to this paragraph)
+                        // and wraps the lines around it. Draw it there, as
+                        // an ordinary box, not at the placeholder.
+                        if is_floated(box_node) {
+                            convert_node(doc, node_id, ctx, depth + 1, out);
                             continue;
                         }
                     }

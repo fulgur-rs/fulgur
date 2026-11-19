@@ -2509,6 +2509,62 @@ fn multicol_starting_mid_page_fills_the_rest_of_the_page_first() {
     );
 }
 
+/// A float inside a line of text is drawn where Blitz placed it (its Taffy
+/// layout), not at its placeholder in the line, and boxes inside
+/// paragraphs that pagination splits across pages get geometry on the
+/// page their line lands on. Both used to be lost: the float was drawn at
+/// the placeholder or not at all, and inline blocks and floats in a
+/// paragraph split across pages were not drawn.
+#[test]
+fn boxes_inside_paragraphs_split_across_pages_are_drawn() {
+    use fulgur::PageSize;
+
+    let para = r#"<p style="margin:0"><span style="float:left;width:61px;height:37px;background:#7ad"></span>Lorem ipsum <span style="display:inline-block;width:43px;height:19px;background:#7ad"></span> dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.</p>"#;
+    let html = format!(
+        r#"<!doctype html><html><body style="margin:0;font:12px/20px sans-serif"><div style="width:220px">{}</div></body></html>"#,
+        para.repeat(6)
+    );
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 300.0,
+            height: 225.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let (drawables, geometry) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+    let mut floats = Vec::new();
+    let mut inline_blocks = Vec::new();
+    for geom in geometry.values() {
+        for f in &geom.fragments {
+            let size = (f.width.to_f32().round(), f.height.to_f32().round());
+            if size == (61.0, 37.0) {
+                floats.push((f.page_index, f.x.to_f32()));
+            } else if size == (43.0, 19.0) {
+                inline_blocks.push(f.page_index);
+            }
+        }
+    }
+    assert_eq!(floats.len(), 6, "a float per paragraph: {floats:?}");
+    assert_eq!(inline_blocks.len(), 6, "an inline block per paragraph");
+    assert!(
+        floats.iter().all(|&(_, x)| x.abs() < 0.5),
+        "floats at the left edge: {floats:?}"
+    );
+    assert!(
+        floats.iter().any(|&(page, _)| page > 0),
+        "content reaches page 2"
+    );
+    // The float is not a box in the line.
+    let float_items = drawables
+        .paragraphs
+        .values()
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.items)
+        .filter(|item| matches!(item, fulgur::paragraph::LineItem::InlineBox(b) if (b.width.to_f32() - 61.0).abs() < 1.0))
+        .count();
+    assert_eq!(float_items, 0);
+}
+
 /// A bordered box broken across columns is painted in slices: the convert
 /// pass records one `BlockSlice` per column, offset by the box height in
 /// earlier columns, so the slices add up to the whole box.

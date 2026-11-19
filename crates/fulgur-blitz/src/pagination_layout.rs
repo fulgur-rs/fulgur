@@ -810,6 +810,10 @@ impl<'a> PaginationLayoutTree<'a> {
                     cursor_y = 0.0;
                 }
                 let para_x = layout.location.x;
+                let first_fragment = self
+                    .geometry
+                    .get(&crate::blitz_adapter::uid(child_id))
+                    .map_or(0, |g| g.fragments.len());
                 let (new_page_index, new_cursor_y, frag_count) = fragment_inline_root(
                     &mut self.geometry,
                     crate::blitz_adapter::uid(child_id),
@@ -818,6 +822,14 @@ impl<'a> PaginationLayoutTree<'a> {
                     cursor_y,
                     page_index,
                     self.page_height_px,
+                    &line_metrics,
+                );
+                record_inline_root_descendants(
+                    &mut self.geometry,
+                    &self.doc,
+                    crate::blitz_adapter::uid(child_id),
+                    body_x + para_x,
+                    first_fragment,
                     &line_metrics,
                 );
                 page_index = new_page_index;
@@ -1436,6 +1448,85 @@ fn record_paged_descendants(
             }
         }
         record_paged_descendants(geometry, doc, child_id, pages, child_y, child_x, depth + 1);
+    }
+}
+
+/// Record the boxes inside a paragraph that [`fragment_inline_root`] split
+/// into the fragments from `first_fragment` on (inline blocks, floats,
+/// images), each on the page of the fragment its top falls in, with its
+/// subtree. `fragment_inline_root` records the paragraph alone; without
+/// this these boxes have no geometry and are not drawn.
+fn record_inline_root_descendants(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    paragraph_id: usize,
+    paragraph_x_in_body: f32,
+    first_fragment: usize,
+    line_metrics: &[(f32, f32)],
+) {
+    const SNAP: f32 = 0.5;
+    // Each fragment's (page, page y, top in the paragraph, height). The
+    // fragments are consecutive line ranges, from the first line's top.
+    let Some(fragments) = geometry
+        .get(&paragraph_id)
+        .and_then(|g| g.fragments.get(first_fragment..))
+    else {
+        return;
+    };
+    let mut local_top = line_metrics.first().map_or(0.0, |l| l.0);
+    let slices: Vec<(u32, f32, f32)> = fragments
+        .iter()
+        .map(|f| {
+            let slice = (f.page_index, f.y.to_f32(), local_top);
+            local_top += f.height.to_f32();
+            slice
+        })
+        .collect();
+    let Some(&first) = slices.first() else {
+        return;
+    };
+    let Some(paragraph) = doc.get_node(crate::blitz_adapter::bid(paragraph_id)) else {
+        return;
+    };
+    let layout_children = paragraph.layout_children.borrow();
+    let children: Vec<usize> = crate::blitz_adapter::uids(
+        layout_children
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&paragraph.children),
+    );
+    drop(layout_children);
+    for child_id in children {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
+            continue;
+        };
+        if child.element_data().is_none() {
+            continue;
+        }
+        let layout = child.final_layout_or_zero();
+        let y = layout.location.y;
+        let (page_index, page_y, top) = slices
+            .iter()
+            .rev()
+            .find(|s| s.2 <= y + SNAP)
+            .copied()
+            .unwrap_or(first);
+        let child_x = paragraph_x_in_body + layout.location.x;
+        let child_y = page_y + (y - top);
+        if layout.size.width > 0.0 || layout.size.height > 0.0 {
+            geometry
+                .entry(child_id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index,
+                    x: child_x.as_px(),
+                    y: child_y.as_px(),
+                    width: layout.size.width.as_px(),
+                    height: layout.size.height.as_px(),
+                });
+        }
+        record_subtree_descendants(geometry, doc, child_id, page_index, child_y, child_x, 1);
     }
 }
 
@@ -3085,6 +3176,7 @@ fn fragment_block_subtree_inner(
                 child_page_y = 0.0;
             }
             let pre_split_page = page_index;
+            let first_fragment = geometry.get(&child_id).map_or(0, |g| g.fragments.len());
             // codex P1: start from `child_page_y` (this child's own
             // rebased page-local y), not the parent's running
             // `cursor_y` — for block flow the two are equal, but for
@@ -3100,6 +3192,14 @@ fn fragment_block_subtree_inner(
                 child_page_y,
                 page_index,
                 page_height_px,
+                &line_metrics,
+            );
+            record_inline_root_descendants(
+                geometry,
+                doc,
+                child_id,
+                child_x_in_body,
+                first_fragment,
                 &line_metrics,
             );
             // Same shape as the recursion branch's fulgur-oc51 fix
