@@ -351,6 +351,7 @@ pub(super) fn convert_node(
     convert_node_inner(doc, node_id, ctx, depth, out);
     record_multicol_rule(doc, node_id, ctx, out);
     convert_multicol_paragraph_slices(doc, node_id, ctx, out);
+    convert_multicol_box_slices(node_id, ctx, out);
     if let Some(mark) = mark {
         record_transform(doc, node_id, mark, out);
     }
@@ -884,6 +885,45 @@ fn convert_multicol_paragraph_slices(
                     },
                 );
             }
+        }
+    }
+}
+
+/// Record the boxes `multicol_layout` broke across the columns of the
+/// multicol container `node_id`, in container border-box pt, for
+/// `render::paint_multicol_block_slices`.
+fn convert_multicol_box_slices(
+    node_id: usize,
+    ctx: &ConvertContext<'_>,
+    out: &mut crate::drawables::Drawables,
+) {
+    let Some(geometry) = ctx.multicol_geometry.get(&node_id) else {
+        return;
+    };
+    for group in &geometry.groups {
+        let group_x_pt = group.x_offset.in_pt();
+        let group_y_pt = group.y_offset.in_pt();
+        for split in &group.box_splits {
+            let slices = split
+                .fragments
+                .iter()
+                .map(|f| crate::drawables::BlockSlice {
+                    origin_pt: (
+                        group_x_pt + f.origin.x.in_pt(),
+                        group_y_pt + f.origin.y.in_pt(),
+                    ),
+                    size_pt: (f.size.width.in_pt(), f.size.height.in_pt()),
+                    offset_pt: f.offset.in_pt(),
+                })
+                .collect();
+            out.block_slices.insert(
+                split.source_node_id,
+                crate::drawables::BlockSlicesEntry {
+                    container_node_id: node_id,
+                    height_pt: split.height.in_pt(),
+                    slices,
+                },
+            );
         }
     }
 }

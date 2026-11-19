@@ -1189,7 +1189,20 @@ pub(crate) fn dispatch_fragment(
             }
             return;
         }
-        draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
+        if drawables.block_slices.contains_key(&node_id) {
+            paint_multicol_block_slices(
+                canvas,
+                block,
+                drawables,
+                geometry,
+                node_id,
+                margin_left_pt,
+                margin_top_pt,
+                page_index,
+            );
+        } else {
+            draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
+        }
     }
     if let Some(img) = drawables.images.get(&node_id) {
         draw_image_v2(canvas, img, x_pt, y_pt);
@@ -1407,6 +1420,92 @@ fn paint_multicol_paragraph_slices(
     if use_run_tagging {
         canvas.link_run_node_id = None;
     }
+}
+
+/// Paint a box that `multicol_layout` broke across columns
+/// (`box-decoration-break: slice`): in every slice, the whole box
+/// (`entry.height_pt` tall) is painted from `slice.offset_pt` above the
+/// slice's top and clipped to the slice, so borders, radii and
+/// backgrounds continue from one column to the next.
+///
+/// Slices are anchored at the multicol container's fragment on this page,
+/// as in [`paint_multicol_paragraph_slices`]. When the container itself
+/// breaks across pages, each slice is clipped to the part of the
+/// container on this page.
+#[allow(clippy::too_many_arguments)]
+fn paint_multicol_block_slices(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    node_id: usize,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::draw_primitives::draw_with_opacity;
+    let Some(entry) = drawables.block_slices.get(&node_id) else {
+        return;
+    };
+    if !block.visible {
+        return;
+    }
+    let Some(container_geom) = geometry.get(&entry.container_node_id) else {
+        return;
+    };
+    let Some(target_pos) = container_geom
+        .fragments
+        .iter()
+        .position(|f| f.page_index == page_index)
+    else {
+        return;
+    };
+    let target_frag = &container_geom.fragments[target_pos];
+    let partition = container_geom.is_split();
+    let consumed: f32 = container_geom.fragments[..target_pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<crate::units::Px>()
+        .in_pt()
+        .to_f32();
+    let cutoff = target_frag.height.in_pt().to_f32();
+    let container_x = margin_left_pt + target_frag.x.in_pt().to_f32();
+    let container_y = margin_top_pt + target_frag.y.in_pt().to_f32();
+    let height = entry.height_pt.to_f32();
+
+    draw_with_opacity(canvas, block.opacity, |canvas| {
+        for slice in &entry.slices {
+            let (w, h) = (slice.size_pt.0.to_f32(), slice.size_pt.1.to_f32());
+            let mut top = slice.origin_pt.1.to_f32() - consumed;
+            let mut bottom = top + h;
+            if partition {
+                top = top.max(0.0);
+                bottom = bottom.min(cutoff);
+            }
+            if bottom <= top || w <= 0.0 {
+                continue;
+            }
+            let x = container_x + slice.origin_pt.0.to_f32();
+            let box_y =
+                container_y + slice.origin_pt.1.to_f32() - consumed - slice.offset_pt.to_f32();
+            let Some(clip) = krilla::geom::Rect::from_xywh(x, container_y + top, w, bottom - top)
+                .and_then(|rect| {
+                    let mut pb = krilla::geom::PathBuilder::new();
+                    pb.push_rect(rect);
+                    pb.finish()
+                })
+            else {
+                continue;
+            };
+            canvas
+                .surface
+                .push_clip_path(&clip, &krilla::paint::FillRule::default());
+            crate::background::draw_box_shadows(canvas, &block.style, x, box_y, w, height);
+            crate::background::draw_background(canvas, &block.style, x, box_y, w, height);
+            crate::draw_primitives::draw_block_border(canvas, &block.style, x, box_y, w, height);
+            canvas.surface.pop();
+        }
+    });
 }
 
 /// Collect the inline-box subtrees that paragraphs drawn *inside a scope*

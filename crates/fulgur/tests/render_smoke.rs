@@ -2425,6 +2425,41 @@ fn page_property_inside_flex_container_does_not_propagate_outward() {
         .expect("flex page render");
     assert!(!pdf.is_empty());
 }
+/// A bordered box broken across columns is painted in slices: the convert
+/// pass records one `BlockSlice` per column, offset by the box height in
+/// earlier columns, so the slices add up to the whole box.
+#[test]
+fn multicol_bordered_box_split_emits_block_slices() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body style="margin:0">
+        <div style="column-count: 2; column-gap: 0;">
+          <div style="border: 2px solid red; padding: 8px; background: #eef">
+            <div style="height: 50px"></div><div style="height: 50px"></div>
+            <div style="height: 50px"></div><div style="height: 50px"></div>
+          </div>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert_eq!(drawables.block_slices.len(), 1);
+    let entry = drawables.block_slices.values().next().unwrap();
+    assert_eq!(entry.slices.len(), 2);
+    let total: f32 = entry.slices.iter().map(|s| s.size_pt.1.to_f32()).sum();
+    assert!((total - entry.height_pt.to_f32()).abs() < 0.01);
+    // 220px box: 110px (82.5pt) per column.
+    assert!((entry.height_pt.to_f32() - 165.0).abs() < 0.01);
+    assert_eq!(entry.slices[0].offset_pt.to_f32(), 0.0);
+    assert!((entry.slices[1].offset_pt.to_f32() - 82.5).abs() < 0.01);
+    assert!(entry.slices[1].origin_pt.0 > entry.slices[0].origin_pt.0);
+    let pdf = engine.render(html).expect("render");
+    assert!(!pdf.is_empty());
+}
 
 /// fulgur-6q5 Task 7: convert pass populates `Drawables.paragraph_slices`
 /// from `MulticolGeometry::paragraph_splits`. Case B fixture — inline-root
