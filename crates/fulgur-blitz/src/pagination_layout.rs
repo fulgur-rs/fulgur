@@ -245,6 +245,50 @@ pub fn run_pass_with_break_and_running<'a>(
     )
 }
 
+/// Paginate with `paginate`, then lay out again, page by page, every
+/// multicol container that breaks across pages (from where it starts) and
+/// paginate again, so that its columns continue on the next page instead
+/// of running off the first one. Repeats while the set of such containers
+/// or their starts change (later containers move when earlier ones grow),
+/// a few times at most. `multicol_geometry` is updated in place.
+pub fn paginate_with_paged_multicol(
+    doc: &mut BaseDocument,
+    column_styles: &crate::column_css::ColumnStyleTable,
+    multicol_geometry: &mut crate::multicol_layout::MulticolGeometryTable,
+    page_height_px: f32,
+    mut paginate: impl FnMut(&mut BaseDocument) -> PaginationGeometryTable,
+) -> PaginationGeometryTable {
+    const MAX_ROUNDS: usize = 4;
+    let mut pagination = paginate(doc);
+    let mut previous = std::collections::BTreeMap::new();
+    for _ in 0..MAX_ROUNDS {
+        let paged: std::collections::BTreeMap<usize, crate::multicol_layout::PagedStart> =
+            multicol_geometry
+                .keys()
+                .filter_map(|&id| {
+                    let geom = pagination.get(&id)?;
+                    (!geom.is_repeat && geom.fragments.len() > 1).then(|| {
+                        (
+                            id,
+                            crate::multicol_layout::PagedStart {
+                                page_h: page_height_px,
+                                top_in_page: geom.fragments[0].y.to_f32(),
+                            },
+                        )
+                    })
+                })
+                .collect();
+        if paged.is_empty() || paged == previous {
+            break;
+        }
+        let relaid = crate::multicol_layout::run_paged_pass(doc, column_styles, &paged);
+        multicol_geometry.extend(relaid);
+        previous = paged;
+        pagination = paginate(doc);
+    }
+    pagination
+}
+
 fn run_pass_inner<'a>(
     doc: &'a mut BaseDocument,
     page_height_px: f32,
@@ -855,65 +899,68 @@ impl<'a> PaginationLayoutTree<'a> {
             // outer fragmenter treats the multicol container as a
             // single unit for break decisions.
             //
-            // fulgur-916y: multicol containers with a `column-span:
-            // all` direct child get an exception — the span subtree
-            // is laid out by Taffy as a full-width block flowing
-            // between the column groups, so block-flow recursion via
-            // `fragment_block_subtree` can split it across pages
-            // when it overflows. Containers without span:all stay
-            // atomic. A container that fits the remaining strip is
-            // placed whole: the block-flow walk stacks the column
-            // children as if they were one column, which overstates
-            // their height and pushed fitting columns to the next page.
+            // A container that does not fit the rest of the page is broken
+            // across pages by `fragment_multicol_container` instead (its
+            // span:all children included); one that fits is placed whole.
             let is_multicol = child_node.is_some_and(crate::blitz_adapter::is_multicol_container);
-            let multicol_has_span_all = is_multicol
-                && child_node.is_some_and(|n| {
-                    n.children.iter().any(|&id| {
-                        self.doc
-                            .get_node(id)
-                            .is_some_and(crate::blitz_adapter::has_column_span_all)
-                    })
-                });
             let available_strip = (self.page_height_px - cursor_y).max(0.0);
             let avoid_fits_whole_page = avoid_inside && child_h <= self.page_height_px + 1.0;
-            let multicol_overflows = multicol_has_span_all && child_h > available_strip + 1.0;
-            let needs_recursion = has_splittable_children
-                && (!is_multicol || multicol_overflows)
-                && (has_forced_break_below(
-                    &self.doc,
-                    crate::blitz_adapter::uid(child_id),
-                    self.column_styles,
-                    0,
-                ) || has_page_name_change_below(
-                    &self.doc,
-                    crate::blitz_adapter::uid(child_id),
-                    self.used_page_names.as_ref(),
-                    0,
-                ) || (!avoid_fits_whole_page
-                    && would_split_block_subtree(
+            // A multicol container that does not fit the rest of the page
+            // breaks across pages, its columns continuing on the next one.
+            let multicol_breaks =
+                is_multicol && !avoid_fits_whole_page && child_h > available_strip + 1.0;
+            let needs_recursion = multicol_breaks
+                || has_splittable_children
+                    && !is_multicol
+                    && (has_forced_break_below(
                         &self.doc,
                         crate::blitz_adapter::uid(child_id),
-                        available_strip,
-                        self.page_height_px,
+                        self.column_styles,
                         0,
-                    )));
+                    ) || has_page_name_change_below(
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
+                        self.used_page_names.as_ref(),
+                        0,
+                    ) || (!avoid_fits_whole_page
+                        && would_split_block_subtree(
+                            &self.doc,
+                            crate::blitz_adapter::uid(child_id),
+                            available_strip,
+                            self.page_height_px,
+                            0,
+                        )));
             if needs_recursion {
                 let child_x_in_body = body_x + layout.location.x;
-                let (new_page, new_cursor) = fragment_block_subtree(
-                    &mut self.geometry,
-                    &self.doc,
-                    self.column_styles,
-                    self.used_page_names.as_ref(),
-                    crate::blitz_adapter::uid(child_id),
-                    child_w,
-                    child_x_in_body,
-                    page_index,
-                    cursor_y,
-                    self.page_height_px,
-                    0,
-                    false,
-                    &mut remaining_repeat_budget,
-                );
+                let (new_page, new_cursor) = if multicol_breaks {
+                    fragment_multicol_container(
+                        &mut self.geometry,
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
+                        child_x_in_body,
+                        child_w,
+                        child_h,
+                        page_index,
+                        cursor_y,
+                        self.page_height_px,
+                    )
+                } else {
+                    fragment_block_subtree(
+                        &mut self.geometry,
+                        &self.doc,
+                        self.column_styles,
+                        self.used_page_names.as_ref(),
+                        crate::blitz_adapter::uid(child_id),
+                        child_w,
+                        child_x_in_body,
+                        page_index,
+                        cursor_y,
+                        self.page_height_px,
+                        0,
+                        false,
+                        &mut remaining_repeat_budget,
+                    )
+                };
                 page_index = new_page;
                 cursor_y = new_cursor;
                 emitted += 1;
@@ -1241,6 +1288,155 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
         return true;
     }
     false
+}
+
+/// Break a multicol container that does not fit the rest of the page
+/// across pages, starting at `page_y` on `page_index`: one fragment per
+/// page, the first ending at the page end. Its descendants go to the page
+/// their position falls on (see [`record_paged_descendants`]).
+///
+/// The multicol pass lays such a container out page by page (once the
+/// engine knows where it starts, see
+/// `multicol_layout::run_paged_pass`), so its column rows end at the page
+/// boundaries this cuts at. Returns the page and cursor after it.
+#[allow(clippy::too_many_arguments)]
+fn fragment_multicol_container(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    node_id: usize,
+    x: f32,
+    width: f32,
+    height: f32,
+    page_index: u32,
+    page_y: f32,
+    page_height_px: f32,
+) -> (u32, f32) {
+    let first_h = (page_height_px - page_y).max(0.0).min(height);
+    let mut page = page_index;
+    let mut push = |page: u32, y: f32, h: f32| {
+        geometry
+            .entry(node_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index: page,
+                x: x.as_px(),
+                y: y.as_px(),
+                width: width.as_px(),
+                height: h.as_px(),
+            });
+    };
+    push(page, page_y, first_h);
+    let mut remaining = height - first_h;
+    let mut last_h = first_h;
+    while remaining > 0.5 && page < crate::MAX_PAGES && page_height_px > 0.0 {
+        page += 1;
+        last_h = remaining.min(page_height_px);
+        push(page, 0.0, last_h);
+        remaining -= last_h;
+    }
+    let pages = PagedSlices {
+        first_page: page_index,
+        first_y: page_y,
+        first_h,
+        page_h: page_height_px,
+        last_page: page,
+    };
+    record_paged_descendants(geometry, doc, node_id, &pages, 0.0, x, 0);
+    let cursor = if page == page_index {
+        page_y + first_h
+    } else {
+        last_h
+    };
+    (page, cursor)
+}
+
+/// The page slices of a container broken by [`fragment_multicol_container`].
+struct PagedSlices {
+    first_page: u32,
+    /// Page-local y of the container top.
+    first_y: f32,
+    /// Height of the container on its first page.
+    first_h: f32,
+    page_h: f32,
+    last_page: u32,
+}
+
+impl PagedSlices {
+    /// The page that container-relative `y` falls on, the page-local y
+    /// there, and the container-relative y where that page's slice ends.
+    fn locate(&self, y: f32) -> (u32, f32, f32) {
+        // Positions within half a pixel of a page end belong to the next
+        // page (layout rounding).
+        const SNAP: f32 = 0.5;
+        if y < self.first_h - SNAP || self.page_h <= 0.0 {
+            return (self.first_page, self.first_y + y, self.first_h);
+        }
+        let k = ((y - self.first_h + SNAP) / self.page_h).floor().max(0.0);
+        let page = (self.first_page + 1 + k as u32).min(self.last_page);
+        let start = self.first_h + (page - self.first_page - 1) as f32 * self.page_h;
+        (page, y - start, start + self.page_h)
+    }
+}
+
+/// [`record_subtree_descendants`] for a container broken across pages by
+/// [`fragment_multicol_container`]: each descendant lands on the page its
+/// top falls on, and one taller than the rest of that page gets a fragment
+/// on every page it reaches, as split blocks do. `parent_y` is the
+/// parent's y relative to the container top.
+fn record_paged_descendants(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    parent_id: usize,
+    pages: &PagedSlices,
+    parent_y: f32,
+    parent_x_in_body: f32,
+    depth: usize,
+) {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(parent) = doc.get_node(crate::blitz_adapter::bid(parent_id)) else {
+        return;
+    };
+    // Layout children first, as in `record_subtree_descendants`.
+    let layout_children_borrow = parent.layout_children.borrow();
+    let walk_children: &[usize] = &crate::blitz_adapter::uids(
+        layout_children_borrow
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&parent.children),
+    );
+    for &child_id in walk_children {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
+            continue;
+        };
+        let layout = child.final_layout_or_zero();
+        let (w, h) = (layout.size.width, layout.size.height);
+        let child_x = parent_x_in_body + layout.location.x;
+        let child_y = parent_y + layout.location.y;
+        if h > 0.0 || w > 0.0 {
+            let entry = geometry.entry(child_id).or_default();
+            let mut top = child_y;
+            let bottom = child_y + h;
+            loop {
+                let (page, page_y, slice_end) = pages.locate(top);
+                let part = (bottom.min(slice_end) - top).max(0.0);
+                entry.fragments.push(Fragment {
+                    page_index: page,
+                    x: child_x.as_px(),
+                    y: page_y.as_px(),
+                    width: w.as_px(),
+                    height: if part > 0.0 { part } else { h }.as_px(),
+                });
+                if bottom <= slice_end + 0.5 || page >= pages.last_page {
+                    break;
+                }
+                top = slice_end;
+            }
+        }
+        record_paged_descendants(geometry, doc, child_id, pages, child_y, child_x, depth + 1);
+    }
 }
 
 /// fulgur-s67g Phase 2.5: recursively record fragments for every
@@ -3087,18 +3283,23 @@ fn fragment_block_subtree_inner(
         // before branch above leaves a sliver of its background behind
         // on the current page instead of moving the whole box.
         let avoid_fits_whole_page = avoid_inside && child_h <= page_height_px + 1.0;
-        let needs_recursion = !child.children.is_empty()
-            && !is_multicol
-            && (has_forced_break_below(doc, child_id, column_styles, 0)
-                || has_page_name_change_below(doc, child_id, used_page_names, 0)
-                || (!avoid_fits_whole_page
-                    && would_split_block_subtree(
-                        doc,
-                        child_id,
-                        available_strip,
-                        page_height_px,
-                        0,
-                    )));
+        // As in the body-direct branch: a multicol container that does not
+        // fit the rest of the page breaks across pages.
+        let multicol_breaks =
+            is_multicol && !avoid_fits_whole_page && child_page_y + child_h > page_height_px + 1.0;
+        let needs_recursion = multicol_breaks
+            || !child.children.is_empty()
+                && !is_multicol
+                && (has_forced_break_below(doc, child_id, column_styles, 0)
+                    || has_page_name_change_below(doc, child_id, used_page_names, 0)
+                    || (!avoid_fits_whole_page
+                        && would_split_block_subtree(
+                            doc,
+                            child_id,
+                            available_strip,
+                            page_height_px,
+                            0,
+                        )));
         if needs_recursion {
             let occupied_before_recursion = initial_page_occupied;
             let row_started_on_occupied_strip = row_state
@@ -3116,21 +3317,35 @@ fn fragment_block_subtree_inner(
             // below the previous one instead of beside it. Using
             // `child_page_y` keeps each cell's recursion strip aligned to
             // the row's y on the current page.
-            let (np, nc) = fragment_block_subtree(
-                geometry,
-                doc,
-                column_styles,
-                used_page_names,
-                child_id,
-                child_w,
-                child_x_in_body,
-                page_index,
-                child_page_y,
-                page_height_px,
-                depth + 1,
-                initial_page_occupied,
-                remaining_repeat_budget,
-            );
+            let (np, nc) = if multicol_breaks {
+                fragment_multicol_container(
+                    geometry,
+                    doc,
+                    child_id,
+                    child_x_in_body,
+                    child_w,
+                    child_h,
+                    page_index,
+                    child_page_y,
+                    page_height_px,
+                )
+            } else {
+                fragment_block_subtree(
+                    geometry,
+                    doc,
+                    column_styles,
+                    used_page_names,
+                    child_id,
+                    child_w,
+                    child_x_in_body,
+                    page_index,
+                    child_page_y,
+                    page_height_px,
+                    depth + 1,
+                    initial_page_occupied,
+                    remaining_repeat_budget,
+                )
+            };
             let occupied_page_extent = if occupied_before_recursion || row_started_on_occupied_strip
             {
                 fragmented_descendant_page_extent(
@@ -10675,5 +10890,26 @@ h2 { string-set: chapter-title content(text); }
             states[0].is_empty(),
             "store-only node (not in geom) must not produce a state entry"
         );
+    }
+
+    #[test]
+    fn paged_slices_locate_positions_on_their_page() {
+        let pages = super::PagedSlices {
+            first_page: 2,
+            first_y: 300.0,
+            first_h: 100.0,
+            page_h: 400.0,
+            last_page: 4,
+        };
+        assert_eq!(pages.locate(0.0), (2, 300.0, 100.0));
+        assert_eq!(pages.locate(99.0), (2, 399.0, 100.0));
+        // Within half a pixel of the page end: the next page.
+        let (page, y, end) = pages.locate(99.8);
+        assert_eq!((page, end), (3, 500.0));
+        assert!((y + 0.2).abs() < 1e-3);
+        assert_eq!(pages.locate(250.0), (3, 150.0, 500.0));
+        assert_eq!(pages.locate(500.0), (4, 0.0, 900.0));
+        // Past the last slice stays on the last page.
+        assert_eq!(pages.locate(2000.0).0, 4);
     }
 }

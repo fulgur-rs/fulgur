@@ -1405,9 +1405,14 @@ fn paint_multicol_paragraph_slices(
                 // a slice that crosses a fragment break disappears on
                 // every page it would have crossed. Revisit once
                 // split-aware rendering of multicol slices lands.
+                // Half a point of slack: the multicol pass ends column
+                // rows exactly at page boundaries, and the px → pt
+                // conversion must not push a slice that ends there onto
+                // neither page.
+                const SLACK: f32 = 0.5;
                 let above = slice_bottom <= 0.0;
                 let below = slice_top >= cutoff;
-                let straddles = slice_top < 0.0 || slice_bottom > cutoff;
+                let straddles = slice_top < -SLACK || slice_bottom > cutoff + SLACK;
                 if above || below || straddles {
                     continue;
                 }

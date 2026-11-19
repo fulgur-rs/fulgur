@@ -550,7 +550,8 @@ impl Engine {
         // containers with the rule spec + geometry they need to render.
         // See docs/plans/2026-04-20-css-multicol-design.md and
         // docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
-        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let mut multicol_geometry =
+            crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
 
         // Run the pagination_layout fragmenter (fulgur-4cbc). Walks
         // body's children's existing `final_layout` (populated by
@@ -595,11 +596,22 @@ impl Engine {
         // here so the fragmenter, fixed-element layout, and viewport
         // sizing all share a single content box — see the resolve block
         // up at the start of this function.
-        let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
+        //
+        // Multicol containers that break across pages are laid out again
+        // page by page once their start is known, then paginated again.
+        let mut pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),
-            resolved_content_height_px,
             &column_styles,
-            &running_store,
+            &mut multicol_geometry,
+            resolved_content_height_px,
+            |doc| {
+                crate::pagination_layout::run_pass_with_break_and_running(
+                    doc,
+                    resolved_content_height_px,
+                    &column_styles,
+                    &running_store,
+                )
+            },
         );
 
         // fulgur-rpvu: append per-page fragments for every `position:
@@ -962,11 +974,21 @@ impl Engine {
         );
         let column_styles =
             crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
-        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+        let mut multicol_geometry =
+            crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let page_height_px = self.config.content_height().as_pt().in_px();
+        let pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),
-            self.config.content_height().as_pt().in_px(),
             &column_styles,
+            &mut multicol_geometry,
+            page_height_px.to_f32(),
+            |doc| {
+                crate::pagination_layout::run_pass_with_break_styles(
+                    doc,
+                    page_height_px,
+                    &column_styles,
+                )
+            },
         );
 
         let running_store = crate::gcpm::running::RunningElementStore::new();
@@ -1029,11 +1051,21 @@ impl Engine {
         );
         let column_styles =
             crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
-        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+        let mut multicol_geometry =
+            crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let page_height_px = self.config.content_height().as_pt().in_px();
+        let mut pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),
-            self.config.content_height().as_pt().in_px(),
             &column_styles,
+            &mut multicol_geometry,
+            page_height_px.to_f32(),
+            |doc| {
+                crate::pagination_layout::run_pass_with_break_styles(
+                    doc,
+                    page_height_px,
+                    &column_styles,
+                )
+            },
         );
 
         // Mirror the production `render` path so test callers that

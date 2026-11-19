@@ -2425,6 +2425,90 @@ fn page_property_inside_flex_container_does_not_propagate_outward() {
         .expect("flex page render");
     assert!(!pdf.is_empty());
 }
+/// A multicol container taller than the page breaks across pages: its
+/// columns fill each page to the page end and continue on the next page,
+/// and only the last page's columns are balanced. Every block lands whole
+/// inside a page.
+#[test]
+fn multicol_taller_than_the_page_continues_on_the_next_page() {
+    use fulgur::PageSize;
+
+    // 400px pages; 40 blocks of 50px in two columns: 8 per column, so
+    // 16, 16 and then 8 balanced as 4 + 4.
+    let blocks = r#"<div style="height: 50px"></div>"#.repeat(40);
+    let html = format!(
+        r#"<!doctype html><html><body style="margin:0">
+        <div style="column-count: 2; column-gap: 0">{blocks}</div>
+    </body></html>"#
+    );
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 300.0,
+            height: 300.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let (_drawables, geometry) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+    let mut per_page = std::collections::BTreeMap::<u32, usize>::new();
+    for geom in geometry.values() {
+        for f in &geom.fragments {
+            if (f.height.to_f32() - 50.0).abs() < 0.01 && f.width.to_f32() < 250.0 {
+                assert!(
+                    f.y.to_f32() + f.height.to_f32() <= 400.5,
+                    "block at y={} runs off its page",
+                    f.y.to_f32()
+                );
+                *per_page.entry(f.page_index).or_default() += 1;
+            }
+        }
+    }
+    assert_eq!(
+        per_page.into_iter().collect::<Vec<_>>(),
+        vec![(0, 16), (1, 16), (2, 8)]
+    );
+}
+
+/// A multicol container that starts lower on a page fills that page's
+/// columns from where it starts, then whole pages.
+#[test]
+fn multicol_starting_mid_page_fills_the_rest_of_the_page_first() {
+    use fulgur::PageSize;
+
+    // 100px above the columns leaves 300px: 6 blocks per column there,
+    // then 16 per page; the last 12 balance as 6 + 6.
+    let blocks = r#"<div style="height: 50px"></div>"#.repeat(40);
+    let html = format!(
+        r#"<!doctype html><html><body style="margin:0">
+        <div style="height: 100px"></div>
+        <div style="column-count: 2; column-gap: 0">{blocks}</div>
+    </body></html>"#
+    );
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 300.0,
+            height: 300.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let (_drawables, geometry) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+    let mut per_page = std::collections::BTreeMap::<u32, usize>::new();
+    for geom in geometry.values() {
+        for f in &geom.fragments {
+            if (f.height.to_f32() - 50.0).abs() < 0.01 && f.width.to_f32() < 250.0 {
+                assert!(f.y.to_f32() + f.height.to_f32() <= 400.5);
+                if f.page_index == 0 {
+                    assert!(f.y.to_f32() >= 99.5, "block above the columns' start");
+                }
+                *per_page.entry(f.page_index).or_default() += 1;
+            }
+        }
+    }
+    assert_eq!(
+        per_page.into_iter().collect::<Vec<_>>(),
+        vec![(0, 12), (1, 16), (2, 12)]
+    );
+}
+
 /// A bordered box broken across columns is painted in slices: the convert
 /// pass records one `BlockSlice` per column, offset by the box height in
 /// earlier columns, so the slices add up to the whole box.

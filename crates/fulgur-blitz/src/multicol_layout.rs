@@ -28,8 +28,8 @@ use taffy::{
 /// columns by `layout_column_group`.
 ///
 /// `line_range.is_empty()` is the **placeholder marker**: the entry was
-/// padded into `ParagraphSplitEntry::column_slices` to keep the vector
-/// length equal to `ColumnGroupGeometry.n`, and the column receives no
+/// padded into `ParagraphSplitEntry::column_slices` (self-inline-root
+/// containers keep one entry per column), and the column receives no
 /// content from this paragraph. In that case `origin` and `size` are
 /// both zero (`Default` values) — consumers MUST check
 /// `line_range.is_empty()` before reading them. For non-empty slices,
@@ -52,8 +52,11 @@ pub struct ColumnLineSlice {
 }
 
 /// Plan for one paragraph distributed across `ColumnGroupGeometry`'s
-/// columns. `column_slices.len() == ColumnGroupGeometry.n` always; entries
-/// for unused columns have empty `line_range`.
+/// columns. From `layout_column_group`, `column_slices` holds one slice
+/// per column the paragraph reaches, in line order (columns of later rows,
+/// when the column set breaks across pages, included). From
+/// `layout_self_inline_root_container` it holds one entry per column,
+/// with empty `line_range` for unused columns.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParagraphSplitEntry {
     /// DOM `usize` NodeId whose `inline_layout_data` was sliced. In Case A
@@ -236,6 +239,30 @@ pub struct FulgurLayoutTree<'a> {
     /// it into the convert pipeline. `BTreeMap` keeps iteration order
     /// deterministic across runs.
     pub(crate) geometry: MulticolGeometryTable,
+    /// Containers that break across pages, and where they start: their
+    /// column sets are filled page by page (see [`PagedStart`]).
+    pub(crate) paged: BTreeMap<usize, PagedStart>,
+}
+
+/// Where a multicol container that breaks across pages starts. Its column
+/// sets then fill each page's columns to the page end, and only the last
+/// page's columns are balanced (CSS Multi-column 1 §8.1, `column-fill`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PagedStart {
+    /// Page content height, in CSS px.
+    pub page_h: f32,
+    /// Distance from the top of the page's content area to the
+    /// container's border-box top, in CSS px.
+    pub top_in_page: f32,
+}
+
+/// The column rows of a column set that breaks across pages: the first
+/// row ends `first_h` below the set's top, every later one is `page_h`
+/// tall.
+#[derive(Clone, Copy, Debug)]
+struct Paging {
+    first_h: f32,
+    page_h: f32,
 }
 
 /// One-shot entry used by the render pipeline after `blitz_adapter::resolve`.
@@ -257,6 +284,20 @@ pub fn run_pass(
     tree.take_geometry()
 }
 
+/// Lay out again the multicol containers in `paged`, filling their columns
+/// page by page from the given start. Other containers keep their layout.
+/// Returns their new geometry.
+pub fn run_paged_pass(
+    doc: &mut BaseDocument,
+    column_styles: &crate::column_css::ColumnStyleTable,
+    paged: &BTreeMap<usize, PagedStart>,
+) -> MulticolGeometryTable {
+    let mut tree = FulgurLayoutTree::new(doc, column_styles);
+    tree.paged = paged.clone();
+    tree.layout_multicol_subtrees_in(Some(paged));
+    tree.take_geometry()
+}
+
 impl<'a> FulgurLayoutTree<'a> {
     pub fn new(
         doc: &'a mut BaseDocument,
@@ -266,6 +307,7 @@ impl<'a> FulgurLayoutTree<'a> {
             doc: LayoutPassState::new(doc),
             column_styles,
             geometry: BTreeMap::new(),
+            paged: BTreeMap::new(),
         }
     }
 
@@ -298,7 +340,16 @@ impl<'a> FulgurLayoutTree<'a> {
     ///
     /// Returns the number of multicol subtrees laid out.
     pub fn layout_multicol_subtrees(&mut self) -> usize {
-        let multicol_ids = collect_multicol_node_ids(&self.doc);
+        self.layout_multicol_subtrees_in(None)
+    }
+
+    /// [`Self::layout_multicol_subtrees`] restricted to the containers
+    /// keyed in `only`, when given.
+    fn layout_multicol_subtrees_in(&mut self, only: Option<&BTreeMap<usize, PagedStart>>) -> usize {
+        let mut multicol_ids = collect_multicol_node_ids(&self.doc);
+        if let Some(only) = only {
+            multicol_ids.retain(|id| only.contains_key(id));
+        }
         for id in multicol_ids.iter().rev() {
             let node_id = NodeId::from(*id);
             let prior_layout = self.doc.get_unrounded_layout(node_id);
@@ -651,8 +702,11 @@ pub fn compute_multicol_layout(
     //    return the container's outer (border-box) height. Without this
     //    subtraction, a definite-height multicol with non-zero padding
     //    would double-count its vertical insets and grow too tall.
+    let paged = tree.paged.get(&usize::from(node_id)).copied();
+    // A container broken across pages takes the height its pages give it;
+    // the definite height here is only the previous pass's result.
     let avail_h = match inputs.available_space.height {
-        AvailableSpace::Definite(h) => (h - inset_top - inset_bottom).max(0.0),
+        AvailableSpace::Definite(h) if paged.is_none() => (h - inset_top - inset_bottom).max(0.0),
         _ => f32::INFINITY,
     };
 
@@ -729,7 +783,17 @@ pub fn compute_multicol_layout(
     for segment in segments {
         match segment {
             Segment::ColumnGroup(children) => {
-                let (group_placements, geometry) = layout_column_group(
+                // The first row of columns ends at the end of the page the
+                // set starts on.
+                let paging = paged.filter(|p| p.page_h > 0.0).map(|p| {
+                    let top = p.top_in_page + inset_top + cursor_y;
+                    let used = top.rem_euclid(p.page_h);
+                    Paging {
+                        first_h: p.page_h - used,
+                        page_h: p.page_h,
+                    }
+                });
+                let (group_placements, geometries, seg_h) = layout_column_group(
                     tree,
                     col_w,
                     gap,
@@ -739,15 +803,10 @@ pub fn compute_multicol_layout(
                     &children,
                     cursor_y,
                     child_inputs,
+                    paging,
                 );
-                let seg_h = geometry
-                    .col_heights
-                    .iter()
-                    .copied()
-                    .map(crate::units::Px::to_f32)
-                    .fold(0.0_f32, f32::max);
                 placements.extend(group_placements);
-                group_geometries.push(geometry);
+                group_geometries.extend(geometries);
                 cursor_y += seg_h;
             }
             Segment::SpanAll(child_id) => {
@@ -1607,9 +1666,120 @@ fn column_runs(tops: &[(u32, f32)], units: std::ops::Range<usize>) -> Vec<(u32, 
     runs
 }
 
+/// Fill one row of `n` columns, `budget` tall, with the leading units of
+/// `units`, stopping at the first unit that no longer fits. Returns the
+/// `(column, top)` of each placed unit. A unit taller than the row is
+/// placed alone in a column, unless `skip_oversized` (the row is the rest
+/// of a page that already has content), in which case that column stays
+/// empty.
+fn fill_row(units: &[FlowUnit], n: u32, budget: f32, skip_oversized: bool) -> Vec<(u32, f32)> {
+    const EPSILON: f32 = 0.01;
+    let mut out = Vec::new();
+    let mut col: u32 = 0;
+    let mut y: f32 = 0.0;
+    let mut column_has_content = false;
+    let mut index = 0;
+    while index < units.len() {
+        let unit = &units[index];
+        let gap = if column_has_content {
+            unit.gap_before
+        } else {
+            0.0
+        };
+        if y + gap + unit.extent() > budget + EPSILON && (column_has_content || skip_oversized) {
+            if col + 1 < n {
+                col += 1;
+                y = 0.0;
+                column_has_content = false;
+                continue;
+            }
+            break;
+        }
+        out.push((col, y + gap));
+        y += gap + unit.extent();
+        column_has_content = true;
+        index += 1;
+    }
+    out
+}
+
+/// A row of columns in a column set: one per page when the set breaks
+/// across pages, otherwise just one.
+#[derive(Clone, Copy, Debug)]
+struct ColumnRow {
+    /// Top, relative to the column set.
+    top: f32,
+    /// Column height the units were placed against.
+    budget: f32,
+}
+
+/// Place `units` into rows of `n` columns. Returns each unit's
+/// `(slot, top)`, where `slot / n` is the row and `slot % n` the column
+/// and `top` is relative to the column set, and the rows.
+fn place_rows(
+    units: &[FlowUnit],
+    n: u32,
+    fill: crate::column_css::ColumnFill,
+    avail_h: f32,
+    paging: Option<Paging>,
+) -> (Vec<(u32, f32)>, Vec<ColumnRow>) {
+    const EPSILON: f32 = 0.01;
+    let last_row_budget = |units: &[FlowUnit], room: f32| match fill {
+        crate::column_css::ColumnFill::Auto => room,
+        crate::column_css::ColumnFill::Balance => balanced_budget(units, n).min(room),
+    };
+    let Some(paging) = paging else {
+        let budget = last_row_budget(units, avail_h);
+        let tops = place_units(units, n, budget, false).unwrap_or_default();
+        return (tops, vec![ColumnRow { top: 0.0, budget }]);
+    };
+
+    let mut tops: Vec<(u32, f32)> = Vec::with_capacity(units.len());
+    let mut rows: Vec<ColumnRow> = Vec::new();
+    let mut start = 0;
+    let mut row_top = 0.0_f32;
+    let mut room = paging.first_h;
+    while start < units.len() {
+        let row = rows.len() as u32;
+        let first_row = rows.is_empty();
+        // Units after a page break drop the margin before them.
+        let mut rest = units[start..].to_vec();
+        if !first_row {
+            rest[0].gap_before = 0.0;
+        }
+        let out_of_pages = rows.len() >= crate::MAX_PAGES as usize;
+        // The rest fits this page: it is the last row, balanced.
+        let budget = last_row_budget(&rest, room);
+        if out_of_pages || place_units(&rest, n, budget, true).is_some() {
+            let placed = place_units(&rest, n, budget, false).unwrap_or_default();
+            tops.extend(placed.into_iter().map(|(c, y)| (row * n + c, row_top + y)));
+            rows.push(ColumnRow {
+                top: row_top,
+                budget,
+            });
+            break;
+        }
+        let mut placed = fill_row(&rest, n, room, first_row && room + EPSILON < paging.page_h);
+        if placed.is_empty() && !first_row {
+            // Never stall: a full page takes at least one unit.
+            placed.push((0, 0.0));
+        }
+        start += placed.len();
+        tops.extend(placed.into_iter().map(|(c, y)| (row * n + c, row_top + y)));
+        rows.push(ColumnRow {
+            top: row_top,
+            budget: room,
+        });
+        row_top += room;
+        room = paging.page_h;
+    }
+    (tops, rows)
+}
+
 /// Place `children` into `n` columns of `col_w`, starting at `y_offset`.
 /// `avail_h` caps the column height (for `column-fill: auto`, it is the
-/// column height).
+/// column height). With `paging`, the columns are filled page by page and
+/// only the last page's columns are balanced.
 ///
 /// The children are flattened into flow units first: paragraphs break
 /// between lines, blocks without painting let their own children flow
@@ -1619,14 +1789,17 @@ fn column_runs(tops: &[(u32, f32)], units: std::ops::Range<usize>) -> Vec<(u32, 
 /// dropped at the top of a column after a break. `column-fill: balance`
 /// then searches for the smallest column height that holds everything.
 ///
-/// Returns `(placements, geometry)`:
+/// Returns `(placements, geometries, height)`:
 ///
 /// - `placements` holds the `(child, location, size)` of the direct
 ///   children, in the content-box frame. `compute_multicol_layout` shifts
 ///   them by the container's insets and writes them to Taffy. Nested
 ///   boxes (inside wrappers) are written here, relative to their wrapper.
-/// - `geometry` carries the column width, gap, count, y-offset, per-column
-///   filled height, and the paragraphs and boxes split across columns.
+/// - `geometries` has one entry per row of columns (one per page when the
+///   set breaks across pages), each with the column width, gap, count,
+///   y-offset and per-column filled height. The first also carries the
+///   paragraphs and boxes split across columns, in its own frame.
+/// - `height` is the column set's height.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn layout_column_group(
     tree: &mut FulgurLayoutTree<'_>,
@@ -1638,7 +1811,12 @@ fn layout_column_group(
     children: &[NodeId],
     y_offset: f32,
     child_inputs: taffy::tree::LayoutInput,
-) -> (Vec<(NodeId, Point<f32>, Size<f32>)>, ColumnGroupGeometry) {
+    paging: Option<Paging>,
+) -> (
+    Vec<(NodeId, Point<f32>, Size<f32>)>,
+    Vec<ColumnGroupGeometry>,
+    f32,
+) {
     // 1. Measure at the column width. This also lays out every
     //    descendant, so wrapper children have sizes and paragraphs have
     //    lines broken at `col_w`.
@@ -1655,31 +1833,30 @@ fn layout_column_group(
         measured.push((child, output.size, margin.left));
     }
 
-    // 2. Flatten into flow units and pick the column height.
+    // 2. Flatten into flow units and place them in rows of columns.
     let flow = ColumnFlow::collect(tree, &measured, col_w);
-    let budget = match fill {
-        crate::column_css::ColumnFill::Auto => avail_h,
-        crate::column_css::ColumnFill::Balance => balanced_budget(&flow.units, n).min(avail_h),
-    };
-    let tops = place_units(&flow.units, n, budget, false).unwrap_or_default();
+    let (tops, rows) = place_rows(&flow.units, n, fill, avail_h, paging);
     let content_top = |index: usize| tops[index].1 + flow.units[index].lead;
     let content_bottom = |index: usize| content_top(index) + flow.units[index].height;
 
-    // 3. Column geometry.
+    // 3. Column geometry, per row.
     let stride = col_w + gap;
-    let col_x = |col: u32| col as f32 * stride;
-    let mut col_heights: Vec<f32> = vec![0.0_f32; n as usize];
-    for (unit, &(col, top)) in flow.units.iter().zip(&tops) {
-        let h = &mut col_heights[col as usize];
-        *h = h.max(top + unit.extent());
+    let col_x = |slot: u32| (slot % n) as f32 * stride;
+    let row_of = |slot: u32| (slot / n) as usize;
+    let mut col_heights: Vec<Vec<f32>> = vec![vec![0.0_f32; n as usize]; rows.len()];
+    for (unit, &(slot, top)) in flow.units.iter().zip(&tops) {
+        let row = row_of(slot);
+        let h = &mut col_heights[row][(slot % n) as usize];
+        *h = h.max(top - rows[row].top + unit.extent());
     }
-    if let Some(&(col, _)) = tops.last() {
-        col_heights[col as usize] += flow.trailing_margin;
+    if let Some(&(slot, _)) = tops.last() {
+        col_heights[row_of(slot)][(slot % n) as usize] += flow.trailing_margin;
     }
     // Where a box broken at the end of a column ends: the column box.
-    let column_end = |run_bottom: f32| {
-        if budget.is_finite() {
-            budget.max(run_bottom)
+    let column_end = |slot: u32, run_bottom: f32| {
+        let row = rows[row_of(slot)];
+        if row.budget.is_finite() {
+            (row.top + row.budget).max(run_bottom)
         } else {
             run_bottom
         }
@@ -1708,12 +1885,12 @@ fn layout_column_group(
             (top, bottom)
         };
         let boxed = match (wrapper.frame, runs.as_slice()) {
-            (Some(frame), [(col, first, last)]) => {
+            (Some(frame), [(slot, first, last)]) => {
                 let top = tops[*first].1 + frame.top_offset;
                 let bottom = content_bottom(*last) + frame.bottom_offset;
                 (
                     Point {
-                        x: col_x(*col) + wrapper.x,
+                        x: col_x(*slot) + wrapper.x,
                         y: y_offset + top,
                     },
                     Size {
@@ -1727,17 +1904,21 @@ fn layout_column_group(
                 let box_bottom = content_bottom(*last_unit) + frame.bottom_offset;
                 let mut fragments = Vec::with_capacity(runs.len());
                 let mut consumed = 0.0_f32;
-                for (i, &(col, _, last)) in runs.iter().enumerate() {
-                    let top = if i == 0 { box_top } else { 0.0 };
+                for (i, &(slot, _, last)) in runs.iter().enumerate() {
+                    let top = if i == 0 {
+                        box_top
+                    } else {
+                        rows[row_of(slot)].top
+                    };
                     let bottom = if i + 1 == runs.len() {
                         box_bottom
                     } else {
-                        column_end(tops[last].1 + flow.units[last].extent())
+                        column_end(slot, tops[last].1 + flow.units[last].extent())
                     };
                     let height = (bottom - top).max(0.0);
                     fragments.push(BoxFragment {
                         origin: Point {
-                            x: (col_x(col) + wrapper.x).as_px(),
+                            x: (col_x(slot) + wrapper.x).as_px(),
                             y: top.as_px(),
                         },
                         size: Size {
@@ -1824,41 +2005,41 @@ fn layout_column_group(
     // 5. Blocks and paragraphs.
     let mut paragraph_lines: Vec<Vec<(u32, f32, f32)>> = vec![Vec::new(); flow.paragraphs.len()];
     for (index, unit) in flow.units.iter().enumerate() {
-        let col = tops[index].0;
+        let slot = tops[index].0;
         match unit.kind {
             FlowUnitKind::Block(b) => {
                 let block = &flow.blocks[b];
                 let abs = Point {
-                    x: col_x(col) + block.x,
+                    x: col_x(slot) + block.x,
                     y: y_offset + content_top(index),
                 };
                 place(tree, block.id, block.parent, abs, block.size);
             }
             FlowUnitKind::Line(paragraph) => {
-                paragraph_lines[paragraph].push((col, content_top(index), unit.height));
+                paragraph_lines[paragraph].push((slot, content_top(index), unit.height));
             }
         }
     }
 
     let mut paragraph_splits: Vec<ParagraphSplitEntry> = Vec::new();
     for (paragraph, lines) in flow.paragraphs.iter().zip(&paragraph_lines) {
-        let Some(&(first_col, first_top, _)) = lines.first() else {
+        let Some(&(first_slot, first_top, _)) = lines.first() else {
             continue;
         };
-        // Consecutive lines per column: (column, first line, line count,
+        // Consecutive lines per column: (slot, first line, line count,
         // top, height).
         let mut runs: Vec<(u32, usize, usize, f32, f32)> = Vec::new();
-        for (index, &(col, top, height)) in lines.iter().enumerate() {
+        for (index, &(slot, top, height)) in lines.iter().enumerate() {
             match runs.last_mut() {
-                Some(run) if run.0 == col => {
+                Some(run) if run.0 == slot => {
                     run.2 += 1;
                     run.4 = top + height - run.3;
                 }
-                _ => runs.push((col, index, 1, top, height)),
+                _ => runs.push((slot, index, 1, top, height)),
             }
         }
         let first_abs = Point {
-            x: col_x(first_col) + paragraph.x,
+            x: col_x(first_slot) + paragraph.x,
             y: y_offset + first_top,
         };
         if runs.len() == 1 {
@@ -1872,27 +2053,34 @@ fn layout_column_group(
             continue;
         }
         // The box keeps the first slice; the convert pass draws every
-        // slice from `paragraph_splits`.
+        // slice from `paragraph_splits`. When the slices reach later rows
+        // (pages), the box reaches down to the last one, so that the
+        // paragraph is drawn on each of those pages.
+        let last = runs[runs.len() - 1];
+        let height = if row_of(last.0) == row_of(first_slot) {
+            runs[0].4
+        } else {
+            last.3 + last.4 - first_top
+        };
         let first_size = Size {
             width: paragraph.size.width,
-            height: runs[0].4,
+            height,
         };
         place(tree, paragraph.id, paragraph.parent, first_abs, first_size);
-        let mut column_slices: Vec<ColumnLineSlice> =
-            (0..n).map(|_| ColumnLineSlice::default()).collect();
-        for &(col, start, count, top, height) in &runs {
-            column_slices[col as usize] = ColumnLineSlice {
+        let column_slices: Vec<ColumnLineSlice> = runs
+            .iter()
+            .map(|&(slot, start, count, top, height)| ColumnLineSlice {
                 line_range: start..start + count,
                 origin: Point {
-                    x: (col_x(col) + paragraph.x).as_px(),
+                    x: (col_x(slot) + paragraph.x).as_px(),
                     y: top.as_px(),
                 },
                 size: Size {
                     width: paragraph.size.width.as_px(),
                     height: height.as_px(),
                 },
-            };
-        }
+            })
+            .collect();
         paragraph_splits.push(ParagraphSplitEntry {
             source_node_id: usize::from(paragraph.id),
             column_slices,
@@ -1902,25 +2090,37 @@ fn layout_column_group(
     // node order, as the previous `BTreeMap` collector did.
     paragraph_splits.sort_by_key(|p| p.source_node_id);
 
-    let geometry = ColumnGroupGeometry {
-        // `x_offset` / `y_offset` here are in the container's *content-box*
-        // frame; `compute_multicol_layout` shifts them into the border-box
-        // frame after every segment is placed.
-        x_offset: 0.0_f32.as_px(),
-        y_offset: y_offset.as_px(),
-        col_w: col_w.as_px(),
-        gap: gap.as_px(),
-        n,
-        col_heights: col_heights
-            .iter()
-            .copied()
-            .map(crate::units::F32Units::as_px)
-            .collect(),
-        paragraph_splits,
-        box_splits,
-    };
+    // `x_offset` / `y_offset` here are in the container's *content-box*
+    // frame; `compute_multicol_layout` shifts them into the border-box
+    // frame after every segment is placed. Split paragraphs and boxes are
+    // recorded on the first row, in its frame.
+    let mut paragraph_splits = Some(paragraph_splits);
+    let mut box_splits = Some(box_splits);
+    let geometries: Vec<ColumnGroupGeometry> = rows
+        .iter()
+        .zip(&col_heights)
+        .map(|(row, heights)| ColumnGroupGeometry {
+            x_offset: 0.0_f32.as_px(),
+            y_offset: (y_offset + row.top).as_px(),
+            col_w: col_w.as_px(),
+            gap: gap.as_px(),
+            n,
+            col_heights: heights
+                .iter()
+                .copied()
+                .map(crate::units::F32Units::as_px)
+                .collect(),
+            paragraph_splits: paragraph_splits.take().unwrap_or_default(),
+            box_splits: box_splits.take().unwrap_or_default(),
+        })
+        .collect();
+    let height = rows
+        .last()
+        .zip(col_heights.last())
+        .map(|(row, heights)| row.top + heights.iter().copied().fold(0.0_f32, f32::max))
+        .unwrap_or(0.0);
 
-    (top_level, geometry)
+    (top_level, geometries, height)
 }
 
 /// Distribute `line_heights` (per-line total height in CSS px) across
@@ -4271,6 +4471,68 @@ mod tests {
         );
         let a = layout_of_id(&doc, "a");
         assert_eq!((a.location.x, a.location.y), (5.0, 8.0));
+    }
+
+    #[test]
+    fn fill_row_stops_at_the_first_unit_that_does_not_fit() {
+        let units: Vec<FlowUnit> = (0..7).map(|_| line(20.0, 0.0)).collect();
+        // Two columns of 50px take two lines each.
+        let placed = fill_row(&units, 2, 50.0, false);
+        assert_eq!(placed, vec![(0, 0.0), (0, 20.0), (1, 0.0), (1, 20.0)]);
+    }
+
+    #[test]
+    fn fill_row_leaves_a_short_page_rest_empty_rather_than_overflow_it() {
+        let units = [line(40.0, 0.0), line(10.0, 0.0)];
+        assert!(fill_row(&units, 2, 30.0, true).is_empty());
+        // On a whole page, the unit is placed anyway.
+        assert_eq!(fill_row(&units, 1, 30.0, false), vec![(0, 0.0)]);
+    }
+
+    #[test]
+    fn place_rows_fills_pages_and_balances_the_last() {
+        // 30 lines of 10px, 2 columns, 45px left on the first page, 100px
+        // pages: 4 + 4, then 10 + 10, then the last 2 balanced as 1 + 1.
+        let units: Vec<FlowUnit> = (0..30).map(|_| line(10.0, 0.0)).collect();
+        let paging = Paging {
+            first_h: 45.0,
+            page_h: 100.0,
+        };
+        let (tops, rows) = place_rows(
+            &units,
+            2,
+            crate::column_css::ColumnFill::Balance,
+            f32::INFINITY,
+            Some(paging),
+        );
+        let tops_of_rows: Vec<f32> = rows.iter().map(|r| r.top).collect();
+        assert_eq!(tops_of_rows, vec![0.0, 45.0, 145.0]);
+        assert_eq!(rows[2].budget, 10.0);
+        assert_eq!(tops[0], (0, 0.0));
+        assert_eq!(tops[4], (1, 0.0));
+        assert_eq!(tops[8], (2, 45.0));
+        assert_eq!(tops[18], (3, 45.0));
+        assert_eq!(tops[28], (4, 145.0));
+        assert_eq!(tops[29], (5, 145.0));
+    }
+
+    #[test]
+    fn place_rows_balances_in_one_row_when_everything_fits_the_page() {
+        let units: Vec<FlowUnit> = (0..6).map(|_| line(10.0, 0.0)).collect();
+        let paging = Paging {
+            first_h: 45.0,
+            page_h: 100.0,
+        };
+        let (tops, rows) = place_rows(
+            &units,
+            2,
+            crate::column_css::ColumnFill::Balance,
+            f32::INFINITY,
+            Some(paging),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].budget, 30.0);
+        assert_eq!(tops[3], (1, 0.0));
     }
 
     #[test]
