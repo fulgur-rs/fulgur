@@ -160,8 +160,7 @@ fn convert_content_url(
         return false;
     };
     let asset_name = extract_asset_name(&raw_url);
-    let Some(bundle) = assets else { return false };
-    let Some(data) = bundle.get_image(asset_name).cloned() else {
+    let Some(data) = super::image_bytes(assets, asset_name) else {
         return false;
     };
     let Some(format) = ImageRender::detect_format(&data) else {
@@ -196,8 +195,7 @@ fn convert_image(
     let Some(src) = get_attr(elem, "src") else {
         return false;
     };
-    let Some(bundle) = assets else { return false };
-    let Some(data) = bundle.get_image(src).cloned() else {
+    let Some(data) = super::image_bytes(assets, src) else {
         return false;
     };
     let Some(format) = ImageRender::detect_format(&data) else {
@@ -475,6 +473,21 @@ mod tests {
             out.images.contains_key(&img_id),
             "ImageEntry must be registered for the <img> node"
         );
+    }
+
+    #[test]
+    fn try_convert_img_with_data_url_needs_no_bundle() {
+        let encoded: String = TEST_PNG_1X1.iter().map(|b| format!("%{b:02X}")).collect();
+        let src = format!("data:image/png,{encoded}");
+        let mut doc = parse_doc(&format!(
+            r#"<!doctype html><html><body><img src="{src}" style="width:30px;height:20px;"></body></html>"#
+        ));
+        let store = RunningElementStore::new();
+        let mut ctx = make_ctx(&mut doc, &store, None);
+        let mut out = Drawables::new();
+        let img_id = find_tag(&doc, "img");
+        assert!(try_convert(doc.deref(), img_id, &mut ctx, &mut out));
+        assert!(out.images.contains_key(&img_id));
     }
 
     // ── try_convert: <img> with missing src attribute ─────────────────

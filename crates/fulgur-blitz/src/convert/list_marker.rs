@@ -4,14 +4,13 @@ use crate::units::F32Units;
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
 /// detected asset kind. Returns `None` when there is no `list-style-image`,
-/// the computed value is not a plain `url(...)`, no asset bundle is set, or
-/// the asset is not registered in the bundle.
-fn resolve_list_style_image_asset<'a>(
+/// the computed value is not a plain `url(...)`, or the image is neither a
+/// `data:` URL nor registered in the bundle.
+fn resolve_list_style_image_asset(
     node: &Node,
-    assets: Option<&'a AssetBundle>,
-) -> Option<(&'a Arc<Vec<u8>>, crate::image::AssetKind)> {
+    assets: Option<&AssetBundle>,
+) -> Option<(Arc<Vec<u8>>, crate::image::AssetKind)> {
     use ::style::values::computed::image::Image;
-    let assets = assets?;
     let styles = node.primary_styles()?;
     let image = styles.slow_clone_list_style_image();
     let url = match image {
@@ -23,8 +22,8 @@ fn resolve_list_style_image_asset<'a>(
         ::style::url::ComputedUrl::Invalid(s) => s.as_str(),
     };
     let src = extract_asset_name(raw_src);
-    let data = assets.get_image(src)?;
-    let kind = crate::image::AssetKind::detect(data);
+    let data = super::image_bytes(assets, src)?;
+    let kind = crate::image::AssetKind::detect(&data);
     Some((data, kind))
 }
 
@@ -70,9 +69,9 @@ pub(super) fn resolve_list_marker(
     let (data, kind) = resolve_list_style_image_asset(node, assets)?;
     match kind {
         AssetKind::Raster(format) => {
-            let (width, height) = size_raster_marker(data, format, line_height)?;
+            let (width, height) = size_raster_marker(&data, format, line_height)?;
             let entry = crate::drawables::ImageEntry {
-                image_data: Arc::clone(data),
+                image_data: Arc::clone(&data),
                 format,
                 width,
                 height,
@@ -86,7 +85,7 @@ pub(super) fn resolve_list_marker(
             })
         }
         AssetKind::Svg => {
-            let tree = usvg::Tree::from_data(data, &crate::svg::sandboxed_options()).ok()?;
+            let tree = usvg::Tree::from_data(&data, &crate::svg::sandboxed_options()).ok()?;
             let size = tree.size();
             let intrinsic_w = size.width().as_px().in_pt();
             let intrinsic_h = size.height().as_px().in_pt();
@@ -133,9 +132,9 @@ pub(super) fn resolve_inside_image_marker(
     let (data, kind) = resolve_list_style_image_asset(node, assets)?;
     match kind {
         AssetKind::Raster(format) => {
-            let (width, height) = size_raster_marker(data, format, first_line_height)?;
+            let (width, height) = size_raster_marker(&data, format, first_line_height)?;
             Some(InlineImage {
-                data: Arc::clone(data),
+                data: Arc::clone(&data),
                 format,
                 width,
                 height,
@@ -246,6 +245,7 @@ pub(super) fn extract_marker_lines(
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
+                        variations: crate::paragraph::run_variations(run),
                         font_size,
                         color,
                         decoration: Default::default(),
@@ -375,6 +375,7 @@ pub(super) fn shape_marker_with_skrifa(
     Some(ShapedGlyphRun {
         font_data: Arc::clone(font_data),
         font_index,
+        variations: Vec::new(),
         font_size,
         color,
         decoration: TextDecoration::default(),
@@ -501,6 +502,7 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::clone(&font_data),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -722,6 +724,7 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::clone(&bad_font),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -761,6 +764,7 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::clone(&font_data),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),

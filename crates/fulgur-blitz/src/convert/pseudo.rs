@@ -15,11 +15,9 @@ pub(super) fn build_pseudo_image_entry(
     parent_content_height: Px,
     assets: Option<&AssetBundle>,
 ) -> Option<crate::drawables::ImageEntry> {
-    let assets = assets?;
-
     let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
-    let data = Arc::clone(assets.get_image(asset_name)?);
+    let data = super::image_bytes(assets, asset_name)?;
     let format = ImageRender::detect_format(&data)?;
 
     let styles = pseudo_node.primary_styles()?;
@@ -139,9 +137,6 @@ fn build_block_pseudo_image_entries(
     parent_cb: ContentBox,
     assets: Option<&AssetBundle>,
 ) -> (BlockPseudoImageSlot, BlockPseudoImageSlot) {
-    if assets.is_none() {
-        return (None, None);
-    }
     let load = |pseudo_id: Option<usize>| -> BlockPseudoImageSlot {
         let id = pseudo_id?;
         let pseudo = doc.get_node(crate::blitz_adapter::bid(id))?;
@@ -169,10 +164,9 @@ pub(super) fn build_inline_pseudo_image(
     parent_content_height: Px,
     assets: Option<&AssetBundle>,
 ) -> Option<InlineImage> {
-    let assets = assets?;
     let raw_url = crate::blitz_adapter::extract_content_image_url(pseudo_node)?;
     let asset_name = extract_asset_name(&raw_url);
-    let data = Arc::clone(assets.get_image(asset_name)?);
+    let data = super::image_bytes(assets, asset_name)?;
     let format = ImageRender::detect_format(&data)?;
 
     let styles = pseudo_node.primary_styles()?;
@@ -397,6 +391,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -498,6 +493,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 4.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),

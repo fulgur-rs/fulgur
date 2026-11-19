@@ -4527,6 +4527,7 @@ mod tests {
         crate::paragraph::ShapedGlyphRun {
             font_data: std::sync::Arc::new(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: crate::paragraph::TextDecoration::default(),

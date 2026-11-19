@@ -4,8 +4,8 @@
 //! scheme so that `<link rel="stylesheet">` and `@import` work natively
 //! through Blitz's own loader pipeline. Two design goals shape this module:
 //!
-//! 1. **Offline-first.** Only `file://` URLs are accepted. Anything else
-//!    (`http://`, `https://`, `data:`, ...) is silently dropped. The
+//! 1. **Offline-first.** Only `file://` and `data:` URLs are accepted.
+//!    Anything else (`http://`, `https://`, ...) is silently dropped. The
 //!    resolved file path must canonicalise to a location *inside* the
 //!    configured base directory; symlinks or relative paths that escape
 //!    the base are rejected (path traversal protection).
@@ -153,13 +153,33 @@ impl FulgurNetProvider {
 
 impl NetProvider for FulgurNetProvider {
     fn fetch(&self, _doc_id: usize, request: Request, handler: Box<dyn NetHandler>) {
-        let Some(canonical_path) = self.resolve_local_path(&request) else {
-            handler.error(request.url.to_string(), "blocked by fulgur".into());
-            return;
-        };
-        let Ok(raw_bytes) = std::fs::read(&canonical_path) else {
-            handler.error(request.url.to_string(), "read failed".into());
-            return;
+        // `data:` URLs carry their content inline, so serving them reads
+        // nothing outside the document. Blitz needs them to size `<img>`
+        // elements whose intrinsic dimensions come from the image.
+        let (raw_bytes, is_css) = if request.url.scheme() == "data" {
+            let Some((body, mime)) = data_url::DataUrl::process(request.url.as_str())
+                .ok()
+                .and_then(|url| {
+                    let mime = url.mime_type();
+                    let is_css = mime.type_ == "text" && mime.subtype == "css";
+                    url.decode_to_vec().ok().map(|(body, _)| (body, is_css))
+                })
+            else {
+                handler.error(request.url.to_string(), "invalid data: URL".into());
+                return;
+            };
+            (body, mime)
+        } else {
+            let Some(canonical_path) = self.resolve_local_path(&request) else {
+                handler.error(request.url.to_string(), "blocked by fulgur".into());
+                return;
+            };
+            let Ok(raw_bytes) = std::fs::read(&canonical_path) else {
+                handler.error(request.url.to_string(), "read failed".into());
+                return;
+            };
+            let is_css = Self::looks_like_css(&request, &canonical_path);
+            (raw_bytes, is_css)
         };
 
         // For CSS, hand Blitz the *cleaned* body so its style engine
@@ -169,23 +189,22 @@ impl NetProvider for FulgurNetProvider {
         // and silently drops anything it doesn't recognise (fulgur-s5ro).
         // A stylesheet served without a `.css` extension is still
         // recorded (raw text) so a `<link>` match can use it.
-        let (bytes_for_blitz, gcpm_to_push, css_text) =
-            if Self::looks_like_css(&request, &canonical_path) {
-                if let Ok(text) = std::str::from_utf8(&raw_bytes) {
-                    let gcpm = parse_gcpm(text);
-                    let cleaned = gcpm.cleaned_css.clone();
-                    (
-                        Bytes::from(cleaned.into_bytes()),
-                        Some(gcpm),
-                        Some(text.to_string()),
-                    )
-                } else {
-                    (Bytes::from(raw_bytes), None, None)
-                }
+        let (bytes_for_blitz, gcpm_to_push, css_text) = if is_css {
+            if let Ok(text) = std::str::from_utf8(&raw_bytes) {
+                let gcpm = parse_gcpm(text);
+                let cleaned = gcpm.cleaned_css.clone();
+                (
+                    Bytes::from(cleaned.into_bytes()),
+                    Some(gcpm),
+                    Some(text.to_string()),
+                )
             } else {
-                let text = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
-                (Bytes::from(raw_bytes), None, text)
-            };
+                (Bytes::from(raw_bytes), None, None)
+            }
+        } else {
+            let text = std::str::from_utf8(&raw_bytes).ok().map(str::to_string);
+            (Bytes::from(raw_bytes), None, text)
+        };
 
         // Blitz parses any payload it cannot decode as a raster image with
         // usvg's default options, whose image resolver reads `<image href>`
@@ -279,6 +298,41 @@ mod tests {
         let provider = FulgurNetProvider::new(Some(dir.path().to_path_buf()));
         let req = make_request("data:text/css,body{color:red}");
         assert!(provider.resolve_local_path(&req).is_none());
+    }
+
+    #[test]
+    fn fetch_serves_data_urls_inline() {
+        // `data:` URLs are part of the document: they are served without a
+        // base path and without touching the file system.
+        let provider = FulgurNetProvider::new(None);
+        let recorded = Arc::new(Mutex::new(None));
+        provider.fetch(
+            0,
+            make_request("data:image/png;base64,iVBORw0K"),
+            Box::new(RecordingHandler {
+                bytes: recorded.clone(),
+            }),
+        );
+        assert_eq!(
+            recorded.lock().unwrap().as_deref(),
+            Some(&b"\x89PNG\r\n"[..])
+        );
+    }
+
+    #[test]
+    fn fetch_runs_gcpm_on_data_url_stylesheets() {
+        let provider = FulgurNetProvider::new(None);
+        let recorded = Arc::new(Mutex::new(None));
+        provider.fetch(
+            0,
+            make_request("data:text/css,p{color:red}@page{size:A5}"),
+            Box::new(RecordingHandler {
+                bytes: recorded.clone(),
+            }),
+        );
+        let served = String::from_utf8(recorded.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(served.contains("color:red"), "{served}");
+        assert!(!served.contains("@page"), "{served}");
     }
 
     #[test]

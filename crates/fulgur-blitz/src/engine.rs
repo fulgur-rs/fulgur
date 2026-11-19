@@ -271,7 +271,9 @@ impl Engine {
         crate::blitz_adapter::set_viewport_size_px(
             &mut doc,
             resolved_content_width_px,
-            resolved_content_height_px,
+            self.config
+                .viewport_height
+                .unwrap_or(resolved_content_height_px),
         );
 
         // Build and apply DOM passes
@@ -1351,6 +1353,13 @@ impl EngineBuilder {
 
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.config_builder = self.config_builder.title(title);
+        self
+    }
+
+    /// Viewport height in CSS px for `vh` and root percentage heights,
+    /// independent of the page height. See `Config::viewport_height`.
+    pub fn viewport_height(mut self, height_px: f32) -> Self {
+        self.config_builder = self.config_builder.viewport_height(height_px);
         self
     }
 

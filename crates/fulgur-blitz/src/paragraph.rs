@@ -171,10 +171,27 @@ pub struct LinkSpan {
 /// so `extract_paragraph` can bump-clone the same buffer per run rather than
 /// pay a String allocation each time; it is passed by reference to krilla's
 /// `draw_glyphs` and read via `as_str` in `render` — no mutation callers.
+/// Variation axis tags and values in user space (`wght` 700, `wdth` 75).
+pub type FontVariations = Vec<([u8; 4], f32)>;
+
+/// The variation axis values fontique chose for a parley run: when a font
+/// is variable, a requested `font-weight`, `font-stretch` or `font-style` is
+/// matched by setting its axes rather than by picking another file.
+pub(crate) fn run_variations<B: parley::Brush>(run: &parley::Run<'_, B>) -> FontVariations {
+    run.synthesis()
+        .variation_settings()
+        .iter()
+        .map(|(tag, value)| (tag.to_be_bytes(), *value))
+        .collect()
+}
+
 #[derive(Clone, Debug)]
 pub struct ShapedGlyphRun {
     pub font_data: Arc<Vec<u8>>,
     pub font_index: u32,
+    /// Variation axis values (e.g. `wght` = 700) that select the instance
+    /// of a variable font. Empty for static fonts.
+    pub variations: FontVariations,
     pub font_size: crate::units::Pt,
     pub color: [u8; 4], // RGBA
     pub decoration: TextDecoration,
@@ -762,7 +779,14 @@ pub fn draw_shaped_lines(
                     }
                     // Create Krilla font from cached data
                     let data: krilla::Data = Arc::clone(&run.font_data).into();
-                    let Some(font) = krilla::text::Font::new(data, run.font_index) else {
+                    let coords: Vec<(krilla::text::Tag, f32)> = run
+                        .variations
+                        .iter()
+                        .map(|(tag, value)| (krilla::text::Tag::new(tag), *value))
+                        .collect();
+                    let Some(font) =
+                        krilla::text::Font::new_variable(data, run.font_index, &coords)
+                    else {
                         continue;
                     };
 
@@ -1578,6 +1602,7 @@ mod tests {
         let glyph_run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -1619,6 +1644,7 @@ mod tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -1832,6 +1858,7 @@ mod link_span_tests {
         let run = ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -2485,6 +2512,7 @@ mod draw_decoration_direct_tests {
         let make_run = |x_offset_pt: f32| ShapedGlyphRun {
             font_data: Arc::new(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration,

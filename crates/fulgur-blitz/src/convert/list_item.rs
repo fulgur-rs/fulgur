@@ -648,6 +648,7 @@ mod tests {
         let text_marker = LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -762,6 +763,7 @@ mod tests {
         LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -891,6 +893,7 @@ mod tests {
         let zero_glyph_marker = LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),

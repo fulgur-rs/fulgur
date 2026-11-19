@@ -181,6 +181,11 @@ pub struct Config {
     pub enable_tagging: bool,
     /// Enable PDF/UA-1 conformance (implies enable_tagging).
     pub pdf_ua: bool,
+    /// Viewport height in CSS px for `vh` units and percentage heights on
+    /// the root. `None` uses the page content height. Pagination always
+    /// uses the page, so a tall page with a screen-sized viewport lays a
+    /// document out as one continuous screen page.
+    pub viewport_height: Option<f32>,
 }
 
 impl Default for Config {
@@ -201,6 +206,7 @@ impl Default for Config {
             bookmarks: false,
             enable_tagging: false,
             pdf_ua: false,
+            viewport_height: None,
         }
     }
 }
@@ -386,6 +392,12 @@ impl ConfigBuilder {
 
     pub fn pdf_ua(mut self, enabled: bool) -> Self {
         self.config.pdf_ua = enabled;
+        self
+    }
+
+    /// See [`Config::viewport_height`].
+    pub fn viewport_height(mut self, height_px: f32) -> Self {
+        self.config.viewport_height = Some(height_px);
         self
     }
 

@@ -40,13 +40,13 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
             // Resolve `content` + intrinsic size per image kind. URL images
             // require an `AssetBundle`; gradients are self-contained.
             let resolved: Option<(BgImageContent, f32, f32)> = match image {
-                Image::Url(url) => ctx.assets.and_then(|a| {
+                Image::Url(url) => (|| {
                     let raw_src = match url {
                         style::url::ComputedUrl::Valid(u) => u.as_str(),
                         style::url::ComputedUrl::Invalid(s) => s.as_str(),
                     };
                     let src = extract_asset_name(raw_src);
-                    let data = a.get_image(src)?;
+                    let data = &crate::convert::image_bytes(ctx.assets, src)?;
 
                     use crate::image::AssetKind;
                     match AssetKind::detect(data) {
@@ -83,7 +83,7 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
                         }
                         AssetKind::Unknown => None,
                     }
-                }),
+                })(),
                 Image::Gradient(g) => {
                     use style::values::computed::image::Gradient;
                     // g: &Box<Gradient> なので as_ref() で &Gradient を取って match。

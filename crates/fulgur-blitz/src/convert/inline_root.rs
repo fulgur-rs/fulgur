@@ -537,6 +537,7 @@ pub(super) fn extract_paragraph(
                         items.push(LineItem::Text(ShapedGlyphRun {
                             font_data: font_arc,
                             font_index,
+                            variations: crate::paragraph::run_variations(run),
                             font_size,
                             color,
                             decoration,
@@ -663,6 +664,7 @@ mod tests {
         LineItem::Text(ShapedGlyphRun {
             font_data: Arc::new(font_data),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),

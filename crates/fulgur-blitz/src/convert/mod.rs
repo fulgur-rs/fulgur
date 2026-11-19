@@ -963,6 +963,7 @@ fn shape_paragraph_glyph_runs(
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
+                        variations: crate::paragraph::run_variations(run),
                         font_size,
                         color,
                         decoration,
@@ -1108,6 +1109,22 @@ impl LinkCache {
 /// Extract the asset name from a URL that Stylo may have resolved to absolute.
 fn extract_asset_name(url: &str) -> &str {
     url.strip_prefix("file:///").unwrap_or(url)
+}
+
+/// Image bytes for an `<img src>`, `content`, `list-style-image` or
+/// `background-image` reference: `data:` URLs are decoded in place (they are
+/// part of the document, so no bundle entry is needed), anything else is
+/// looked up in the asset bundle.
+pub(crate) fn image_bytes(assets: Option<&AssetBundle>, src: &str) -> Option<Arc<Vec<u8>>> {
+    if src
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
+        let url = data_url::DataUrl::process(src).ok()?;
+        let (body, _fragment) = url.decode_to_vec().ok()?;
+        return Some(Arc::new(body));
+    }
+    assets?.get_image(src).cloned()
 }
 
 /// Check if a node is a non-visual element (head, script, style, etc.)
@@ -1830,6 +1847,31 @@ mod utility_fn_tests {
     fn extract_asset_name_strips_file_scheme() {
         assert_eq!(extract_asset_name("file:///foo/bar.png"), "foo/bar.png");
         assert_eq!(extract_asset_name("file:///"), "");
+    }
+
+    #[test]
+    fn image_bytes_decodes_data_urls_without_a_bundle() {
+        assert_eq!(
+            image_bytes(None, "data:image/png;base64,iVBORw0K").as_deref(),
+            Some(&b"\x89PNG\r\n"[..].to_vec())
+        );
+        assert_eq!(
+            image_bytes(None, "DATA:text/plain,a%20b").as_deref(),
+            Some(&b"a b".to_vec())
+        );
+        assert!(image_bytes(None, "data:image/png;base64,***").is_none());
+        assert!(image_bytes(None, "logo.png").is_none());
+    }
+
+    #[test]
+    fn image_bytes_looks_up_other_references_in_the_bundle() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("logo.png", vec![1, 2, 3]);
+        assert_eq!(
+            image_bytes(Some(&bundle), "./logo.png").as_deref(),
+            Some(&vec![1, 2, 3])
+        );
+        assert!(image_bytes(Some(&bundle), "other.png").is_none());
     }
 
     #[test]
