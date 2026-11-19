@@ -726,13 +726,17 @@ pub fn compute_multicol_layout(
                 cursor_y += seg_h;
             }
             Segment::SpanAll(child_id) => {
+                // A spanner keeps its own vertical margins; they separate it
+                // from the column sets before and after it.
+                let (margin_top, margin_bottom) = vertical_margins(tree, child_id, content_w);
                 let output = tree.compute_child_layout(child_id, span_child_inputs);
+                cursor_y += margin_top.max(0.0);
                 let location = Point {
                     x: 0.0,
                     y: cursor_y,
                 };
                 placements.push((child_id, location, output.size));
-                cursor_y += output.size.height;
+                cursor_y += output.size.height + margin_bottom.max(0.0);
             }
         }
     }
@@ -1086,19 +1090,378 @@ fn layout_self_inline_root_container(
     }
 }
 
-/// Place `children` into `n` columns of `col_w`, stacking them vertically
-/// starting at `y_offset`. `avail_h` is the per-column budget ceiling
-/// (for balance / auto fallback); measurement happens inside via Taffy.
+/// Collapsed vertical margins between two adjoining blocks (CSS 2.2 §8.3.1):
+/// the largest positive margin plus the most negative one.
+#[derive(Clone, Copy, Debug, Default)]
+struct CollapsedMargin {
+    positive: f32,
+    negative: f32,
+}
+
+impl CollapsedMargin {
+    fn add(&mut self, margin: f32) {
+        if margin > 0.0 {
+            self.positive = self.positive.max(margin);
+        } else {
+            self.negative = self.negative.min(margin);
+        }
+    }
+
+    fn value(self) -> f32 {
+        self.positive + self.negative
+    }
+}
+
+/// One indivisible piece of a column group's content, in flow order.
+#[derive(Clone, Debug)]
+struct FlowUnit {
+    kind: FlowUnitKind,
+    /// Height of the piece itself.
+    height: f32,
+    /// Collapsed margin between the previous piece and this one. Dropped
+    /// when the piece starts a column after a break (margins adjoining an
+    /// unforced break are truncated, CSS Fragmentation 3 §5.2).
+    gap_before: f32,
+}
+
+#[derive(Clone, Debug)]
+enum FlowUnitKind {
+    /// A box placed whole (`index` into `ColumnFlow::blocks`).
+    Block(usize),
+    /// One line of a paragraph that may break between lines (`index` into
+    /// `ColumnFlow::paragraphs`).
+    Line(usize),
+}
+
+#[derive(Clone, Debug)]
+struct FlowBlock {
+    id: NodeId,
+    size: Size<f32>,
+    parent: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+struct FlowParagraph {
+    id: NodeId,
+    size: Size<f32>,
+    parent: Option<usize>,
+}
+
+/// A plain block whose children flow through the columns themselves. Its
+/// box is made to cover every column it touches; it has no padding,
+/// border, background or other painting, so that box is never visible.
+#[derive(Clone, Debug)]
+struct FlowWrapper {
+    id: NodeId,
+    parent: Option<usize>,
+    units: std::ops::Range<usize>,
+}
+
+/// A column group flattened into flow units.
+#[derive(Default)]
+struct ColumnFlow {
+    units: Vec<FlowUnit>,
+    blocks: Vec<FlowBlock>,
+    paragraphs: Vec<FlowParagraph>,
+    wrappers: Vec<FlowWrapper>,
+    /// Margin after the last unit (inside the multicol, a BFC root, it
+    /// still takes space).
+    trailing_margin: f32,
+}
+
+/// Deepest wrapper nesting that is flattened into the columns. Deeper
+/// wrappers are placed whole.
+const MAX_FLOW_WRAPPER_DEPTH: usize = 32;
+
+/// Plain in-flow block: `display: block`, statically positioned, and
+/// nothing painted for the box itself (no background, shadow, transform,
+/// opacity or clipping). Such a box can be cut between columns, or lent a
+/// bigger invisible box, without any visible difference.
+fn is_plain_flow_block(tree: &FulgurLayoutTree<'_>, node_id: NodeId, col_w: f32) -> bool {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    use blitz_dom::CopyStyleGetters;
+
+    let Some(node) = tree
+        .doc
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
+    else {
+        return false;
+    };
+    if node.element_data().is_none()
+        || crate::blitz_adapter::is_multicol_container(node)
+        || crate::blitz_adapter::has_column_span_all(node)
+    {
+        return false;
+    }
+    let Some(styles) = node.primary_styles() else {
+        return false;
+    };
+    let display = styles.clone_display();
+    let background_transparent = styles
+        .slow_clone_background_color()
+        .resolve_to_absolute(&styles.clone_color())
+        .alpha
+        <= 0.0;
+    let no_background_image = styles
+        .slow_clone_background_image()
+        .0
+        .iter()
+        .all(|i| matches!(i, ::style::values::computed::image::Image::None));
+    let plain_style = display.outside() == DisplayOutside::Block
+        && display.inside() == DisplayInside::Flow
+        && !display.is_list_item()
+        && matches!(styles.get_box().slow_clone_position(), Pos::Static)
+        && styles.get_box().transform.0.is_empty()
+        && styles.clone_opacity() >= 1.0
+        && styles.clone_overflow_x() == ::style::values::computed::Overflow::Visible
+        && styles.clone_overflow_y() == ::style::values::computed::Overflow::Visible
+        && background_transparent
+        && no_background_image
+        && styles.slow_clone_box_shadow().0.is_empty();
+    if !plain_style {
+        return false;
+    }
+    let style = tree.get_core_container_style(node_id);
+    let calc = |val, basis| tree.resolve_calc_value(val, basis);
+    let padding = style.padding().resolve_or_zero(Some(col_w), calc);
+    let border = style.border().resolve_or_zero(Some(col_w), calc);
+    let insets = [padding, border]
+        .iter()
+        .flat_map(|r| [r.top, r.bottom, r.left, r.right])
+        .all(|v| v == 0.0);
+    insets && style.size().height.is_auto()
+}
+
+/// Top and bottom margins of `node_id`, resolved against the column width.
+fn vertical_margins(tree: &FulgurLayoutTree<'_>, node_id: NodeId, col_w: f32) -> (f32, f32) {
+    let style = tree.get_core_container_style(node_id);
+    let margin = style.margin().resolve_or_zero(Some(col_w), |val, basis| {
+        tree.resolve_calc_value(val, basis)
+    });
+    (margin.top, margin.bottom)
+}
+
+/// Per-line heights of `node_id` when it is a paragraph that may break
+/// between lines inside the columns: a plain block that is an inline root
+/// with text only (inline boxes cannot be re-drawn per slice yet), whose
+/// lines make up its whole height.
+fn splittable_line_heights(
+    tree: &FulgurLayoutTree<'_>,
+    node_id: NodeId,
+    size: Size<f32>,
+    col_w: f32,
+) -> Option<Vec<f32>> {
+    let node = tree
+        .doc
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))?;
+    if !node.flags.is_inline_root() {
+        return None;
+    }
+    let layout = &node.element_data()?.inline_layout_data.as_ref()?.layout;
+    if !parley_layout_is_glyph_run_only(layout) {
+        return None;
+    }
+    if !is_plain_flow_block(tree, node_id, col_w) {
+        return None;
+    }
+    let heights = crate::blitz_adapter::parley_line_heights(layout);
+    let total: f32 = heights.iter().sum();
+    (heights.len() > 1 && (total - size.height).abs() <= 0.5).then_some(heights)
+}
+
+/// In-flow layout children of a wrapper candidate, or `None` when one of
+/// them is floated or out of flow (those are positioned against the
+/// wrapper, which would move).
+fn flow_children(tree: &FulgurLayoutTree<'_>, node_id: NodeId) -> Option<Vec<NodeId>> {
+    use ::style::properties::longhands::float::computed_value::T as Float;
+    let children: Vec<NodeId> = tree.child_ids(node_id).collect();
+    for &child in &children {
+        if tree.is_out_of_flow(child) {
+            return None;
+        }
+        let floated = tree
+            .doc
+            .get_node(crate::blitz_adapter::bid(usize::from(child)))
+            .and_then(|n| n.primary_styles())
+            .is_some_and(|s| !matches!(s.get_box().slow_clone_float(), Float::None));
+        if floated {
+            return None;
+        }
+    }
+    (!children.is_empty()).then_some(children)
+}
+
+impl ColumnFlow {
+    /// Flatten `children` (already laid out at `col_w`) into flow units.
+    /// `sizes` gives the border-box size of each top-level child; nested
+    /// sizes are read from the layout their wrapper's pass stored.
+    fn collect(tree: &FulgurLayoutTree<'_>, children: &[(NodeId, Size<f32>)], col_w: f32) -> Self {
+        let mut flow = ColumnFlow::default();
+        let mut pending = CollapsedMargin::default();
+        flow.add_children(tree, children, None, col_w, 0, &mut pending);
+        flow.trailing_margin = pending.value().max(0.0);
+        flow
+    }
+
+    fn add_children(
+        &mut self,
+        tree: &FulgurLayoutTree<'_>,
+        children: &[(NodeId, Size<f32>)],
+        parent: Option<usize>,
+        col_w: f32,
+        depth: usize,
+        pending: &mut CollapsedMargin,
+    ) {
+        for &(id, size) in children {
+            let (margin_top, margin_bottom) = vertical_margins(tree, id, col_w);
+            pending.add(margin_top);
+
+            let is_inline_root = tree
+                .doc
+                .get_node(crate::blitz_adapter::bid(usize::from(id)))
+                .is_some_and(|n| n.flags.is_inline_root());
+            let wrapper_children = (depth < MAX_FLOW_WRAPPER_DEPTH
+                && !is_inline_root
+                && is_plain_flow_block(tree, id, col_w))
+            .then(|| flow_children(tree, id))
+            .flatten();
+
+            if let Some(grandchildren) = wrapper_children {
+                // Margins collapse through a wrapper without padding or
+                // border, so its own margins join its children's.
+                let index = self.wrappers.len();
+                let first = self.units.len();
+                self.wrappers.push(FlowWrapper {
+                    id,
+                    parent,
+                    units: first..first,
+                });
+                let sized: Vec<(NodeId, Size<f32>)> = grandchildren
+                    .iter()
+                    .map(|&c| (c, tree.get_unrounded_layout(c).size))
+                    .collect();
+                self.add_children(tree, &sized, Some(index), col_w, depth + 1, pending);
+                self.wrappers[index].units.end = self.units.len();
+            } else if let Some(lines) = splittable_line_heights(tree, id, size, col_w) {
+                let paragraph = self.paragraphs.len();
+                self.paragraphs.push(FlowParagraph { id, size, parent });
+                for (line, height) in lines.into_iter().enumerate() {
+                    let gap_before = if line == 0 { pending.value() } else { 0.0 };
+                    self.units.push(FlowUnit {
+                        kind: FlowUnitKind::Line(paragraph),
+                        height,
+                        gap_before,
+                    });
+                }
+                *pending = CollapsedMargin::default();
+            } else {
+                let block = self.blocks.len();
+                self.blocks.push(FlowBlock { id, size, parent });
+                self.units.push(FlowUnit {
+                    kind: FlowUnitKind::Block(block),
+                    height: size.height,
+                    gap_before: pending.value(),
+                });
+                *pending = CollapsedMargin::default();
+            }
+            pending.add(margin_bottom);
+        }
+    }
+}
+
+/// Where each unit lands: `(column, top)` with `top` relative to the
+/// column group. Fills columns top to bottom, breaking before a unit that
+/// would end below `budget`. A column always takes at least one unit. With
+/// `strict`, running out of columns fails; otherwise the last column takes
+/// the rest.
+fn place_units(units: &[FlowUnit], n: u32, budget: f32, strict: bool) -> Option<Vec<(u32, f32)>> {
+    const EPSILON: f32 = 0.01;
+    let mut out = Vec::with_capacity(units.len());
+    let mut col: u32 = 0;
+    let mut y: f32 = 0.0;
+    let mut column_has_content = false;
+    for unit in units {
+        // The first column keeps its leading margin; later columns start
+        // after a break and drop it.
+        let mut gap = if column_has_content || col == 0 {
+            unit.gap_before
+        } else {
+            0.0
+        };
+        if column_has_content && y + gap + unit.height > budget + EPSILON {
+            if col + 1 < n {
+                col += 1;
+                y = 0.0;
+                gap = 0.0;
+            } else if strict {
+                return None;
+            }
+        }
+        let top = y + gap;
+        out.push((col, top));
+        y = top + unit.height;
+        column_has_content = true;
+    }
+    Some(out)
+}
+
+/// The smallest column height that fits `units` into `n` columns.
+fn balanced_budget(units: &[FlowUnit], n: u32) -> f32 {
+    let Some(single) = place_units(units, 1, f32::INFINITY, true) else {
+        return 0.0;
+    };
+    let total = units
+        .iter()
+        .zip(&single)
+        .map(|(u, (_, top))| top + u.height)
+        .fold(0.0_f32, f32::max);
+    if total <= 0.0 || n <= 1 {
+        return total;
+    }
+    // Margins may fall at a break and be dropped, so only the units' own
+    // heights bound the column height from below.
+    let tallest = units.iter().map(|u| u.height).fold(0.0_f32, f32::max);
+    let content: f32 = units.iter().map(|u| u.height).sum();
+    let mut low = (content / n as f32).max(tallest);
+    let mut high = total;
+    if place_units(units, n, low, true).is_some() {
+        return low;
+    }
+    // `low` does not fit and `high` (everything in one column) does.
+    for _ in 0..40 {
+        if high - low <= 0.05 {
+            break;
+        }
+        let mid = (low + high) / 2.0;
+        if place_units(units, n, mid, true).is_some() {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+/// Place `children` into `n` columns of `col_w`, starting at `y_offset`.
+/// `avail_h` caps the column height (for `column-fill: auto`, it is the
+/// column height).
+///
+/// The children are flattened into flow units first: paragraphs break
+/// between lines, plain wrapper blocks (no padding, border or painting) let
+/// their own children flow through the columns, and everything else is
+/// placed whole. Vertical margins collapse as in normal flow and are
+/// dropped at the top of a column after a break. `column-fill: balance`
+/// then searches for the smallest column height that holds everything.
 ///
 /// Returns `(placements, geometry)`:
 ///
-/// - `placements` is the `(child, location, size)` triples written back
-///   into Taffy's storage by `compute_multicol_layout`.
-/// - `geometry` carries the shape this segment contributes to the
-///   container's [`MulticolGeometry`]: column width, gap, column count,
-///   y-offset, and per-column filled height. The segment's vertical
-///   extent (what we used to return as `seg_h`) is recoverable as
-///   `geometry.col_heights.iter().copied().fold(0.0, f32::max)`.
+/// - `placements` holds the `(child, location, size)` of the direct
+///   children, in the content-box frame. `compute_multicol_layout` shifts
+///   them by the container's insets and writes them to Taffy. Nested
+///   boxes (inside wrappers) are written here, relative to their wrapper.
+/// - `geometry` carries the column width, gap, count, y-offset, per-column
+///   filled height and the paragraphs split across columns.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn layout_column_group(
     tree: &mut FulgurLayoutTree<'_>,
@@ -1111,304 +1474,185 @@ fn layout_column_group(
     y_offset: f32,
     child_inputs: taffy::tree::LayoutInput,
 ) -> (Vec<(NodeId, Point<f32>, Size<f32>)>, ColumnGroupGeometry) {
-    // 1. Measure
+    // 1. Measure at the column width. This also lays out every
+    //    descendant, so wrapper children have sizes and paragraphs have
+    //    lines broken at `col_w`.
     let mut measured: Vec<(NodeId, Size<f32>)> = Vec::with_capacity(children.len());
     for &child in children {
         let output = tree.compute_child_layout(child, child_inputs);
         measured.push((child, output.size));
     }
 
-    // 2. Budget selection — `column-fill: balance` (the default) searches
-    //    for the smallest budget that fits all children in `n` columns,
-    //    so the tallest column's height is minimised. `column-fill: auto`
-    //    (CSS Multi-column Level 1 §6.1) instead greedily fills columns
-    //    top-to-bottom up to `avail_h`, leaving trailing columns empty
-    //    when content fits in fewer than `n`.
-    let total_h: f32 = measured.iter().map(|(_, s)| s.height).sum();
+    // 2. Flatten into flow units and pick the column height.
+    let flow = ColumnFlow::collect(tree, &measured, col_w);
     let budget = match fill {
         crate::column_css::ColumnFill::Auto => avail_h,
-        crate::column_css::ColumnFill::Balance => {
-            if total_h <= 0.0 {
-                0.0
-            } else if total_h >= avail_h * n as f32 {
-                avail_h
-            } else {
-                balance_budget(&measured, n, avail_h, total_h)
-            }
-        }
+        crate::column_css::ColumnFill::Balance => balanced_budget(&flow.units, n).min(avail_h),
     };
+    let tops = place_units(&flow.units, n, budget, false).unwrap_or_default();
 
-    // 3. Build the distribution work list. Each measured child becomes
-    //    either a single `Atomic` item (regular block / replaced / inline-
-    //    root that fits within the per-column budget) or a sequence of
-    //    `InlineRootSlice` items — one per non-empty column receiving lines
-    //    from a sliced inline-root paragraph (Case B in
-    //    `docs/plans/2026-05-03-multicol-inline-root-split.md`).
-    //
-    //    The pre-flight probe (commit 0c2c762) confirmed
-    //    `compute_child_layout(child, known_dimensions = col_w)` already
-    //    re-breaks parley to col_w during the measure step, so per-line
-    //    heights read from `inline_layout_data` reflect the column-width
-    //    wrap and don't need a manual `break_all_lines`.
-    enum DistItem {
-        Atomic {
-            id: NodeId,
-            size: Size<f32>,
-        },
-        InlineRootSlice {
-            source_id: NodeId,
-            line_range: std::ops::Range<usize>,
-            size: Size<f32>,
-        },
-    }
-
-    let mut items: Vec<DistItem> = Vec::with_capacity(measured.len());
-    // fulgur-6q5 Fix 3: pre-slicing assumed every InlineRootSlice
-    // sequence started in a fresh column (col_y = 0). When earlier
-    // atomic siblings have already consumed `virt_col_y > 0` of the
-    // current column, the slicer's per-column budgets no longer match
-    // what the distribute loop will actually grant — the first slice
-    // could be bumped to col 1, then two slices end up in the same
-    // output column, and the per-column `by_col` collector clobbers
-    // earlier ones. Track a virtual cursor that mirrors the distribute
-    // loop's column-advance rule, and feed the slicer the accurate
-    // (first_col_remainder, remaining_cols) pair.
-    let mut virt_col_idx: u32 = 0;
-    let mut virt_col_y: f32 = 0.0;
-    for (id, size) in &measured {
-        let id_u: usize = (*id).into();
-        // Borrow the post-measure parley layout only for plain paragraph
-        // children. The Case B materialiser reconstructs glyph runs, not
-        // arbitrary block boxes, so generic inline-root blocks must remain
-        // atomic to preserve padding/overflow/outline/background semantics.
-        let inline_root_layout = tree
-            .doc
-            .get_node(crate::blitz_adapter::bid(id_u))
-            .filter(|n| n.flags.is_inline_root())
-            .and_then(|n| n.element_data())
-            .filter(|e| (&e.name.local) == "p")
-            .and_then(|e| e.inline_layout_data.as_ref())
-            .map(|tl| &tl.layout);
-
-        match inline_root_layout {
-            // fulgur-6q5 Fix 2: also gate on `parley_layout_is_glyph_run_only` —
-            // splitting a paragraph that contains inline images / inline-blocks
-            // would silently drop those items at convert time
-            // (`shape_paragraph_glyph_runs` reconstructs `GlyphRun`s only).
-            // Fall through to atomic placement instead so the paragraph
-            // renders intact in column 0.
-            Some(layout) if size.height > budget && parley_layout_is_glyph_run_only(layout) => {
-                let line_heights = crate::blitz_adapter::parley_line_heights(layout);
-                let first_remainder = (budget - virt_col_y).max(0.0);
-                let remaining_cols = n.saturating_sub(virt_col_idx);
-                let slices = slice_lines_with_first_col_remainder(
-                    &line_heights,
-                    first_remainder,
-                    budget,
-                    remaining_cols,
-                );
-                // Track the last non-empty slice's offset within
-                // `slices` (= relative column index from `virt_col_idx`)
-                // and its consumed height, so we can advance the virtual
-                // cursor to mirror the distribute loop's actual landing
-                // point for the next sibling.
-                let mut last_non_empty_col_offset: Option<usize> = None;
-                let mut last_non_empty_height: f32 = 0.0;
-                for (offset, (line_range, slice_h)) in slices.iter().enumerate() {
-                    if !line_range.is_empty() {
-                        items.push(DistItem::InlineRootSlice {
-                            source_id: *id,
-                            line_range: line_range.clone(),
-                            size: Size {
-                                width: col_w,
-                                height: *slice_h,
-                            },
-                        });
-                        last_non_empty_col_offset = Some(offset);
-                        last_non_empty_height = *slice_h;
-                    }
-                }
-                match last_non_empty_col_offset {
-                    Some(offset) => {
-                        if offset == 0 {
-                            // Landed in the same column the cursor was
-                            // already in; accumulate height.
-                            virt_col_y += last_non_empty_height;
-                        } else {
-                            // Advanced to a fresh column; restart at
-                            // that slice's height.
-                            virt_col_idx += offset as u32;
-                            virt_col_y = last_non_empty_height;
-                        }
-                    }
-                    None => {
-                        // No non-empty slices placed (degenerate: empty
-                        // inline-root). Cursor stays put.
-                    }
-                }
-            }
-            _ => {
-                // Atomic — mirror the distribute loop's column-advance
-                // check on the virtual cursor so subsequent slicing
-                // decisions see the right "remaining" state.
-                if virt_col_y > 0.0 && virt_col_y + size.height > budget && virt_col_idx + 1 < n {
-                    virt_col_idx += 1;
-                    virt_col_y = 0.0;
-                }
-                items.push(DistItem::Atomic {
-                    id: *id,
-                    size: *size,
-                });
-                virt_col_y += size.height;
-            }
-        }
-    }
-
-    // 4. Distribute
-    let mut placements: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::with_capacity(items.len());
-    // Per-source accumulated slice metadata. `BTreeMap` (not `HashMap`)
-    // keeps iteration order deterministic — `paragraph_splits` flows into
-    // PDF byte order downstream.
-    let mut placed_slices: BTreeMap<usize, Vec<ColumnLineSlice>> = BTreeMap::new();
-    let mut col_idx: u32 = 0;
-    let mut col_y: f32 = 0.0;
-    for item in &items {
-        let size = match item {
-            DistItem::Atomic { size, .. } => *size,
-            DistItem::InlineRootSlice { size, .. } => *size,
-        };
-
-        // Same column-advance check used for atomic children today.
-        if col_y > 0.0 && col_y + size.height > budget && col_idx + 1 < n {
-            col_idx += 1;
-            col_y = 0.0;
-        }
-
-        let col_x = col_idx as f32 * (col_w + gap);
-        let location = Point {
-            x: col_x,
-            y: y_offset + col_y,
-        };
-
-        match item {
-            DistItem::Atomic { id, .. } => {
-                placements.push((*id, location, size));
-            }
-            DistItem::InlineRootSlice {
-                source_id,
-                line_range,
-                ..
-            } => {
-                // Only the first slice owns the Taffy `set_unrounded_layout`
-                // write — that's what surrounding siblings position
-                // against. Later slices feed `paragraph_splits` only.
-                let id_u: usize = (*source_id).into();
-                let entry = placed_slices.entry(id_u).or_default();
-                if entry.is_empty() {
-                    placements.push((*source_id, location, size));
-                }
-                entry.push(ColumnLineSlice {
-                    line_range: line_range.clone(),
-                    // Slice origin in the *content-box frame* — same
-                    // convention used for `col_heights` (relative to
-                    // `y_offset`). The container-level border-box shift
-                    // applied in `compute_multicol_layout` updates these
-                    // alongside the rest of the geometry.
-                    origin: Point {
-                        x: col_x.as_px(),
-                        y: col_y.as_px(),
-                    },
-                    size: taffy::Size {
-                        width: size.width.as_px(),
-                        height: size.height.as_px(),
-                    },
-                });
-            }
-        }
-
-        col_y += size.height;
-    }
-
-    // 5. Per-column filled heights — bottom-most placement per column,
-    //    relative to y_offset. Empty columns stay at 0.0.
-    //
-    //    We recover each placement's column index by inverting the
-    //    `col_x = col_idx * (col_w + gap)` formula from step 4. The stride
-    //    `col_w + gap` is non-zero for any real multicol container (both
-    //    `col_w` and `gap` are `>= 0.0`, and `col_w == 0 && gap == 0`
-    //    indicates a degenerate container where the column index doesn't
-    //    meaningfully differ across placements anyway). The guard below
-    //    protects against a divide-by-zero; `round()` tolerates float
-    //    accumulation from the multiplication in step 4.
+    // 3. Column geometry.
     let stride = col_w + gap;
-    let resolve_col_idx = |x: f32| -> usize {
-        if stride > 0.0 {
-            let raw = (x / stride).round();
-            if raw.is_finite() && raw >= 0.0 {
-                (raw as u32).min(n.saturating_sub(1)) as usize
-            } else {
-                0
-            }
-        } else {
-            0
-        }
-    };
+    let col_x = |col: u32| col as f32 * stride;
     let mut col_heights: Vec<f32> = vec![0.0_f32; n as usize];
-    for (_, loc, sz) in &placements {
-        let idx = resolve_col_idx(loc.x);
-        let bottom = (loc.y - y_offset) + sz.height;
-        if bottom > col_heights[idx] {
-            col_heights[idx] = bottom;
-        }
+    for (unit, &(col, top)) in flow.units.iter().zip(&tops) {
+        let h = &mut col_heights[col as usize];
+        *h = h.max(top + unit.height);
     }
-    // Augment with later-column slices that don't appear in `placements`
-    // (only the first slice of each split paragraph is written back to
-    // Taffy storage).
-    for slices in placed_slices.values() {
-        for slice in slices.iter().skip(1) {
-            let idx = resolve_col_idx(slice.origin.x.to_f32());
-            let bottom = (slice.origin.y + slice.size.height).to_f32();
-            if bottom > col_heights[idx] {
-                col_heights[idx] = bottom;
-            }
-        }
-    }
-    // Guard against negative accumulation (should be unreachable given
-    // `y_offset` is the segment's top and placements live at or below it,
-    // but the clamp keeps the invariant `col_heights[i] >= 0.0` explicit).
-    for h in col_heights.iter_mut() {
-        if *h < 0.0 {
-            *h = 0.0;
-        }
+    if let Some(&(col, _)) = tops.last() {
+        col_heights[col as usize] += flow.trailing_margin;
     }
 
-    // 6. Build `paragraph_splits` from the per-source slice accumulator.
-    //    Each entry's `column_slices` length equals `n`, with empty
-    //    `ColumnLineSlice` placeholders for unused columns so downstream
-    //    consumers can index by column position without bounds juggling.
-    let paragraph_splits: Vec<ParagraphSplitEntry> = placed_slices
-        .into_iter()
-        .map(|(source_id, mut slices)| {
-            let mut by_col: Vec<Option<ColumnLineSlice>> = (0..n).map(|_| None).collect();
-            for slice in slices.drain(..) {
-                let idx = resolve_col_idx(slice.origin.x.to_f32());
-                by_col[idx] = Some(slice);
-            }
-            let column_slices: Vec<ColumnLineSlice> =
-                by_col.into_iter().map(|s| s.unwrap_or_default()).collect();
-            debug_assert_eq!(column_slices.len(), n as usize);
-            ParagraphSplitEntry {
-                source_node_id: source_id,
-                column_slices,
-            }
+    // 4. Absolute (group-frame) boxes. Wrappers cover every column their
+    //    units touch, from the highest to the lowest unit.
+    let full_w = n as f32 * col_w + n.saturating_sub(1) as f32 * gap;
+    let wrapper_boxes: Vec<(Point<f32>, Size<f32>)> = flow
+        .wrappers
+        .iter()
+        .map(|w| {
+            let range = &tops[w.units.clone()];
+            let units = &flow.units[w.units.clone()];
+            let top = range.iter().map(|&(_, t)| t).fold(f32::INFINITY, f32::min);
+            let bottom = units
+                .iter()
+                .zip(range)
+                .map(|(u, &(_, t))| t + u.height)
+                .fold(0.0_f32, f32::max);
+            let top = if top.is_finite() { top } else { 0.0 };
+            (
+                Point {
+                    x: 0.0,
+                    y: y_offset + top,
+                },
+                Size {
+                    width: full_w,
+                    height: (bottom - top).max(0.0),
+                },
+            )
         })
         .collect();
+
+    let mut top_level: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::new();
+    for (wrapper, &(abs, size)) in flow.wrappers.iter().zip(&wrapper_boxes) {
+        let parent_origin = wrapper.parent.map(|p| wrapper_boxes[p].0);
+        match parent_origin {
+            None => top_level.push((wrapper.id, abs, size)),
+            Some(origin) => {
+                let mut layout = tree.doc.get_unrounded_layout(wrapper.id);
+                layout.location = Point {
+                    x: abs.x - origin.x,
+                    y: abs.y - origin.y,
+                };
+                layout.size = size;
+                tree.set_unrounded_layout(wrapper.id, &layout);
+            }
+        }
+    }
+
+    let mut place = |tree: &mut FulgurLayoutTree<'_>,
+                     id: NodeId,
+                     parent: Option<usize>,
+                     abs: Point<f32>,
+                     size: Size<f32>| {
+        match parent {
+            None => top_level.push((id, abs, size)),
+            Some(p) => {
+                let origin = wrapper_boxes[p].0;
+                let mut layout = tree.doc.get_unrounded_layout(id);
+                layout.location = Point {
+                    x: abs.x - origin.x,
+                    y: abs.y - origin.y,
+                };
+                layout.size = size;
+                tree.set_unrounded_layout(id, &layout);
+            }
+        }
+    };
+
+    // 5. Blocks and paragraphs.
+    let mut paragraph_lines: Vec<Vec<(u32, f32, f32)>> = vec![Vec::new(); flow.paragraphs.len()];
+    for (unit, &(col, top)) in flow.units.iter().zip(&tops) {
+        match unit.kind {
+            FlowUnitKind::Block(b) => {
+                let block = &flow.blocks[b];
+                let abs = Point {
+                    x: col_x(col),
+                    y: y_offset + top,
+                };
+                place(tree, block.id, block.parent, abs, block.size);
+            }
+            FlowUnitKind::Line(paragraph) => {
+                paragraph_lines[paragraph].push((col, top, unit.height));
+            }
+        }
+    }
+
+    let mut paragraph_splits: Vec<ParagraphSplitEntry> = Vec::new();
+    for (paragraph, lines) in flow.paragraphs.iter().zip(&paragraph_lines) {
+        let Some(&(first_col, first_top, _)) = lines.first() else {
+            continue;
+        };
+        // Consecutive lines per column: (column, first line, line count,
+        // top, height).
+        let mut runs: Vec<(u32, usize, usize, f32, f32)> = Vec::new();
+        for (index, &(col, top, height)) in lines.iter().enumerate() {
+            match runs.last_mut() {
+                Some(run) if run.0 == col => {
+                    run.2 += 1;
+                    run.4 = top + height - run.3;
+                }
+                _ => runs.push((col, index, 1, top, height)),
+            }
+        }
+        let first_abs = Point {
+            x: col_x(first_col),
+            y: y_offset + first_top,
+        };
+        if runs.len() == 1 {
+            place(
+                tree,
+                paragraph.id,
+                paragraph.parent,
+                first_abs,
+                paragraph.size,
+            );
+            continue;
+        }
+        // The box keeps the first slice; the convert pass draws every
+        // slice from `paragraph_splits`.
+        let first_size = Size {
+            width: col_w,
+            height: runs[0].4,
+        };
+        place(tree, paragraph.id, paragraph.parent, first_abs, first_size);
+        let mut column_slices: Vec<ColumnLineSlice> =
+            (0..n).map(|_| ColumnLineSlice::default()).collect();
+        for &(col, start, count, top, height) in &runs {
+            column_slices[col as usize] = ColumnLineSlice {
+                line_range: start..start + count,
+                origin: Point {
+                    x: col_x(col).as_px(),
+                    y: top.as_px(),
+                },
+                size: Size {
+                    width: col_w.as_px(),
+                    height: height.as_px(),
+                },
+            };
+        }
+        paragraph_splits.push(ParagraphSplitEntry {
+            source_node_id: usize::from(paragraph.id),
+            column_slices,
+        });
+    }
+    // `paragraph_splits` flows into PDF byte order downstream: keep it in
+    // node order, as the previous `BTreeMap` collector did.
+    paragraph_splits.sort_by_key(|p| p.source_node_id);
 
     let geometry = ColumnGroupGeometry {
         // `x_offset` / `y_offset` here are in the container's *content-box*
         // frame; `compute_multicol_layout` shifts them into the border-box
-        // frame after every segment is placed (see the inset loop that runs
-        // over `group_geometries` in that function).
+        // frame after every segment is placed.
         x_offset: 0.0_f32.as_px(),
         y_offset: y_offset.as_px(),
         col_w: col_w.as_px(),
@@ -1422,7 +1666,7 @@ fn layout_column_group(
         paragraph_splits,
     };
 
-    (placements, geometry)
+    (top_level, geometry)
 }
 
 /// Distribute `line_heights` (per-line total height in CSS px) across
@@ -1474,66 +1718,6 @@ fn slice_lines_by_budget(
     out
 }
 
-/// fulgur-6q5 Fix 3: variant of [`slice_lines_by_budget`] that
-/// distributes lines into a sequence of columns where the first column
-/// has a smaller-than-`full_budget` remainder (because earlier siblings
-/// already consumed part of it). The non-first columns continue to use
-/// `full_budget`.
-///
-/// Returns one `(line_range, slice_height)` pair per *remaining* column
-/// (i.e. the slice has length `remaining_cols`).
-///
-/// The first column's budget is `first_col_remainder`, which may be
-/// zero or negative — in that case the first column produces an empty
-/// range (no line forced in, since the column has no room) unless it's
-/// also the only / last remaining column. All subsequent columns use
-/// `full_budget`. The same monolithic-line rule (first non-skipped line
-/// always fits) and "last column absorbs overflow" rule from
-/// [`slice_lines_by_budget`] apply.
-fn slice_lines_with_first_col_remainder(
-    line_heights: &[f32],
-    first_col_remainder: f32,
-    full_budget: f32,
-    remaining_cols: u32,
-) -> Vec<(std::ops::Range<usize>, f32)> {
-    let n = remaining_cols.max(1) as usize;
-    let mut out = Vec::with_capacity(n);
-    let mut start = 0_usize;
-    for col in 0..n {
-        let mut consumed = 0.0_f32;
-        let mut end = start;
-        let last_col = col == n - 1;
-        let this_budget = if col == 0 {
-            first_col_remainder.max(0.0)
-        } else {
-            full_budget
-        };
-        // First column with zero remainder: emit an empty slice so the
-        // existing column carries no extra lines, and let the next
-        // column take its first line at full budget. Skip this guard
-        // for the last column to keep the "absorb remainder" rule.
-        if this_budget <= 0.0 && !last_col {
-            out.push((start..start, 0.0));
-            continue;
-        }
-        while end < line_heights.len() {
-            let h = line_heights[end];
-            let line_count = end - start;
-            // First line in this column always fits (monolithic-line rule).
-            // Otherwise stop when adding this line would overflow,
-            // unless we are the final column (absorb remainder).
-            if line_count > 0 && consumed + h > this_budget && !last_col {
-                break;
-            }
-            consumed += h;
-            end += 1;
-        }
-        out.push((start..end, consumed));
-        start = end;
-    }
-    out
-}
-
 /// fulgur-6q5 Fix 2: returns true when every line of `layout` contains
 /// only `GlyphRun` items (no `InlineBox`).
 ///
@@ -1555,41 +1739,6 @@ fn parley_layout_is_glyph_run_only(layout: &parley::Layout<blitz_dom::node::Text
                 parley::PositionedLayoutItem::InlineBox(_) => return false,
             }
         }
-    }
-    true
-}
-
-/// Linear search for the smallest per-column budget (starting from `total / n`
-/// and growing in `avail_h / 20` increments) that fits all children in `n`
-/// columns with no overflow. Bounded to ≤ 20 iterations.
-fn balance_budget(measured: &[(NodeId, Size<f32>)], n: u32, avail_h: f32, total_h: f32) -> f32 {
-    let ideal = (total_h / n as f32).ceil().max(1.0);
-    let step = (avail_h / 20.0).max(1.0);
-    let mut budget = ideal;
-    while budget <= avail_h {
-        if fits_in_n_columns(measured, n, budget) {
-            return budget;
-        }
-        budget += step;
-    }
-    avail_h
-}
-
-/// Greedy pack: returns true when all children fit into `n` columns of the
-/// given per-column budget. Mirrors the placement loop in
-/// `compute_multicol_layout` but without writing back.
-fn fits_in_n_columns(measured: &[(NodeId, Size<f32>)], n: u32, budget: f32) -> bool {
-    let mut col_idx: u32 = 0;
-    let mut col_y: f32 = 0.0;
-    for (_, size) in measured {
-        if col_y > 0.0 && col_y + size.height > budget {
-            if col_idx + 1 >= n {
-                return false;
-            }
-            col_idx += 1;
-            col_y = 0.0;
-        }
-        col_y += size.height;
     }
     true
 }
@@ -2061,65 +2210,81 @@ mod tests {
         assert_eq!(w, 300.0);
     }
 
-    // ── balance_budget / fits_in_n_columns ──────────────────────────
-    fn fake_sized(n: usize, h: f32) -> Vec<(NodeId, Size<f32>)> {
-        (0..n)
-            .map(|i| {
-                (
-                    NodeId::from(i),
-                    Size {
-                        width: 100.0,
-                        height: h,
-                    },
-                )
-            })
-            .collect()
+    // ── flow units: margins, placement, balancing ────────────────────
+    fn line(height: f32, gap_before: f32) -> FlowUnit {
+        FlowUnit {
+            kind: FlowUnitKind::Line(0),
+            height,
+            gap_before,
+        }
     }
 
     #[test]
-    fn balance_budget_converges_at_ideal_when_divisible() {
-        // 4 children × 10pt = 40pt total, n=2 → ideal = 20pt budget which
-        // packs exactly 2 per column.
-        let children = fake_sized(4, 10.0);
-        let budget = balance_budget(
-            &children, 2, /* avail_h = */ 100.0, /* total_h = */ 40.0,
-        );
-        assert!(
-            (budget - 20.0).abs() < 0.01,
-            "expected budget ≈ 20, got {budget}"
-        );
+    fn collapsed_margin_takes_largest_positive_plus_most_negative() {
+        let mut m = CollapsedMargin::default();
+        m.add(10.0);
+        m.add(16.0);
+        assert_eq!(m.value(), 16.0);
+        m.add(-4.0);
+        m.add(-6.0);
+        assert_eq!(m.value(), 10.0);
     }
 
     #[test]
-    fn balance_budget_grows_when_ideal_leaves_overflow() {
-        // 5 children × 10pt, n=2: ideal = 25pt. Packing at 25pt fits 2+1
-        // with 2 overflow lines → balance grows.
-        let children = fake_sized(5, 10.0);
-        let budget = balance_budget(
-            &children, 2, /* avail_h = */ 100.0, /* total_h = */ 50.0,
-        );
-        assert!((25.0..=100.0).contains(&budget));
-        // At whatever budget balance settled on, fits_in_n_columns must be
-        // true — that's the stop condition.
-        assert!(fits_in_n_columns(&children, 2, budget));
+    fn place_units_keeps_margins_inside_a_column_and_drops_them_after_a_break() {
+        // Two paragraphs of two 10px lines, 5px apart, in columns of 25px.
+        let units = [
+            line(10.0, 5.0),
+            line(10.0, 0.0),
+            line(10.0, 5.0),
+            line(10.0, 0.0),
+        ];
+        let tops = place_units(&units, 2, 25.0, true).unwrap();
+        // The first column keeps its leading margin: 5, 15. The third line
+        // (5 + 10 = 15 → 25 + 5 + 10 = 40 > 25) moves to column 1, where
+        // the margin before it is dropped.
+        assert_eq!(tops, vec![(0, 5.0), (0, 15.0), (1, 0.0), (1, 10.0)]);
     }
 
     #[test]
-    fn balance_budget_caps_at_avail_h_when_content_overflows() {
-        // 10 children × 10pt = 100pt total, n=2, avail_h=30 → cannot fit
-        // in 2 × 30pt columns. Returns avail_h as the auto fallback.
-        let children = fake_sized(10, 10.0);
-        let budget = balance_budget(
-            &children, 2, /* avail_h = */ 30.0, /* total_h = */ 100.0,
-        );
-        assert!((budget - 30.0).abs() < 0.01);
+    fn place_units_strict_fails_when_columns_run_out_and_lenient_overflows() {
+        let units = [line(10.0, 0.0), line(10.0, 0.0), line(10.0, 0.0)];
+        assert!(place_units(&units, 1, 15.0, true).is_none());
+        let tops = place_units(&units, 1, 15.0, false).unwrap();
+        assert_eq!(tops, vec![(0, 0.0), (0, 10.0), (0, 20.0)]);
     }
 
     #[test]
-    fn fits_in_n_columns_detects_overflow() {
-        let children = fake_sized(6, 10.0);
-        assert!(fits_in_n_columns(&children, 2, 30.0)); // 3 per col at 30pt
-        assert!(!fits_in_n_columns(&children, 2, 20.0)); // 2 per col → 2 left over
+    fn place_units_puts_an_oversized_unit_alone_in_a_column() {
+        let units = [line(10.0, 0.0), line(50.0, 0.0), line(10.0, 0.0)];
+        let tops = place_units(&units, 3, 20.0, true).unwrap();
+        assert_eq!(tops, vec![(0, 0.0), (1, 0.0), (2, 0.0)]);
+    }
+
+    #[test]
+    fn balanced_budget_splits_lines_evenly() {
+        // 21 lines of 22px in 3 columns: 7 lines each.
+        let units: Vec<FlowUnit> = (0..21).map(|_| line(22.0, 0.0)).collect();
+        let budget = balanced_budget(&units, 3);
+        assert!((budget - 154.0).abs() < 0.1, "{budget}");
+    }
+
+    #[test]
+    fn balanced_budget_accounts_for_margins_and_breaks() {
+        // Seven lines, then a 10px margin, then seven more. In two columns
+        // the margin falls at the break and is dropped: 7 lines per column.
+        let mut units: Vec<FlowUnit> = (0..7).map(|_| line(20.0, 0.0)).collect();
+        units.extend((0..7).map(|i| line(20.0, if i == 0 { 10.0 } else { 0.0 })));
+        let budget = balanced_budget(&units, 2);
+        assert!((budget - 140.0).abs() < 0.1, "{budget}");
+        let tops = place_units(&units, 2, budget, true).unwrap();
+        assert_eq!(tops[7], (1, 0.0));
+    }
+
+    #[test]
+    fn balanced_budget_of_nothing_is_zero() {
+        assert_eq!(balanced_budget(&[], 3), 0.0);
+        assert_eq!(balanced_budget(&[line(0.0, 0.0)], 3), 0.0);
     }
 
     // ── slice_lines_by_budget ───────────────────────────────────────
@@ -2171,77 +2336,6 @@ mod tests {
     #[test]
     fn slice_lines_by_budget_empty_input_returns_n_empty_slices() {
         let slices = slice_lines_by_budget(&[], 100.0, 3);
-        assert_eq!(slices.len(), 3);
-        for (range, h) in &slices {
-            assert!(range.is_empty());
-            assert_eq!(*h, 0.0);
-        }
-    }
-
-    // ── slice_lines_with_first_col_remainder (fulgur-6q5 Fix 3) ──────
-
-    #[test]
-    fn slice_lines_with_remainder_full_remainder_matches_basic_slice() {
-        // When the first column has a fresh budget (remainder == full
-        // budget), the helper must agree with `slice_lines_by_budget`.
-        let heights = [10.0_f32; 10];
-        let slices_basic = slice_lines_by_budget(&heights, /*budget*/ 50.0, /*n*/ 2);
-        let slices_rem = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 50.0, /*full_budget*/ 50.0,
-            /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices_basic, slices_rem);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_zero_first_col_is_empty() {
-        // First column already full → zero remainder. The helper must
-        // emit an empty col-0 slice and let col-1 pick up at full
-        // budget (without forcing a line into the empty col 0).
-        let heights = [10.0_f32; 5];
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 0.0, /*full_budget*/ 30.0,
-            /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices.len(), 2);
-        assert_eq!(slices[0], (0..0, 0.0));
-        // Last column absorbs all remaining lines.
-        assert_eq!(slices[1].0, 0..5);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_partial_first_col_smaller_share() {
-        // First column has a smaller budget (15 vs 30). It can fit one
-        // 10-line; the second line would push consumed to 20 > 15, so
-        // it advances. Subsequent columns at full budget take the rest.
-        let heights = [10.0_f32; 5]; // total 50
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 15.0, /*full_budget*/ 30.0,
-            /*remaining_cols*/ 3,
-        );
-        assert_eq!(slices.len(), 3);
-        assert_eq!(slices[0], (0..1, 10.0));
-        assert_eq!(slices[1], (1..4, 30.0));
-        assert_eq!(slices[2], (4..5, 10.0));
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_last_col_absorbs_overflow() {
-        // 5 lines × 20pt = 100pt total. First-col remainder 20, full
-        // budget 20, only 2 remaining columns — the second column must
-        // still absorb the rest (overflow), never silently drop.
-        let heights = [20.0_f32; 5];
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 20.0, /*full_budget*/ 20.0,
-            /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices[0], (0..1, 20.0));
-        assert_eq!(slices[1].0, 1..5);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_empty_input_returns_n_empty_slices() {
-        let slices = slice_lines_with_first_col_remainder(&[], 50.0, 100.0, 3);
         assert_eq!(slices.len(), 3);
         for (range, h) in &slices {
             assert!(range.is_empty());
@@ -2646,7 +2740,7 @@ mod tests {
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
               <p id="before">before</p>
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="after">after</p>
             </div>
         </body></html>"#;
@@ -2679,7 +2773,7 @@ mod tests {
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
               <p id="before">before</p>
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="after">after</p>
             </div>
         </body></html>"#;
@@ -2711,7 +2805,7 @@ mod tests {
     fn span_at_top_produces_one_segment_below() {
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="a">a</p>
               <p id="b">b</p>
             </div>
@@ -2744,7 +2838,7 @@ mod tests {
             <div id="mc" style="column-count: 2; column-gap: 0;">
               <p id="a">a</p>
               <p id="b">b</p>
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
             </div>
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
@@ -2808,7 +2902,7 @@ mod tests {
         // and the container height was purely content-driven with no padding
         // contribution. Reference examples: examples/multicol,
         // examples/multicol-span-all.
-        let html = r#"<!doctype html><html><body>
+        let html = r#"<!doctype html><html><body><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: 6px 10px;">
               <p id="a">alpha alpha alpha alpha</p>
               <p id="b">beta beta beta beta</p>
@@ -2871,7 +2965,7 @@ mod tests {
 
     #[test]
     fn multicol_container_border_offsets_children_and_contributes_height() {
-        let html = r#"<!doctype html><html><body>
+        let html = r#"<!doctype html><html><body><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; border: 5px solid black;">
               <p id="a">alpha alpha alpha alpha</p>
               <p id="b">beta beta beta beta</p>
@@ -2934,7 +3028,7 @@ mod tests {
         // the border edge.
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: 8px 10px;">
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="a">a</p>
               <p id="b">b</p>
             </div>
@@ -2979,7 +3073,7 @@ mod tests {
         //
         // Zero the body margin so the containing block basis is a clean
         // 400px, then `.mc { padding: 10% }` = 40px on every side.
-        let html = r#"<!doctype html><html><body style="margin:0">
+        let html = r#"<!doctype html><html><body style="margin:0"><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: 10%;">
               <p id="a">alpha</p>
               <p id="b">beta</p>
@@ -3590,80 +3684,6 @@ mod tests {
         assert_eq!(slices[1], (1..3, 20.0)); // col 1 (last): absorbs the rest
     }
 
-    // ── slice_lines_with_first_col_remainder: untested branches ──────
-
-    #[test]
-    fn slice_lines_with_remainder_remaining_cols_1_single_column_absorbs_all() {
-        // remaining_cols=1 means `last_col` is always true, so the
-        // "zero-budget early emit" guard (`!last_col`) is never satisfied
-        // even when first_col_remainder is zero. All lines are absorbed.
-        let heights = [10.0_f32; 5];
-        let slices =
-            slice_lines_with_first_col_remainder(&heights, 0.0, /*full_budget*/ 30.0, 1);
-        assert_eq!(slices.len(), 1);
-        assert_eq!(slices[0].0, 0..5, "single column must absorb all lines");
-        assert_eq!(slices[0].1, 50.0);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_negative_first_col_is_clamped_to_zero_and_emits_empty_slice() {
-        // A negative first_col_remainder is clamped to 0.0 via `.max(0.0)`,
-        // which triggers the "zero budget → emit empty slice" path for
-        // non-last columns. Subsequent columns use full_budget.
-        let heights = [10.0_f32; 5];
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, -5.0, // negative → clamped to 0.0
-            /*full_budget*/ 30.0, /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices.len(), 2);
-        // col 0: remainder was 0 and it's not the last col → empty slice.
-        assert_eq!(slices[0], (0..0, 0.0));
-        // col 1 (last): full_budget=30 absorbs all 5 lines (overflow allowed).
-        assert_eq!(slices[1].0, 0..5);
-    }
-
-    // ── fits_in_n_columns: boundary and zero-height cases ────────────
-
-    #[test]
-    fn fits_in_n_columns_exact_budget_boundary_does_not_trigger_overflow() {
-        // The overflow condition is `col_y + size.height > budget` (strict >).
-        // When col_y + h == budget exactly, the item must stay in the current
-        // column (no advance). Two items of height 10 in n=1, budget=20:
-        //   • item 0: col_y=0, 0>0 false → add. col_y=10.
-        //   • item 1: col_y=10, 10+10=20, 20>20 false → add. col_y=20.
-        // Returns true (fits). budget=19 would return false (10+10=20>19).
-        let children = fake_sized(2, 10.0);
-        assert!(
-            fits_in_n_columns(&children, 1, 20.0),
-            "col_y + h == budget must not trigger overflow (strict >)"
-        );
-        assert!(
-            !fits_in_n_columns(&children, 1, 19.0),
-            "col_y + h > budget must overflow and spill (single column)"
-        );
-    }
-
-    #[test]
-    fn fits_in_n_columns_zero_height_items_never_trigger_overflow() {
-        // Zero-height items leave col_y at 0.0 forever. The guard
-        // `col_y > 0.0` is never satisfied, so they never advance to the
-        // next column and always return true regardless of n or budget.
-        let children: Vec<(NodeId, Size<f32>)> = (0..10usize)
-            .map(|i| {
-                (
-                    NodeId::from(i),
-                    Size {
-                        width: 100.0,
-                        height: 0.0,
-                    },
-                )
-            })
-            .collect();
-        assert!(fits_in_n_columns(&children, 1, 0.0));
-        assert!(fits_in_n_columns(&children, 1, 100.0));
-        assert!(fits_in_n_columns(&children, 3, 0.0));
-    }
-
     // ── resolve_column_layout: count == fits_count tie ───────────────
 
     #[test]
@@ -3689,34 +3709,6 @@ mod tests {
         );
     }
 
-    // ── balance_budget: edge cases ───────────────────────────────────
-
-    #[test]
-    fn balance_budget_empty_children_returns_smallest_ideal() {
-        // No children → `fits_in_n_columns` is vacuously true on the first
-        // iteration (ideal = max(ceil(0/n), 1) = 1). Returns 1.0.
-        let children: Vec<(NodeId, Size<f32>)> = vec![];
-        let budget = balance_budget(&children, 2, 100.0, 0.0);
-        assert!(
-            (budget - 1.0).abs() < 0.01,
-            "empty children: expected budget=1.0, got {budget}"
-        );
-    }
-
-    #[test]
-    fn balance_budget_single_item_fits_immediately_at_ideal() {
-        // 1 item of height 10 in n=2: ideal = ceil(10/2) = 5.
-        // `fits_in_n_columns([10], 2, 5)`:
-        //   col_y=0, 0>0 false → add h=10. col_y=10. (loop ends)
-        //   Returns true → budget converges at 5 on the first iteration.
-        let children = fake_sized(1, 10.0);
-        let budget = balance_budget(&children, 2, 100.0, 10.0);
-        assert!(
-            (budget - 5.0).abs() < 0.01,
-            "single item: expected ideal budget=5.0, got {budget}"
-        );
-    }
-
     // ── resolve_column_layout: fits_count denom ≤ 0 branch ──────────────
 
     #[test]
@@ -3732,36 +3724,6 @@ mod tests {
     }
 
     // ── layout_column_group: zero total_h → balance budget zero ─────────
-
-    #[test]
-    fn zero_height_children_give_zero_balance_budget() {
-        // A multicol container whose block children all measure to height=0
-        // drives total_h to 0.0 in layout_column_group, exercising the
-        // `total_h <= 0.0 → budget = 0` Balance-mode branch (line 1071).
-        let html = r#"<!doctype html><html><body>
-            <div style="column-count: 2; column-gap: 0;">
-              <div></div>
-            </div>
-        </body></html>"#;
-        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
-        crate::blitz_adapter::resolve(&mut doc);
-
-        let column_styles = crate::column_css::ColumnStyleTable::new();
-        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
-        let laid_out = tree.layout_multicol_subtrees();
-        assert_eq!(laid_out, 1);
-
-        let geom = tree.take_geometry();
-        assert_eq!(geom.len(), 1);
-        let mc_geom = geom.values().next().unwrap();
-        let group = &mc_geom.groups[0];
-        assert_eq!(group.n, 2);
-        assert!(
-            group.col_heights.iter().all(|h| h.to_f32() <= 0.01),
-            "zero-height children must produce near-zero column heights: {:?}",
-            group.col_heights
-        );
-    }
 
     // ── parley_layout_is_glyph_run_only: InlineBox arm ──────────────────
 
@@ -3820,7 +3782,7 @@ mod tests {
         //
         // With body margin:0 and viewport 400px the containing block is 400px
         // wide. `calc(10% + 5px)` resolves to 40 + 5 = 45px on every side.
-        let html = r#"<!doctype html><html><body style="margin:0">
+        let html = r#"<!doctype html><html><body style="margin:0"><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: calc(10% + 5px);">
               <p id="a">alpha alpha alpha alpha</p>
               <p id="b">beta beta beta beta</p>
@@ -3934,5 +3896,73 @@ mod tests {
 
         clear_subtree_cache_inner(&mut doc, 9_999_999, 0);
         // No panic ⇒ the absent-node guard fired correctly.
+    }
+
+    fn lay_out_multicol(html: &str) -> blitz_html::HtmlDocument {
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+        tree.layout_multicol_subtrees();
+        doc
+    }
+
+    #[test]
+    fn children_of_a_plain_wrapper_flow_across_columns() {
+        // Content wrapped in one <div> used to be placed whole in the
+        // first column.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px">
+              <div id="w"><div id="a" style="height: 50px"></div><div id="b" style="height: 50px"></div></div>
+            </div></body></html>"#,
+        );
+        let (w, a, b) = (
+            layout_of_id(&doc, "w"),
+            layout_of_id(&doc, "a"),
+            layout_of_id(&doc, "b"),
+        );
+        assert_eq!((a.location.x, a.location.y), (0.0, 0.0));
+        // `b` is relative to the wrapper, which covers both columns.
+        assert!(
+            (w.location.x + b.location.x - 200.0).abs() < 0.5,
+            "b in column 2"
+        );
+        assert!(
+            (w.location.y + b.location.y).abs() < 0.5,
+            "b at the column top"
+        );
+        assert!((w.size.width - 400.0).abs() < 0.5);
+        assert!((layout_of_id(&doc, "mc").size.height - 50.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn margins_between_column_children_are_kept() {
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 1; width: 400px">
+              <div id="a" style="height: 20px; margin-bottom: 10px"></div>
+              <div id="b" style="height: 20px; margin-top: 4px; margin-bottom: 6px"></div>
+            </div></body></html>"#,
+        );
+        // 10px and 4px collapse to 10px; the last margin stays inside the
+        // multicol, which is a block formatting context root.
+        assert!((layout_of_id(&doc, "b").location.y - 30.0).abs() < 0.5);
+        assert!((layout_of_id(&doc, "mc").size.height - 56.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_wrapper_with_a_background_is_placed_whole() {
+        // Its background would show the cut, so its children stay together.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px">
+              <div style="background: red"><div id="a" style="height: 50px"></div><div id="b" style="height: 50px"></div></div>
+              <div id="c" style="height: 100px"></div>
+            </div></body></html>"#,
+        );
+        let b = layout_of_id(&doc, "b");
+        assert_eq!((b.location.x, b.location.y), (0.0, 50.0));
+        assert!((layout_of_id(&doc, "c").location.x - 200.0).abs() < 0.5);
     }
 }

@@ -861,7 +861,10 @@ impl<'a> PaginationLayoutTree<'a> {
             // between the column groups, so block-flow recursion via
             // `fragment_block_subtree` can split it across pages
             // when it overflows. Containers without span:all stay
-            // atomic.
+            // atomic. A container that fits the remaining strip is
+            // placed whole: the block-flow walk stacks the column
+            // children as if they were one column, which overstates
+            // their height and pushed fitting columns to the next page.
             let is_multicol = child_node.is_some_and(crate::blitz_adapter::is_multicol_container);
             let multicol_has_span_all = is_multicol
                 && child_node.is_some_and(|n| {
@@ -873,8 +876,9 @@ impl<'a> PaginationLayoutTree<'a> {
                 });
             let available_strip = (self.page_height_px - cursor_y).max(0.0);
             let avoid_fits_whole_page = avoid_inside && child_h <= self.page_height_px + 1.0;
+            let multicol_overflows = multicol_has_span_all && child_h > available_strip + 1.0;
             let needs_recursion = has_splittable_children
-                && (!is_multicol || multicol_has_span_all)
+                && (!is_multicol || multicol_overflows)
                 && (has_forced_break_below(
                     &self.doc,
                     crate::blitz_adapter::uid(child_id),
