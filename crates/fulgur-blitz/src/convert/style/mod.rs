@@ -43,6 +43,7 @@ pub(super) fn extract_block_style(node: &Node, assets: Option<&AssetBundle>) -> 
 
         // Borders (color, radii, styles)
         border::apply_to(&mut style, &ctx);
+        border::apply_collapsed(&mut style, node, &ctx);
 
         // Box shadows
         shadow::apply_to(&mut style, &ctx);

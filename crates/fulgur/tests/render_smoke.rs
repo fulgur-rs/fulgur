@@ -2509,6 +2509,57 @@ fn multicol_starting_mid_page_fills_the_rest_of_the_page_first() {
     );
 }
 
+/// Tables in the collapsing border model draw their borders. Blitz lays the
+/// borders out as gutters and leaves the cells without a border, so nothing
+/// was drawn; now each cell draws its own border centred on the gutter, in
+/// its own color per side, and a table border at least as wide wins at the
+/// table's edge.
+#[test]
+fn collapsed_table_borders_are_drawn() {
+    let html = r#"<!doctype html><html><body style="margin:0">
+<table style="border-collapse:collapse;border:3px solid #c00">
+<tr><td style="border:1px solid #000">a</td><td style="border-bottom:2px solid #00c">b</td></tr>
+</table></body></html>"#;
+    let engine = Engine::builder().build();
+    let (drawables, _) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
+    let collapsed: Vec<_> = drawables
+        .block_styles
+        .values()
+        .map(|b| &b.style)
+        .chain(drawables.tables.values().map(|t| &t.style))
+        .filter_map(|s| s.collapsed_border)
+        .collect();
+    assert_eq!(
+        collapsed.len(),
+        3,
+        "the table and its two cells: {collapsed:?}"
+    );
+    let px = |pt: fulgur::units::Pt| (pt.to_f32() / 0.75 * 100.0).round() / 100.0;
+
+    // Cell a: 1px black, drawn only on its inner side; its outer sides give
+    // way to the table's wider border. Cell b: only a blue bottom border, on
+    // the table's edge, where the table's 3px border wins.
+    let table = collapsed
+        .iter()
+        .find(|c| c.colors[0] == [0xcc, 0, 0, 255])
+        .expect("table border");
+    assert_eq!(table.widths.map(px), [3.0; 4]);
+    let a = collapsed
+        .iter()
+        .find(|c| c.colors[1] == [0, 0, 0, 255] && px(c.widths[1]) == 1.0)
+        .expect("cell a");
+    assert_eq!(a.widths.map(px), [0.0, 1.0, 0.0, 0.0], "{a:?}");
+    let b = collapsed
+        .iter()
+        .find(|c| c.colors[2] == [0, 0, 0xcc, 255])
+        .expect("cell b");
+    assert_eq!(
+        b.widths.map(px),
+        [0.0; 4],
+        "the table's 3px border wins: {b:?}"
+    );
+}
+
 /// A float inside a line of text is drawn where Blitz placed it (its Taffy
 /// layout), not at its placeholder in the line, and boxes inside
 /// paragraphs that pagination splits across pages get geometry on the
