@@ -173,11 +173,22 @@ pub(crate) fn partition_children_into_segments(
     doc: &BaseDocument,
     container_id: usize,
 ) -> Vec<Segment> {
-    let children: Vec<usize> = crate::blitz_adapter::uids(
-        &doc.get_node(crate::blitz_adapter::bid(container_id))
-            .map(|n| n.children.clone())
-            .unwrap_or_default(),
-    );
+    // Layout children, when Blitz built them: text and inline content
+    // mixed with blocks sits in anonymous block wrappers there, which have
+    // the styles and layout data the column layout reads. The bare text
+    // nodes in the DOM list have neither.
+    let children: Vec<usize> = doc
+        .get_node(crate::blitz_adapter::bid(container_id))
+        .map(|n| {
+            let layout_children = n.layout_children.borrow();
+            crate::blitz_adapter::uids(
+                layout_children
+                    .as_deref()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or(&n.children),
+            )
+        })
+        .unwrap_or_default();
 
     let mut out: Vec<Segment> = Vec::new();
     let mut group: Vec<NodeId> = Vec::new();
@@ -4471,6 +4482,18 @@ mod tests {
         );
         let a = layout_of_id(&doc, "a");
         assert_eq!((a.location.x, a.location.y), (5.0, 8.0));
+    }
+
+    #[test]
+    fn text_between_column_blocks_is_laid_out_in_its_anonymous_block() {
+        // Bare text next to blocks used to reach the column layout as a
+        // text node, which has no styles: a panic.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; width: 400px"><p>a</p>loose text<p>b</p></div>
+            </body></html>"#,
+        );
+        assert!(layout_of_id(&doc, "mc").size.height > 0.0);
     }
 
     #[test]
