@@ -321,6 +321,8 @@ pub mod draw_primitives;
 #[doc(hidden)]
 pub mod drawables;
 pub mod engine;
+#[cfg(not(target_arch = "wasm32"))]
+mod font_aliases;
 pub mod gcpm;
 pub(crate) mod link;
 #[doc(hidden)]

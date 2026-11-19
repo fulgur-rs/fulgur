@@ -444,9 +444,23 @@ fn parse_inner(
     );
 
     let font_ctx = if font_data.is_empty() && system_fonts {
-        // No bundled fonts and system fonts allowed: let Blitz use its own
-        // default FontContext (system fonts enabled).
-        None
+        // No bundled fonts and system fonts allowed: Blitz's own default
+        // FontContext (system fonts and its list-marker bullet font), plus
+        // the metric-compatible aliases (Arial → Liberation Sans, …).
+        let mut ctx = FontContext {
+            source_cache: parley::fontique::SourceCache::new_shared(),
+            collection: parley::fontique::Collection::new(parley::fontique::CollectionOptions {
+                shared: false,
+                system_fonts: true,
+            }),
+        };
+        ctx.collection.register_fonts(
+            parley::fontique::Blob::new(Arc::new(blitz_dom::BULLET_FONT) as _),
+            None,
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::font_aliases::register_metric_aliases(&mut ctx.collection);
+        Some(ctx)
     } else {
         let collection = parley::fontique::Collection::new(parley::fontique::CollectionOptions {
             system_fonts,
@@ -460,6 +474,8 @@ fn parse_inner(
             let blob: parley::fontique::Blob<u8> = (**data).clone().into();
             ctx.collection.register_fonts(blob, None);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::font_aliases::register_metric_aliases(&mut ctx.collection);
         Some(ctx)
     };
 
