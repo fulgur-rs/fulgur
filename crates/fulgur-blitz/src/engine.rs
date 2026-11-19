@@ -603,6 +603,7 @@ impl Engine {
         // docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
         let mut multicol_geometry =
             crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        crate::blitz_adapter::rebase_out_of_flow_locations(&mut doc);
 
         // Run the pagination_layout fragmenter (fulgur-4cbc). Walks
         // body's children's existing `final_layout` (populated by
@@ -1031,6 +1032,7 @@ impl Engine {
             crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
         let mut multicol_geometry =
             crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        crate::blitz_adapter::rebase_out_of_flow_locations(&mut doc);
         let page_height_px = self.config.content_height().as_pt().in_px();
         let pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),
@@ -1108,6 +1110,7 @@ impl Engine {
             crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
         let mut multicol_geometry =
             crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        crate::blitz_adapter::rebase_out_of_flow_locations(&mut doc);
         let page_height_px = self.config.content_height().as_pt().in_px();
         let mut pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),

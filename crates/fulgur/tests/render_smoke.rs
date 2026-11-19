@@ -2572,6 +2572,49 @@ fn content_wider_than_the_page_is_shrunk_to_fit() {
     );
 }
 
+/// Blitz places an absolutely positioned box relative to its containing
+/// block (here the initial containing block), not its parent. The box must
+/// be drawn where it is, inside the page: not off the page, where it made
+/// shrink-to-fit scale the whole document down, and not dropped when its
+/// parent has no in-flow height.
+#[test]
+fn absolute_boxes_without_a_positioned_parent_are_drawn_in_place() {
+    let text = "absmarker ".repeat(60);
+    let cases = [
+        format!(
+            r#"<table width="100%"><tr><td></td><td><div style="position:absolute">{text}</div></td></tr></table>"#
+        ),
+        format!(r#"<div><div style="position:absolute">{text}</div></div>"#),
+        format!(
+            r#"<div style="position:relative"><div style="position:absolute">{text}</div></div>"#
+        ),
+        format!(r#"<div>in flow text<div style="position:absolute">{text}</div></div>"#),
+    ];
+    for body in cases {
+        let html = format!("<!doctype html><html><body><p>Visible</p>{body}</body></html>");
+        let body_width = |engine: Engine| {
+            let layout = engine.layout(&html).expect("layout");
+            let body = layout.drawables.body_id.expect("body");
+            layout.geometry[&body].fragments[0].width.to_f32()
+        };
+        let plain = body_width(Engine::builder().build());
+        let fitted = body_width(Engine::builder().shrink_to_fit(0.5).build());
+        assert!(
+            (fitted - plain).abs() < 1.0,
+            "the box fits the page, nothing to shrink: {plain} vs {fitted} for {body}"
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        let Some(extracted) = extract_pdf_text(&pdf) else {
+            continue;
+        };
+        assert_eq!(
+            extracted.matches("absmarker").count(),
+            60,
+            "every word drawn for {body}: {extracted}"
+        );
+    }
+}
+
 /// Tables in the collapsing border model draw their borders. Blitz lays the
 /// borders out as gutters and leaves the cells without a border, so nothing
 /// was drawn; now each cell draws its own border centred on the gutter, in

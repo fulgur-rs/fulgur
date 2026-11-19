@@ -703,6 +703,18 @@ impl<'a> PaginationLayoutTree<'a> {
                             height: 0.0_f32.as_px(),
                         });
                     emitted += 1;
+                    // A box with no in-flow height can still hold
+                    // visible descendants: an absolutely positioned
+                    // child, or content overflowing `height: 0`.
+                    record_subtree_descendants(
+                        &mut self.geometry,
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
+                        page_index,
+                        cursor_y,
+                        body_x + layout.location.x,
+                        0,
+                    );
                 }
                 if !zero_is_float {
                     prev_used_page = Some(zero_used_end);
@@ -2965,6 +2977,17 @@ fn fragment_block_subtree_inner(
                         width: child_w.as_px(),
                         height: 0.0_f32.as_px(),
                     });
+                // Descendants of a box with no in-flow height, as in
+                // `fragment_pagination_root`.
+                record_subtree_descendants(
+                    geometry,
+                    doc,
+                    child_id,
+                    page_index,
+                    cursor_y,
+                    parent_x_in_body + layout.location.x,
+                    depth + 1,
+                );
             }
             // Honour `break-after: page` for zero-height elements
             // too — same fulgur-p3uf (Phase 3.1.5a) fix as

@@ -663,6 +663,78 @@ pub fn set_viewport_size_px(doc: &mut HtmlDocument, width_px: f32, height_px: f3
     doc.set_viewport(new_viewport);
 }
 
+/// Make the location of every out-of-flow box relative to its layout parent.
+///
+/// Blitz lays a `position: absolute` / `fixed` box out against its
+/// containing block (the nearest positioned ancestor, or the initial
+/// containing block) and stores its location relative to that box, which can
+/// be several levels above the box's parent. fulgur positions a box by adding
+/// its location to its parent's position, as with Blitz 0.2's Taffy, where
+/// absolutely positioned boxes were placed relative to their parent. Without
+/// this rebase an absolute box inside a table cell or a static `<div>`, with
+/// no positioned ancestor, lands far from its real position: off the page,
+/// widening the measured content, or on no fragment at all.
+///
+/// Run after every layout pass and before the fragmenter reads the layout.
+pub fn rebase_out_of_flow_locations(doc: &mut HtmlDocument) {
+    // Positions relative to the root, following the containing-block chain
+    // as Blitz does (`BaseDocument::physical_unrounded_geometry`).
+    fn origin(doc: &blitz_dom::BaseDocument, id: blitz_dom::NodeId, rounded: bool) -> (f32, f32) {
+        let (mut x, mut y) = (0.0_f32, 0.0_f32);
+        let mut current = Some(id);
+        let mut steps = 0;
+        while let Some(id) = current {
+            let Some(node) = doc.get_node(id) else { break };
+            let layout = if rounded {
+                node.final_layout_or_zero()
+            } else {
+                node.unrounded_layout_or_zero()
+            };
+            x += layout.location.x;
+            y += layout.location.y;
+            current = node.containing_block();
+            steps += 1;
+            if steps > crate::MAX_DOM_DEPTH {
+                break;
+            }
+        }
+        (x, y)
+    }
+
+    /// A box and its parent-relative location, rounded and unrounded.
+    type Move = (blitz_dom::NodeId, (f32, f32), (f32, f32));
+    let moves: Vec<Move> = doc
+        .tree()
+        .iter()
+        .filter_map(|(_, node)| {
+            let cb = node.oof_containing_block.get()?;
+            let parent = node.layout_parent.get()?;
+            if cb == parent || node.try_layout_data().is_none() {
+                return None;
+            }
+            let rel = |rounded| {
+                let own = origin(doc, node.id, rounded);
+                let base = origin(doc, parent, rounded);
+                (own.0 - base.0, own.1 - base.1)
+            };
+            Some((node.id, rel(true), rel(false)))
+        })
+        .collect();
+    for (id, rounded, unrounded) in moves {
+        if let Some(node) = doc.get_node_mut(id) {
+            let data = node.layout_data_mut();
+            data.final_layout.location = taffy::Point {
+                x: rounded.0,
+                y: rounded.1,
+            };
+            data.unrounded_layout.location = taffy::Point {
+                x: unrounded.0,
+                y: unrounded.1,
+            };
+        }
+    }
+}
+
 /// Re-run Taffy layout on every `position: fixed` subtree using the page area
 /// as available space. CSS 2.1 §10.1.5 specifies the initial containing block
 /// (viewport) as the CB for `position: fixed`, but `stylo_taffy::convert`

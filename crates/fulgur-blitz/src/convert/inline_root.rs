@@ -563,12 +563,13 @@ pub(super) fn extract_paragraph(
                         {
                             continue;
                         }
-                        // A float in the line is only a placeholder in
-                        // Parley's layout; Blitz places the float itself
-                        // (its Taffy layout, relative to this paragraph)
-                        // and wraps the lines around it. Draw it there, as
-                        // an ordinary box, not at the placeholder.
-                        if is_floated(box_node) {
+                        // A float or an absolutely positioned box in the
+                        // line is only a placeholder in Parley's layout;
+                        // Blitz places the box itself (its Taffy layout,
+                        // relative to this paragraph) and, for a float,
+                        // wraps the lines around it. Draw it there, as an
+                        // ordinary box, not at the placeholder.
+                        if is_floated(box_node) || positioned::is_absolutely_positioned(box_node) {
                             convert_node(doc, node_id, ctx, depth + 1, out);
                             continue;
                         }
