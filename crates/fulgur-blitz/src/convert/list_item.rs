@@ -646,7 +646,7 @@ mod tests {
             .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 0.0)])]));
         // Two glyphs, each x_advance=0.5, font_size=12 → shift = 2 × 0.5 × 12 = 12.
         let text_marker = LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
@@ -761,7 +761,7 @@ mod tests {
 
     fn make_text_run(x_offset: f32) -> LineItem {
         LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
@@ -891,7 +891,7 @@ mod tests {
         out.paragraphs
             .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 7.0)])]));
         let zero_glyph_marker = LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),

@@ -389,7 +389,7 @@ mod tests {
         // Text run at x_offset=3, font_size=10, glyph advance=5.
         // Before image w=20 → text run shifts to x=23.
         let run = ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
             variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
@@ -491,7 +491,7 @@ mod tests {
         // x_offset=2, font_size=4, glyphs=[advance=3, advance=5]
         // end_x = 2 + (3+5)*4 = 2 + 32 = 34
         let run = ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
             variations: Vec::new(),
             font_size: 4.0_f32.as_pt(),

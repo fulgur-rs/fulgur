@@ -282,7 +282,7 @@ pub(super) fn find_marker_font(
     marker: &Marker,
     assets: Option<&AssetBundle>,
     drawables: &crate::drawables::Drawables,
-) -> Option<(Arc<Vec<u8>>, u32)> {
+) -> Option<(crate::paragraph::FontBytes, u32)> {
     let marker_text = marker_to_string(marker);
     let check_chars: Vec<char> = marker_text.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -294,7 +294,7 @@ pub(super) fn find_marker_font(
                 if let Ok(font_ref) = skrifa::FontRef::from_index(font_arc, idx) {
                     let charmap = font_ref.charmap();
                     if check_chars.iter().all(|&c| charmap.map(c).is_some()) {
-                        return Some((Arc::clone(font_arc), idx));
+                        return Some((Arc::clone(font_arc).into(), idx));
                     }
                 } else {
                     break; // No more sub-fonts
@@ -315,7 +315,7 @@ pub(super) fn find_marker_font(
                     {
                         let charmap = font_ref.charmap();
                         if check_chars.iter().all(|c| charmap.map(*c).is_some()) {
-                            return Some((Arc::clone(&run.font_data), run.font_index));
+                            return Some((run.font_data.clone(), run.font_index));
                         }
                     }
                 }
@@ -341,7 +341,7 @@ pub(super) fn find_marker_font(
 /// (see `extract_marker_lines`).
 pub(super) fn shape_marker_with_skrifa(
     marker: &Marker,
-    font_data: &Arc<Vec<u8>>,
+    font_data: &crate::paragraph::FontBytes,
     font_index: u32,
     font_size: crate::units::Pt,
     color: [u8; 4],
@@ -373,7 +373,7 @@ pub(super) fn shape_marker_with_skrifa(
     }
 
     Some(ShapedGlyphRun {
-        font_data: Arc::clone(font_data),
+        font_data: font_data.clone(),
         font_index,
         variations: Vec::new(),
         font_size,
@@ -500,7 +500,7 @@ mod tests {
         let empty_bundle = AssetBundle::new();
 
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::clone(&font_data),
+            font_data: Arc::clone(&font_data).into(),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0.as_pt(),
@@ -571,7 +571,7 @@ mod tests {
         let bad_font = Arc::new(vec![0u8; 16]);
         let result = shape_marker_with_skrifa(
             &Marker::Char('•'),
-            &bad_font,
+            &Arc::clone(&bad_font).into(),
             0,
             12.0.as_pt(),
             [0, 0, 0, 255],
@@ -585,7 +585,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::Char('•'),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0.as_pt(),
             [255, 0, 0, 255],
@@ -606,7 +606,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::String("1. ".to_string()),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             10.0.as_pt(),
             [0, 0, 0, 255],
@@ -624,7 +624,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::String("A".to_string()),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0.as_pt(),
             [0, 0, 0, 255],
@@ -645,7 +645,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::String("AB".to_string()),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0.as_pt(),
             [0, 0, 0, 255],
@@ -722,7 +722,7 @@ mod tests {
         // font is available.
         let bad_font = Arc::new(vec![0u8; 16]);
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::clone(&bad_font),
+            font_data: Arc::clone(&bad_font).into(),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
@@ -762,7 +762,7 @@ mod tests {
         // and continue iterating rather than returning the non-covering font.
         let font_data = load_noto_sans_ttf();
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::clone(&font_data),
+            font_data: Arc::clone(&font_data).into(),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
@@ -807,7 +807,7 @@ mod tests {
         let result = shape_marker_with_skrifa(
             // marker_skrifa_text(Char(U+E000)) → "\u{E000} " (char + trailing space)
             &Marker::Char('\u{E000}'),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0_f32.as_pt(),
             [0, 0, 0, 255],

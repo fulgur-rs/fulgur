@@ -4658,7 +4658,7 @@ mod tests {
         link: Option<std::sync::Arc<crate::paragraph::LinkSpan>>,
     ) -> crate::paragraph::ShapedGlyphRun {
         crate::paragraph::ShapedGlyphRun {
-            font_data: std::sync::Arc::new(vec![]),
+            font_data: Vec::new().into(),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),

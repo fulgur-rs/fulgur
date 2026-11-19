@@ -95,7 +95,7 @@ pub struct ConvertContext<'a> {
     pub running_store: &'a RunningElementStore,
     pub assets: Option<&'a AssetBundle>,
     /// Cache font data by (data pointer address, font index) to avoid redundant .to_vec() copies.
-    pub(crate) font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
+    pub(crate) font_cache: HashMap<(usize, u32), crate::paragraph::FontBytes>,
     /// String-set entries from DOM walk, keyed by node_id for O(1) lookup.
     pub string_set_by_node: HashMap<usize, Vec<(String, String)>>,
     /// Counter operations from CounterPass, keyed by node_id for O(1) lookup.
@@ -135,19 +135,19 @@ pub struct ConvertContext<'a> {
 }
 
 impl ConvertContext<'_> {
-    /// Return a shared Arc for the given font data, caching by data pointer + index.
+    /// Return the given font's bytes, shared with Parley's blob (no copy),
+    /// caching by data pointer + index.
     ///
     /// Safety assumption: Parley font data pointers remain stable for the lifetime of
     /// this ConvertContext (scoped to a single `dom_to_drawables` call). HashMap is used
     /// (not BTreeMap) because this cache is lookup-only — iteration order does not
     /// affect PDF output.
-    fn get_or_insert_font(&mut self, font: &parley::FontData) -> Arc<Vec<u8>> {
+    fn get_or_insert_font(&mut self, font: &parley::FontData) -> crate::paragraph::FontBytes {
         let key = (font.data.data().as_ptr() as usize, font.index);
-        Arc::clone(
-            self.font_cache
-                .entry(key)
-                .or_insert_with(|| Arc::new(font.data.data().to_vec())),
-        )
+        self.font_cache
+            .entry(key)
+            .or_insert_with(|| crate::paragraph::FontBytes::from_blob(&font.data))
+            .clone()
     }
 }
 

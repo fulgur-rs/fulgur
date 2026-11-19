@@ -679,7 +679,7 @@ mod tests {
 
     fn make_text_run(font_data: Vec<u8>) -> LineItem {
         LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(font_data),
+            font_data: crate::paragraph::FontBytes::from(font_data),
             font_index: 0,
             variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
