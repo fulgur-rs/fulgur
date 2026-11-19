@@ -3913,4 +3913,164 @@ mod tests {
         );
         assert_eq!(result.pages, 1, "page must still be counted");
     }
+
+    // --- Tf operand coverage ---
+
+    /// Tf オペレータのオペランドが 0 個の場合（不正 PDF）はクラッシュせず、
+    /// それ以前のフォント状態でテキスト抽出を継続できる（line 562 分岐）。
+    #[test]
+    fn tf_with_no_operands_does_not_crash() {
+        use lopdf::Object;
+        use lopdf::content::{Content, Operation};
+
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec![Object::Name(b"F1".to_vec()), Object::Real(12.0)]),
+                Operation::new("Td", vec![Object::Real(72.0), Object::Real(720.0)]),
+                Operation::new("Tj", vec![Object::string_literal("before")]),
+                // Tf with 0 operands — if-let at line 553 yields None for operands.get(1),
+                // so the false branch at line 562 fires.
+                Operation::new("Tf", vec![]),
+                Operation::new("Tj", vec![Object::string_literal("after")]),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_bytes = content.encode().unwrap();
+        let result = inspect_bytes(&make_pdf_with_raw_content(content_bytes));
+        let texts: Vec<&str> = result.text_items.iter().map(|t| t.text.as_str()).collect();
+        assert!(
+            texts.contains(&"before"),
+            "text before malformed Tf must be extracted; got: {texts:?}"
+        );
+        assert_eq!(result.pages, 1);
+    }
+
+    // --- Form XObject coverage ---
+
+    /// Form XObject（Subtype=Form）を含むページでは画像アイテムが生成されず、
+    /// クラッシュも発生しない（line 867: Subtype!=Image 分岐、line 1044: image_xobjects miss 分岐）。
+    #[test]
+    fn form_xobject_is_not_extracted_as_image() {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+
+        // Form XObject — Subtype=Form ではなく Image ではないので collect_image_xobjects
+        // が insert をスキップし、line 867 の分岐（if subtype=="Image" の else 側）が踏まれる。
+        let form_id = doc.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Form",
+            },
+            b"".to_vec(),
+        ));
+
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! {
+                "Form1" => Object::Reference(form_id),
+            },
+        });
+
+        // Do /Form1 — image_xobjects には "Form1" が存在しないので
+        // line 1044 の分岐（image_xobjects.get(name) == None の側）が踏まれる。
+        let content = Content {
+            operations: vec![Operation::new("Do", vec![Object::Name(b"Form1".to_vec())])],
+        };
+        let content_bytes = content.encode().unwrap();
+        let content_id = doc.add_object(Stream::new(dictionary! {}, content_bytes));
+
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.images.is_empty(),
+            "Form XObject must not produce image items"
+        );
+        assert_eq!(result.pages, 1);
+    }
+
+    /// XObject リソース辞書にストリームでないエントリがある場合はスキップされ、
+    /// クラッシュも発生しない（line 869: dereference が Stream でない場合の分岐）。
+    #[test]
+    fn non_stream_xobject_in_resources_is_skipped() {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut doc = Document::with_version("1.5");
+        let pages_id = doc.new_object_id();
+
+        // XObject dict に Integer を直接置く（Reference ではなく非 Stream オブジェクト）。
+        // dereference は Ok を返すが Object::Stream にマッチしないため line 869 が踏まれる。
+        let resources_id = doc.add_object(dictionary! {
+            "XObject" => dictionary! {
+                "NotAStream" => Object::Integer(99),
+            },
+        });
+
+        let content_id = doc.add_object(Stream::new(dictionary! {}, b"".to_vec()));
+        let page_id = doc.add_object(dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => resources_id,
+            "MediaBox" => vec![
+                Object::Integer(0),
+                Object::Integer(0),
+                Object::Integer(595),
+                Object::Integer(842),
+            ],
+        });
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![Object::Reference(page_id)],
+                "Count" => Object::Integer(1),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+
+        let mut buf = Vec::new();
+        doc.save_to(&mut buf).unwrap();
+
+        let result = inspect_bytes(&buf);
+        assert!(
+            result.images.is_empty(),
+            "non-stream XObject must not produce image items"
+        );
+        assert_eq!(result.pages, 1);
+    }
 }
