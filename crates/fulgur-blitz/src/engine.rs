@@ -1505,6 +1505,12 @@ impl EngineBuilder {
         self
     }
 
+    /// See [`Config::pdf_a`](crate::Config::pdf_a).
+    pub fn pdf_a(mut self, level: crate::PdfA) -> Self {
+        self.config_builder = self.config_builder.pdf_a(level);
+        self
+    }
+
     pub fn authors(mut self, authors: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.config_builder = self.config_builder.authors(authors);
         self

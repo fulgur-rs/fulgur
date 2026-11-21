@@ -36,11 +36,16 @@ pub fn render_v2(
     anchor_map: Option<&AnchorMap>,
     implicit_href_by_page: &BTreeMap<usize, String>,
 ) -> Result<Vec<u8>> {
+    if config.pdf_ua && config.pdf_a.is_some() {
+        return Err(Error::PdfGeneration(
+            "PDF/UA and PDF/A cannot be combined".into(),
+        ));
+    }
     let mut document = if config.effective_tagging() {
         let configuration = if config.pdf_ua {
             Configuration::new_with_validator(Validator::UA1)
         } else {
-            Configuration::new()
+            pdf_a_configuration(config)
         };
         krilla::Document::new_with(SerializeSettings {
             enable_tagging: true,
@@ -48,7 +53,10 @@ pub fn render_v2(
             ..serialize_settings
         })
     } else {
-        krilla::Document::new_with(serialize_settings)
+        krilla::Document::new_with(SerializeSettings {
+            configuration: pdf_a_configuration(config),
+            ..serialize_settings
+        })
     };
 
     let mut bookmark_collector = if config.effective_bookmarks() {
@@ -425,9 +433,65 @@ pub fn render_v2(
     }
 
     document.set_metadata(build_metadata(config, html_title.as_deref()));
-    document
-        .finish()
-        .map_err(|e| Error::PdfGeneration(format!("{e:?}")))
+    document.finish().map_err(|e| match (e, config.pdf_a) {
+        (krilla::error::KrillaError::Validation(errors), Some(level)) => {
+            Error::PdfGeneration(pdf_a_error_message(level, &errors))
+        }
+        (e, _) => Error::PdfGeneration(format!("{e:?}")),
+    })
+}
+
+/// The krilla configuration for `config.pdf_a`: its validator, or the
+/// default configuration when no PDF/A level is set.
+fn pdf_a_configuration(config: &Config) -> Configuration {
+    use crate::PdfA;
+    match config.pdf_a {
+        None => Configuration::new(),
+        Some(level) => Configuration::new_with_validator(match level {
+            PdfA::A1b => Validator::A1_B,
+            PdfA::A2b => Validator::A2_B,
+            PdfA::A2u => Validator::A2_U,
+            PdfA::A3b => Validator::A3_B,
+            PdfA::A3u => Validator::A3_U,
+        }),
+    }
+}
+
+/// Explains why a document cannot be written as PDF/A `level`, one line
+/// per kind of problem.
+fn pdf_a_error_message(
+    level: crate::PdfA,
+    errors: &[krilla::configure::ValidationError],
+) -> String {
+    use krilla::configure::ValidationError as V;
+    let mut lines: Vec<String> = Vec::new();
+    for e in errors {
+        let line = match e {
+            V::MissingDocumentDate => "the document has no creation date".to_string(),
+            V::Transparency(_) => {
+                "the document uses transparency, which PDF/A-1 does not allow; use 2b or 3b"
+                    .to_string()
+            }
+            V::ContainsNotDefGlyph(_, _, text) => {
+                format!("no font has a glyph for {text:?}")
+            }
+            V::NoCodepointMapping(..) | V::InvalidCodepointMapping(..) => {
+                "some glyphs do not map to Unicode text; use the b level".to_string()
+            }
+            V::RestrictedLicense(_) => "a font's license does not allow embedding".to_string(),
+            V::ImageInterpolation(_) => "an image asks for interpolation".to_string(),
+            V::EmbeddedPDF(_) => "the document embeds another PDF".to_string(),
+            other => format!("{other:?}"),
+        };
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    format!(
+        "cannot write PDF/A-{}: {}",
+        level.as_str(),
+        lines.join("; ")
+    )
 }
 
 /// Phase 4 v2 per-page draw dispatcher. Walks every `(node_id,
@@ -6664,6 +6728,81 @@ mod tests {
             )
             .expect("render");
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- PDF/A (Config::pdf_a) ---
+
+    fn render_pdf_a(level: crate::PdfA, date: Option<&str>, html: &str) -> Result<Vec<u8>> {
+        let mut builder = crate::engine::Engine::builder().pdf_a(level);
+        if let Some(date) = date {
+            builder = builder.creation_date(date);
+        }
+        builder.build().render(html)
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
+    }
+
+    #[test]
+    fn pdf_a_2b_writes_the_conformance_level() {
+        let pdf = render_pdf_a(
+            crate::PdfA::A2b,
+            Some("2026-11-21T10:00:00"),
+            "<!doctype html><p>Invoice</p>",
+        )
+        .expect("render");
+        assert!(contains(&pdf, "<pdfaid:part>2</pdfaid:part>"));
+        assert!(contains(&pdf, "<pdfaid:conformance>B</pdfaid:conformance>"));
+        assert!(contains(&pdf, "/OutputIntents"));
+    }
+
+    #[test]
+    fn pdf_a_3u_writes_the_conformance_level() {
+        let pdf = render_pdf_a(
+            crate::PdfA::A3u,
+            Some("2026-11-21"),
+            "<!doctype html><p>Invoice</p>",
+        )
+        .expect("render");
+        assert!(contains(&pdf, "<pdfaid:part>3</pdfaid:part>"));
+        assert!(contains(&pdf, "<pdfaid:conformance>U</pdfaid:conformance>"));
+    }
+
+    #[test]
+    fn pdf_a_without_a_creation_date_is_refused() {
+        let err = render_pdf_a(crate::PdfA::A2b, None, "<!doctype html><p>x</p>")
+            .expect_err("PDF/A needs a date");
+        let msg = err.to_string();
+        assert!(msg.contains("PDF/A-2b"), "{msg}");
+        assert!(msg.contains("creation date"), "{msg}");
+    }
+
+    #[test]
+    fn pdf_a_1b_refuses_transparency() {
+        let err = render_pdf_a(
+            crate::PdfA::A1b,
+            Some("2026-11-21"),
+            r#"<!doctype html><div style="opacity:.5;background:red;height:20px"></div>"#,
+        )
+        .expect_err("PDF/A-1 has no transparency");
+        assert!(err.to_string().contains("transparency"), "{err}");
+    }
+
+    #[test]
+    fn pdf_a_and_pdf_ua_cannot_be_combined() {
+        let err = crate::engine::Engine::builder()
+            .pdf_a(crate::PdfA::A2b)
+            .pdf_ua(true)
+            .lang("en")
+            .title("t")
+            .creation_date("2026-11-21")
+            .build()
+            .render("<!doctype html><p>x</p>")
+            .expect_err("one validator only");
+        assert!(err.to_string().contains("cannot be combined"), "{err}");
     }
 
     // --- try_start_tagged: PdfTag::Li branch + draw_list_item_marker_tagged ---

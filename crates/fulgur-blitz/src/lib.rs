@@ -341,7 +341,7 @@ pub mod template;
 mod test_fonts;
 
 pub use asset::AssetBundle;
-pub use config::{Config, ConfigBuilder, Margin, PageSize};
+pub use config::{Config, ConfigBuilder, Margin, PageSize, PdfA};
 pub use engine::{Engine, EngineBuilder, LayoutOutput};
 pub use error::{Error, Result};
 pub use font_aliases::{FontSubstitutes, set_font_substitutes};

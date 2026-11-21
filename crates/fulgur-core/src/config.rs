@@ -151,6 +151,57 @@ impl Default for Margin {
     }
 }
 
+/// A PDF/A conformance level (ISO 19005), for long-term archiving.
+///
+/// The letter is the conformance: `b` keeps the visual appearance, `u`
+/// also requires every glyph to map to Unicode, so text can be extracted.
+/// PDF/A-1 does not allow transparency; PDF/A-3 also allows embedded files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfA {
+    A1b,
+    A2b,
+    A2u,
+    A3b,
+    A3u,
+}
+
+impl PdfA {
+    /// The level as it is usually written: `"1b"`, `"2b"`, `"2u"`, …
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PdfA::A1b => "1b",
+            PdfA::A2b => "2b",
+            PdfA::A2u => "2u",
+            PdfA::A3b => "3b",
+            PdfA::A3u => "3u",
+        }
+    }
+}
+
+impl std::str::FromStr for PdfA {
+    type Err = String;
+
+    /// Parses `"2b"`, `"A-2b"`, `"pdf/a-2b"` and similar, ignoring case.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let lower = s.to_ascii_lowercase();
+        let level = lower
+            .trim_start_matches("pdf/a")
+            .trim_start_matches("pdfa")
+            .trim_start_matches('a')
+            .trim_start_matches('-');
+        match level {
+            "1b" => Ok(PdfA::A1b),
+            "2b" => Ok(PdfA::A2b),
+            "2u" => Ok(PdfA::A2u),
+            "3b" => Ok(PdfA::A3b),
+            "3u" => Ok(PdfA::A3u),
+            _ => Err(format!(
+                "unknown PDF/A level {s:?}; expected 1b, 2b, 2u, 3b or 3u"
+            )),
+        }
+    }
+}
+
 /// Tracks which Config fields were explicitly set by the caller (CLI/API).
 /// When true, the field takes precedence over CSS @page declarations.
 #[derive(Debug, Clone, Copy, Default)]
@@ -181,6 +232,10 @@ pub struct Config {
     pub enable_tagging: bool,
     /// Enable PDF/UA-1 conformance (implies enable_tagging).
     pub pdf_ua: bool,
+    /// Write a PDF/A file of this level and check that the content allows
+    /// it. PDF/A needs a creation date ([`creation_date`](Self::creation_date))
+    /// and cannot be combined with `pdf_ua`.
+    pub pdf_a: Option<PdfA>,
     /// Viewport height in CSS px for `vh` units and percentage heights on
     /// the root. `None` uses the page content height. Pagination always
     /// uses the page, so a tall page with a screen-sized viewport lays a
@@ -221,6 +276,7 @@ impl Default for Config {
             bookmarks: false,
             enable_tagging: false,
             pdf_ua: false,
+            pdf_a: None,
             viewport_height: None,
             scale: 1.0,
             shrink_to_fit: None,
@@ -451,6 +507,12 @@ impl ConfigBuilder {
 
     pub fn pdf_ua(mut self, enabled: bool) -> Self {
         self.config.pdf_ua = enabled;
+        self
+    }
+
+    /// See [`Config::pdf_a`].
+    pub fn pdf_a(mut self, level: PdfA) -> Self {
+        self.config.pdf_a = Some(level);
         self
     }
 
@@ -691,6 +753,30 @@ mod tests {
     fn config_builder_pdf_ua_sets_flag() {
         let config = Config::builder().pdf_ua(true).build();
         assert!(config.pdf_ua);
+    }
+
+    #[test]
+    fn pdf_a_levels_parse_in_their_usual_spellings() {
+        for (text, level) in [
+            ("2b", PdfA::A2b),
+            ("A-2B", PdfA::A2b),
+            ("pdf/a-3u", PdfA::A3u),
+            ("PDFA1b", PdfA::A1b),
+            ("2u", PdfA::A2u),
+            ("3b", PdfA::A3b),
+        ] {
+            assert_eq!(text.parse::<PdfA>(), Ok(level), "{text}");
+            assert_eq!(level.as_str().parse::<PdfA>(), Ok(level));
+        }
+        assert!("1a".parse::<PdfA>().is_err());
+        assert!("4".parse::<PdfA>().is_err());
+    }
+
+    #[test]
+    fn config_builder_pdf_a_sets_the_level() {
+        assert_eq!(Config::default().pdf_a, None);
+        let config = Config::builder().pdf_a(PdfA::A3b).build();
+        assert_eq!(config.pdf_a, Some(PdfA::A3b));
     }
 
     #[test]
