@@ -65,6 +65,18 @@ impl MarginBoxPosition {
         }
     }
 
+    /// The box's initial `vertical-align` (css-page-3 §5.3) as a flex
+    /// `justify-content` along the box's height: the boxes of the top and
+    /// bottom edges and the corners centre their content, and the boxes of
+    /// the left and right edges put it at their top, middle or bottom.
+    pub fn default_justify_content(self) -> &'static str {
+        match self {
+            Self::LeftTop | Self::RightTop => "flex-start",
+            Self::LeftBottom | Self::RightBottom => "flex-end",
+            _ => "center",
+        }
+    }
+
     /// Which edge this position belongs to, or `None` for corner boxes.
     pub fn edge(&self) -> Option<Edge> {
         match self {
@@ -415,6 +427,23 @@ pub fn compute_edge_layout(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn default_vertical_position_follows_css_page() {
+        use MarginBoxPosition as P;
+        for (pos, justify) in [
+            (P::TopLeftCorner, "center"),
+            (P::TopCenter, "center"),
+            (P::BottomRight, "center"),
+            (P::LeftTop, "flex-start"),
+            (P::LeftMiddle, "center"),
+            (P::LeftBottom, "flex-end"),
+            (P::RightTop, "flex-start"),
+            (P::RightBottom, "flex-end"),
+        ] {
+            assert_eq!(pos.default_justify_content(), justify, "{pos:?}");
+        }
+    }
 
     #[test]
     fn default_text_align_follows_css_page() {

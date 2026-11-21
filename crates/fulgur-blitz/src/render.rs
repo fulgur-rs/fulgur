@@ -4060,15 +4060,25 @@ impl<'a> MarginBoxRenderer<'a> {
                 .copied()
                 .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
 
+            // The vertical position is part of the key: boxes with the same
+            // content and size can sit at different heights.
             let cache_key = (
-                html.clone(),
+                format!("{}|{html}", pos.default_justify_content()),
                 width_key(rect.width.to_f32()),
                 width_key(rect.height.to_f32()),
             );
             if !self.render_cache.contains_key(&cache_key) {
+                // The body fills the box, and the content sits at the box's
+                // default vertical position (middle for the top and bottom
+                // edges).
                 let render_html = format!(
-                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
-                    self.html_open, self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\
+                     height:100vh;display:flex;flex-direction:column;\
+                     justify-content:{};\">{}</body></html>",
+                    self.html_open,
+                    self.margin_css,
+                    pos.default_justify_content(),
+                    html
                 );
                 let mut render_doc = crate::blitz_adapter::parse_and_layout(
                     &render_html,
