@@ -1474,6 +1474,13 @@ impl EngineBuilder {
         self
     }
 
+    /// Clip page content to the page area, as Chromium does. See
+    /// `Config::clip_to_page_area`.
+    pub fn clip_to_page_area(mut self, clip: bool) -> Self {
+        self.config_builder = self.config_builder.clip_to_page_area(clip);
+        self
+    }
+
     pub fn author(mut self, author: impl Into<String>) -> Self {
         self.config_builder = self.config_builder.author(author);
         self

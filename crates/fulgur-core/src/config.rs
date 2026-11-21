@@ -196,6 +196,11 @@ pub struct Config {
     /// out again at a lower [`scale`](Self::scale), down to this minimum, as
     /// browsers do when printing. `None` (the default) never shrinks.
     pub shrink_to_fit: Option<f32>,
+    /// Clip the page content to the page area, the page inside its
+    /// margins, as Chromium does when printing: content that overflows
+    /// into the margins is not drawn. The root and body backgrounds and the
+    /// `@page` margin boxes are not clipped. Off by default.
+    pub clip_to_page_area: bool,
 }
 
 impl Default for Config {
@@ -219,6 +224,7 @@ impl Default for Config {
             viewport_height: None,
             scale: 1.0,
             shrink_to_fit: None,
+            clip_to_page_area: false,
         }
     }
 }
@@ -463,6 +469,12 @@ impl ConfigBuilder {
     /// See [`Config::shrink_to_fit`].
     pub fn shrink_to_fit(mut self, min_scale: f32) -> Self {
         self.config.shrink_to_fit = Some(min_scale);
+        self
+    }
+
+    /// See [`Config::clip_to_page_area`].
+    pub fn clip_to_page_area(mut self, clip: bool) -> Self {
+        self.config.clip_to_page_area = clip;
         self
     }
 

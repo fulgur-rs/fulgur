@@ -300,6 +300,18 @@ pub fn render_v2(
                 } else {
                     resolved_margin.top
                 };
+                // Content overflowing the page area into the margins is
+                // cut off, as Chromium prints it.
+                let page_area_clip = if config.clip_to_page_area {
+                    page_area_path(content_area)
+                } else {
+                    None
+                };
+                if let Some(clip) = &page_area_clip {
+                    canvas
+                        .surface
+                        .push_clip_path(clip, &krilla::paint::FillRule::default());
+                }
                 draw_v2_page(
                     &mut canvas,
                     page_idx as u32,
@@ -312,6 +324,9 @@ pub fn render_v2(
                     &opacity_wrapped_descendants,
                     page_node_ids,
                 );
+                if page_area_clip.is_some() {
+                    canvas.surface.pop();
+                }
             }
             // Paint margin boxes after body content so page headers /
             // footers are not hidden by page-filling body backgrounds.
@@ -435,6 +450,19 @@ pub fn render_v2(
 /// renderer width, and body-link annotation clip rect — so a future
 /// change to how `resolved_margin` subtracts from `page_size` shifts
 /// all three together instead of leaving one behind.
+/// The page area as a clip path; `None` when it is empty.
+fn page_area_path(area: crate::draw_primitives::Rect) -> Option<krilla::geom::Path> {
+    let rect = krilla::geom::Rect::from_xywh(
+        area.x.to_f32(),
+        area.y.to_f32(),
+        area.width.to_f32(),
+        area.height.to_f32(),
+    )?;
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    pb.finish()
+}
+
 fn resolved_content_area(
     page_size: crate::config::PageSize,
     resolved_margin: crate::config::Margin,
