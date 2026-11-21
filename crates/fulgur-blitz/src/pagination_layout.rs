@@ -633,7 +633,10 @@ impl<'a> PaginationLayoutTree<'a> {
             } else {
                 0.0
             };
-            let child_w = if layout.size.width > 0.0 {
+            // A box without a layout falls back to its container's width; a
+            // laid-out box keeps a zero width (an empty table column), which
+            // would otherwise count as overflowing the page by that width.
+            let child_w = if layout.size.width > 0.0 || layout.size.height > 0.0 {
                 layout.size.width
             } else {
                 body_w
@@ -2817,7 +2820,10 @@ fn fragment_block_subtree_inner(
         } else {
             0.0
         };
-        let child_w = if layout.size.width > 0.0 {
+        // A box without a layout falls back to its container's width; a
+        // laid-out box keeps a zero width (an empty table column), which
+        // would otherwise count as overflowing the page by that width.
+        let child_w = if layout.size.width > 0.0 || layout.size.height > 0.0 {
             layout.size.width
         } else {
             parent_w
