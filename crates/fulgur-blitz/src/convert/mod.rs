@@ -999,7 +999,9 @@ fn shape_paragraph_glyph_runs(
                         id: g.id,
                         x_advance: ShapedGlyph::normalize_by_font_size(g.advance, font_size_parley),
                         x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
-                        y_offset: ShapedGlyph::normalize_by_font_size(g.y, font_size_parley),
+                        // Parley's `y` grows downwards; krilla's `y_offset` is the
+                        // font's, which grows upwards (marks below the baseline).
+                        y_offset: ShapedGlyph::normalize_by_font_size(-g.y, font_size_parley),
                         text_range,
                     });
                 }

@@ -7353,3 +7353,33 @@ fn middle_aligned_cell_text_is_centred_in_the_row() {
     assert!((65.0..75.0).contains(&half), "middle: {top} {mid}");
     assert!((130.0..145.0).contains(&full), "bottom: {top} {bot}");
 }
+
+/// Marks positioned by GPOS keep their direction. Over a capital, Noto Sans
+/// raises a combining diaeresis to the capital's anchor. Parley reports glyph
+/// offsets growing downwards; the PDF glyph's `y_offset` grows upwards, as in
+/// the font, so the raised mark has a positive offset. With the sign lost,
+/// marks above went below and marks below went above: Arabic dots in Noto
+/// Naskh Arabic floated over the letters.
+#[test]
+fn combining_mark_over_a_capital_is_raised() {
+    let d = noto_engine().build_drawables_for_testing_no_gcpm(
+        "<!DOCTYPE html><html><body><p>Q\u{0308}</p></body></html>",
+    );
+    let glyphs: Vec<_> = d
+        .paragraphs
+        .iter()
+        .flat_map(|(_, p)| p.lines.iter())
+        .flat_map(|line| line.items.iter())
+        .filter_map(|item| match item {
+            fulgur::paragraph::LineItem::Text(run) => Some(run.glyphs.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(glyphs.len(), 2, "A and the mark: {glyphs:?}");
+    assert!(
+        glyphs[1].y_offset > 0.05,
+        "the diaeresis must be raised, y_offset {}",
+        glyphs[1].y_offset
+    );
+}
