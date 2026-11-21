@@ -14,21 +14,22 @@
 //! wired into Taffy via `compute_leaf_layout`; multicol uses the same
 //! mechanism one layer up.
 
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::units::F32Units;
-use blitz_dom::BaseDocument;
+use blitz_dom::{BaseDocument, LayoutPassState};
 use std::collections::BTreeMap;
 use taffy::{
-    AvailableSpace, CacheTree, CollapsibleMarginSet, CoreStyle, LayoutPartialTree, Line, NodeId,
-    Point, RequestedAxis, ResolveOrZero, RoundTree, RunMode, Size, SizingMode, TraversePartialTree,
-    TraverseTree,
+    AvailableSpace, CacheTree, CollapsibleMarginSet, CoreStyle, LayoutContainingBlock,
+    LayoutPartialTree, Line, NodeId, Point, RequestedAxis, ResolveOrZero, RoundTree, RunMode, Size,
+    SizingMode, TraversePartialTree, TraverseTree,
 };
 
 /// Per-column slice of an inline-root paragraph distributed across
 /// columns by `layout_column_group`.
 ///
 /// `line_range.is_empty()` is the **placeholder marker**: the entry was
-/// padded into `ParagraphSplitEntry::column_slices` to keep the vector
-/// length equal to `ColumnGroupGeometry.n`, and the column receives no
+/// padded into `ParagraphSplitEntry::column_slices` (self-inline-root
+/// containers keep one entry per column), and the column receives no
 /// content from this paragraph. In that case `origin` and `size` are
 /// both zero (`Default` values) — consumers MUST check
 /// `line_range.is_empty()` before reading them. For non-empty slices,
@@ -51,8 +52,11 @@ pub struct ColumnLineSlice {
 }
 
 /// Plan for one paragraph distributed across `ColumnGroupGeometry`'s
-/// columns. `column_slices.len() == ColumnGroupGeometry.n` always; entries
-/// for unused columns have empty `line_range`.
+/// columns. From `layout_column_group`, `column_slices` holds one slice
+/// per column the paragraph reaches, in line order (columns of later rows,
+/// when the column set breaks across pages, included). From
+/// `layout_self_inline_root_container` it holds one entry per column,
+/// with empty `line_range` for unused columns.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ParagraphSplitEntry {
     /// DOM `usize` NodeId whose `inline_layout_data` was sliced. In Case A
@@ -104,6 +108,31 @@ pub struct ColumnGroupGeometry {
     /// Inline-root paragraphs distributed across the columns of this
     /// group. Empty when no child paragraph needed splitting.
     pub paragraph_splits: Vec<ParagraphSplitEntry>,
+    /// Boxes with a border, padding or background that break across the
+    /// columns of this group, in node order.
+    pub box_splits: Vec<BoxSplitEntry>,
+}
+
+/// A box with a border, padding or background broken across columns. It is
+/// painted as one box `height` tall, sliced: each fragment shows the part
+/// of the box from `offset` down, clipped to the fragment's rectangle
+/// (`box-decoration-break: slice`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxSplitEntry {
+    pub source_node_id: usize,
+    /// Sum of the fragments' heights.
+    pub height: crate::units::Px,
+    pub fragments: Vec<BoxFragment>,
+}
+
+/// One column's part of a [`BoxSplitEntry`]. `origin` is in the same frame
+/// as [`ColumnLineSlice::origin`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BoxFragment {
+    pub origin: taffy::Point<crate::units::Px>,
+    pub size: taffy::Size<crate::units::Px>,
+    /// Height of the box above this fragment (in earlier columns).
+    pub offset: crate::units::Px,
 }
 
 /// Full per-container multicol geometry record.
@@ -144,15 +173,27 @@ pub(crate) fn partition_children_into_segments(
     doc: &BaseDocument,
     container_id: usize,
 ) -> Vec<Segment> {
+    // Layout children, when Blitz built them: text and inline content
+    // mixed with blocks sits in anonymous block wrappers there, which have
+    // the styles and layout data the column layout reads. The bare text
+    // nodes in the DOM list have neither.
     let children: Vec<usize> = doc
-        .get_node(container_id)
-        .map(|n| n.children.clone())
+        .get_node(crate::blitz_adapter::bid(container_id))
+        .map(|n| {
+            let layout_children = n.layout_children.borrow();
+            crate::blitz_adapter::uids(
+                layout_children
+                    .as_deref()
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or(&n.children),
+            )
+        })
         .unwrap_or_default();
 
     let mut out: Vec<Segment> = Vec::new();
     let mut group: Vec<NodeId> = Vec::new();
     for child_id in children {
-        let Some(child_node) = doc.get_node(child_id) else {
+        let Some(child_node) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
         // Skip text nodes that are entirely whitespace — they're HTML
@@ -195,7 +236,9 @@ pub(crate) fn partition_children_into_segments(
 /// owning `ColumnStyleTable` alive across both this pass and the subsequent
 /// convert pass.
 pub struct FulgurLayoutTree<'a> {
-    pub(crate) doc: &'a mut BaseDocument,
+    /// Blitz's layout pass over the document. Derefs to `BaseDocument`, and
+    /// carries Blitz's Taffy tree impls that this wrapper delegates to.
+    pub(crate) doc: LayoutPassState<'a>,
     // Read by `compute_multicol_layout` to resolve `column-fill` before
     // delegating to `layout_column_group`. Populated by the engine via
     // `extract_column_style_table` before the multicol pass runs.
@@ -207,6 +250,30 @@ pub struct FulgurLayoutTree<'a> {
     /// it into the convert pipeline. `BTreeMap` keeps iteration order
     /// deterministic across runs.
     pub(crate) geometry: MulticolGeometryTable,
+    /// Containers that break across pages, and where they start: their
+    /// column sets are filled page by page (see [`PagedStart`]).
+    pub(crate) paged: BTreeMap<usize, PagedStart>,
+}
+
+/// Where a multicol container that breaks across pages starts. Its column
+/// sets then fill each page's columns to the page end, and only the last
+/// page's columns are balanced (CSS Multi-column 1 §8.1, `column-fill`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PagedStart {
+    /// Page content height, in CSS px.
+    pub page_h: f32,
+    /// Distance from the top of the page's content area to the
+    /// container's border-box top, in CSS px.
+    pub top_in_page: f32,
+}
+
+/// The column rows of a column set that breaks across pages: the first
+/// row ends `first_h` below the set's top, every later one is `page_h`
+/// tall.
+#[derive(Clone, Copy, Debug)]
+struct Paging {
+    first_h: f32,
+    page_h: f32,
 }
 
 /// One-shot entry used by the render pipeline after `blitz_adapter::resolve`.
@@ -228,15 +295,30 @@ pub fn run_pass(
     tree.take_geometry()
 }
 
+/// Lay out again the multicol containers in `paged`, filling their columns
+/// page by page from the given start. Other containers keep their layout.
+/// Returns their new geometry.
+pub fn run_paged_pass(
+    doc: &mut BaseDocument,
+    column_styles: &crate::column_css::ColumnStyleTable,
+    paged: &BTreeMap<usize, PagedStart>,
+) -> MulticolGeometryTable {
+    let mut tree = FulgurLayoutTree::new(doc, column_styles);
+    tree.paged = paged.clone();
+    tree.layout_multicol_subtrees_in(Some(paged));
+    tree.take_geometry()
+}
+
 impl<'a> FulgurLayoutTree<'a> {
     pub fn new(
         doc: &'a mut BaseDocument,
         column_styles: &'a crate::column_css::ColumnStyleTable,
     ) -> Self {
         Self {
-            doc,
+            doc: LayoutPassState::new(doc),
             column_styles,
             geometry: BTreeMap::new(),
+            paged: BTreeMap::new(),
         }
     }
 
@@ -269,21 +351,30 @@ impl<'a> FulgurLayoutTree<'a> {
     ///
     /// Returns the number of multicol subtrees laid out.
     pub fn layout_multicol_subtrees(&mut self) -> usize {
-        let multicol_ids = collect_multicol_node_ids(self.doc);
+        self.layout_multicol_subtrees_in(None)
+    }
+
+    /// [`Self::layout_multicol_subtrees`] restricted to the containers
+    /// keyed in `only`, when given.
+    fn layout_multicol_subtrees_in(&mut self, only: Option<&BTreeMap<usize, PagedStart>>) -> usize {
+        let mut multicol_ids = collect_multicol_node_ids(&self.doc);
+        if let Some(only) = only {
+            multicol_ids.retain(|id| only.contains_key(id));
+        }
         for id in multicol_ids.iter().rev() {
             let node_id = NodeId::from(*id);
             let prior_layout = self.doc.get_unrounded_layout(node_id);
             let prior_final = self
                 .doc
-                .get_node(*id)
-                .map(|n| n.final_layout)
+                .get_node(crate::blitz_adapter::bid(*id))
+                .map(|n| *n.final_layout_or_zero())
                 .unwrap_or_default();
             let prior = prior_layout.size;
             let available_space = taffy::Size {
                 width: AvailableSpace::Definite(prior.width),
                 height: AvailableSpace::Definite(prior.height.max(1.0)),
             };
-            clear_subtree_cache(self.doc, *id);
+            clear_subtree_cache(&mut self.doc, *id);
             taffy::compute_root_layout(self, node_id, available_space);
             taffy::round_layout(self, node_id);
 
@@ -292,15 +383,17 @@ impl<'a> FulgurLayoutTree<'a> {
             // multicol is NOT a root in the full document tree; it sits
             // at the position blitz originally placed it. Restore that
             // position in both unrounded and final layouts.
-            if let Some(node) = self.doc.get_node_mut(*id) {
-                node.unrounded_layout.location = prior_layout.location;
-                node.final_layout.location = prior_final.location;
+            if let Some(node) = self.doc.get_node_mut(crate::blitz_adapter::bid(*id)) {
+                if let Some(ld) = node.try_layout_data_mut() {
+                    ld.unrounded_layout.location = prior_layout.location;
+                    ld.final_layout.location = prior_final.location;
+                }
             }
 
             let new_h = self.doc.get_unrounded_layout(node_id).size.height;
             let delta = new_h - prior.height;
             if delta.abs() > 0.01 {
-                propagate_height_delta(self.doc, *id, delta);
+                propagate_height_delta(&mut self.doc, *id, delta);
             }
         }
         multicol_ids.len()
@@ -308,16 +401,16 @@ impl<'a> FulgurLayoutTree<'a> {
 
     fn is_multicol(&self, node_id: NodeId) -> bool {
         self.doc
-            .get_node(usize::from(node_id))
+            .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
             .is_some_and(crate::blitz_adapter::is_multicol_container)
     }
 }
 
-// ── Trait delegation to BaseDocument ─────────────────────────────────────
+// ── Trait delegation to Blitz's LayoutPassState ──────────────────────────
 
-impl TraversePartialTree for FulgurLayoutTree<'_> {
+impl<'d> TraversePartialTree for FulgurLayoutTree<'d> {
     type ChildIter<'a>
-        = <BaseDocument as TraversePartialTree>::ChildIter<'a>
+        = <LayoutPassState<'d> as TraversePartialTree>::ChildIter<'a>
     where
         Self: 'a;
 
@@ -340,29 +433,18 @@ impl CacheTree for FulgurLayoutTree<'_> {
     fn cache_get(
         &self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        input: &taffy::LayoutInput,
     ) -> Option<taffy::LayoutOutput> {
-        self.doc
-            .cache_get(node_id, known_dimensions, available_space, run_mode)
+        self.doc.cache_get(node_id, input)
     }
 
     fn cache_store(
         &mut self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        input: &taffy::LayoutInput,
         layout_output: taffy::LayoutOutput,
     ) {
-        self.doc.cache_store(
-            node_id,
-            known_dimensions,
-            available_space,
-            run_mode,
-            layout_output,
-        );
+        self.doc.cache_store(node_id, input, layout_output);
     }
 
     fn cache_clear(&mut self, node_id: NodeId) {
@@ -370,9 +452,9 @@ impl CacheTree for FulgurLayoutTree<'_> {
     }
 }
 
-impl LayoutPartialTree for FulgurLayoutTree<'_> {
+impl<'d> LayoutPartialTree for FulgurLayoutTree<'d> {
     type CoreContainerStyle<'a>
-        = &'a taffy::Style<style::Atom>
+        = <LayoutPassState<'d> as LayoutPartialTree>::CoreContainerStyle<'a>
     where
         Self: 'a;
 
@@ -399,12 +481,32 @@ impl LayoutPartialTree for FulgurLayoutTree<'_> {
             return compute_multicol_layout(self, node_id, inputs);
         }
         // Delegate to blitz for everything else. Recursion inside blitz stays
-        // within BaseDocument's dispatch — nested multicol under an
-        // inline-root / table / replaced subtree is not intercepted by this
-        // scaffold. Top-level and nested-within-block multicols *are*
-        // intercepted because Taffy's block layout recurses via `tree`,
-        // which is our wrapper.
+        // within its own dispatch — nested multicol under an inline-root /
+        // table / replaced subtree is not intercepted by this scaffold.
         self.doc.compute_child_layout(node_id, inputs)
+    }
+}
+
+impl<'d> LayoutContainingBlock for FulgurLayoutTree<'d> {
+    type OofItemStyle<'a>
+        = <LayoutPassState<'d> as LayoutContainingBlock>::OofItemStyle<'a>
+    where
+        Self: 'a;
+
+    fn get_oof_item_style(&self, node_id: NodeId) -> Self::OofItemStyle<'_> {
+        self.doc.get_oof_item_style(node_id)
+    }
+
+    fn clear_hoisted_children(&mut self, node_id: NodeId) {
+        self.doc.clear_hoisted_children(node_id);
+    }
+
+    fn add_hoisted_children(&mut self, node_id: NodeId, hoisted: &[NodeId]) {
+        self.doc.add_hoisted_children(node_id, hoisted);
+    }
+
+    fn get_detailed_layout_info(&self, node_id: NodeId) -> &taffy::DetailedLayoutInfo<style::Atom> {
+        self.doc.get_detailed_layout_info(node_id)
     }
 }
 
@@ -415,6 +517,18 @@ impl RoundTree for FulgurLayoutTree<'_> {
 
     fn set_final_layout(&mut self, node_id: NodeId, layout: &taffy::Layout) {
         self.doc.set_final_layout(node_id, layout);
+    }
+
+    fn is_out_of_flow(&self, node_id: NodeId) -> bool {
+        self.doc.is_out_of_flow(node_id)
+    }
+
+    fn hoisted_child_count(&self, node_id: NodeId) -> usize {
+        self.doc.hoisted_child_count(node_id)
+    }
+
+    fn get_hoisted_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
+        self.doc.get_hoisted_child_id(node_id, index)
     }
 }
 
@@ -486,7 +600,7 @@ pub fn compute_multicol_layout(
     // 1. MulticolProps
     let Some(props) = tree
         .doc
-        .get_node(usize::from(node_id))
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
         .and_then(crate::blitz_adapter::extract_multicol_props)
     else {
         // Dispatcher already matched, but be defensive.
@@ -550,6 +664,10 @@ pub fn compute_multicol_layout(
             width: Some(col_w),
             height: None,
         },
+        known_dimensions_are_definite: Size {
+            width: true,
+            height: true,
+        },
         parent_size: Size {
             width: Some(col_w),
             height: inputs.parent_size.height,
@@ -573,6 +691,10 @@ pub fn compute_multicol_layout(
             width: Some(content_w),
             height: None,
         },
+        known_dimensions_are_definite: Size {
+            width: true,
+            height: true,
+        },
         parent_size: Size {
             width: Some(content_w),
             height: inputs.parent_size.height,
@@ -591,8 +713,11 @@ pub fn compute_multicol_layout(
     //    return the container's outer (border-box) height. Without this
     //    subtraction, a definite-height multicol with non-zero padding
     //    would double-count its vertical insets and grow too tall.
+    let paged = tree.paged.get(&usize::from(node_id)).copied();
+    // A container broken across pages takes the height its pages give it;
+    // the definite height here is only the previous pass's result.
     let avail_h = match inputs.available_space.height {
-        AvailableSpace::Definite(h) => (h - inset_top - inset_bottom).max(0.0),
+        AvailableSpace::Definite(h) if paged.is_none() => (h - inset_top - inset_bottom).max(0.0),
         _ => f32::INFINITY,
     };
 
@@ -624,7 +749,7 @@ pub fn compute_multicol_layout(
     //     line heights. See `docs/plans/2026-05-03-multicol-inline-root-split.md`.
     let is_self_inline_root = tree
         .doc
-        .get_node(usize::from(node_id))
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
         .map(|n| {
             n.flags.is_inline_root()
                 && n.element_data()
@@ -661,15 +786,51 @@ pub fn compute_multicol_layout(
     //    math but are NOT forced onto the child's stored layout — we keep
     //    the measured `size.width` so replaced / shrink-to-fit / explicitly
     //    sized children are not stretched to the full track.
-    let segments = partition_children_into_segments(tree.doc, usize::from(node_id));
+    let segments = partition_children_into_segments(&tree.doc, usize::from(node_id));
+
+    // A column group with floats is measured as part of one block, so that
+    // text wraps around the floats: Blitz lays the whole container out as
+    // a plain block one column wide (it does not do columns). That also
+    // lays out the spanners at the column width, so their cached layouts
+    // are dropped and they are laid out again below at the full width.
+    let float_groups: Vec<bool> = segments
+        .iter()
+        .map(|s| matches!(s, Segment::ColumnGroup(c) if group_has_floats(tree, c)))
+        .collect();
+    if float_groups.iter().any(|&f| f) {
+        let shared = SharedMeasure {
+            inset_left,
+            inset_right,
+            parent_size: inputs.parent_size,
+        };
+        tree.cache_clear(node_id);
+        tree.doc
+            .compute_child_layout(node_id, shared.inputs_at(col_w));
+        tree.cache_clear(node_id);
+        for segment in &segments {
+            if let Segment::SpanAll(child) = segment {
+                clear_layout_caches(tree, *child);
+            }
+        }
+    }
 
     let mut cursor_y: f32 = 0.0;
     let mut placements: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::new();
     let mut group_geometries: Vec<ColumnGroupGeometry> = Vec::new();
-    for segment in segments {
+    for (segment, has_floats) in segments.into_iter().zip(float_groups) {
         match segment {
             Segment::ColumnGroup(children) => {
-                let (group_placements, geometry) = layout_column_group(
+                // The first row of columns ends at the end of the page the
+                // set starts on.
+                let paging = paged.filter(|p| p.page_h > 0.0).map(|p| {
+                    let top = p.top_in_page + inset_top + cursor_y;
+                    let used = top.rem_euclid(p.page_h);
+                    Paging {
+                        first_h: p.page_h - used,
+                        page_h: p.page_h,
+                    }
+                });
+                let (group_placements, geometries, seg_h) = layout_column_group(
                     tree,
                     col_w,
                     gap,
@@ -679,25 +840,25 @@ pub fn compute_multicol_layout(
                     &children,
                     cursor_y,
                     child_inputs,
+                    paging,
+                    has_floats.then_some(inset_left),
                 );
-                let seg_h = geometry
-                    .col_heights
-                    .iter()
-                    .copied()
-                    .map(crate::units::Px::to_f32)
-                    .fold(0.0_f32, f32::max);
                 placements.extend(group_placements);
-                group_geometries.push(geometry);
+                group_geometries.extend(geometries);
                 cursor_y += seg_h;
             }
             Segment::SpanAll(child_id) => {
+                // A spanner keeps its own vertical margins; they separate it
+                // from the column sets before and after it.
+                let (margin_top, margin_bottom) = vertical_margins(tree, child_id, content_w);
                 let output = tree.compute_child_layout(child_id, span_child_inputs);
+                cursor_y += margin_top.max(0.0);
                 let location = Point {
                     x: 0.0,
                     y: cursor_y,
                 };
                 placements.push((child_id, location, output.size));
-                cursor_y += output.size.height;
+                cursor_y += output.size.height + margin_bottom.max(0.0);
             }
         }
     }
@@ -760,14 +921,23 @@ pub fn compute_multicol_layout(
             width: container_w,
             height: container_h,
         },
-        content_size: Size {
-            width: container_w,
-            height: container_h,
-        },
-        first_baselines: Point::NONE,
+        scrollable_overflow_rect: taffy::ScrollableOverflow::new(
+            taffy::Rect {
+                left: 0.0,
+                right: container_w,
+                top: 0.0,
+                bottom: container_h,
+            },
+            Point { x: false, y: false },
+        ),
+        baselines: taffy::Baselines::NONE,
         top_margin: CollapsibleMarginSet::ZERO,
         bottom_margin: CollapsibleMarginSet::ZERO,
         margins_can_collapse_through: false,
+        // TODO(blitz-0.3 port): out-of-flow candidates bubbled up from
+        // the column children are dropped here.
+        oof_candidates: taffy::OofCandidates::NONE,
+        oof_positioning_area: None,
     }
 }
 
@@ -804,7 +974,7 @@ fn layout_self_inline_root_container(
     let cloned_layout = {
         let node = tree
             .doc
-            .get_node(usize::from(node_id))
+            .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
             .expect("Case A predicate guarantees the node exists");
         let elem = node
             .element_data()
@@ -826,12 +996,11 @@ fn layout_self_inline_root_container(
     //    break positions are deterministic given identical `max_advance`,
     //    so Task 7's indices match the ones we record here.
     let mut rebroken = cloned_layout;
-    rebroken.break_all_lines(Some(col_w));
-    rebroken.align(
-        Some(col_w),
+    rebroken.set_alignment(
         parley::Alignment::default(),
         parley::AlignmentOptions::default(),
     );
+    rebroken.break_all_lines(Some(col_w));
 
     // fulgur-6q5 Fix 2: when the rebroken layout contains inline-box
     // items (inline images, inline-blocks, replaced atomic inlines),
@@ -847,7 +1016,7 @@ fn layout_self_inline_root_container(
         let original_h = {
             let node = tree
                 .doc
-                .get_node(usize::from(node_id))
+                .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
                 .expect("Case A predicate guarantees the node exists");
             let elem = node
                 .element_data()
@@ -878,6 +1047,7 @@ fn layout_self_inline_root_container(
                 .map(crate::units::F32Units::as_px)
                 .collect(),
             paragraph_splits: Vec::new(),
+            box_splits: Vec::new(),
         };
         tree.geometry.insert(
             usize::from(node_id),
@@ -891,14 +1061,23 @@ fn layout_self_inline_root_container(
                 width: container_w,
                 height: container_h,
             },
-            content_size: Size {
-                width: container_w,
-                height: container_h,
-            },
-            first_baselines: Point::NONE,
+            scrollable_overflow_rect: taffy::ScrollableOverflow::new(
+                taffy::Rect {
+                    left: 0.0,
+                    right: container_w,
+                    top: 0.0,
+                    bottom: container_h,
+                },
+                Point { x: false, y: false },
+            ),
+            baselines: taffy::Baselines::NONE,
             top_margin: CollapsibleMarginSet::ZERO,
             bottom_margin: CollapsibleMarginSet::ZERO,
             margins_can_collapse_through: false,
+            // TODO(blitz-0.3 port): out-of-flow candidates bubbled up from
+            // the column children are dropped here.
+            oof_candidates: taffy::OofCandidates::NONE,
+            oof_positioning_area: None,
         };
     }
 
@@ -994,6 +1173,7 @@ fn layout_self_inline_root_container(
             .map(crate::units::F32Units::as_px)
             .collect(),
         paragraph_splits,
+        box_splits: Vec::new(),
     };
 
     // 9. Stash the per-container geometry under the container's own
@@ -1014,30 +1194,935 @@ fn layout_self_inline_root_container(
             width: container_w,
             height: container_h,
         },
-        content_size: Size {
-            width: container_w,
-            height: container_h,
-        },
-        first_baselines: Point::NONE,
+        scrollable_overflow_rect: taffy::ScrollableOverflow::new(
+            taffy::Rect {
+                left: 0.0,
+                right: container_w,
+                top: 0.0,
+                bottom: container_h,
+            },
+            Point { x: false, y: false },
+        ),
+        baselines: taffy::Baselines::NONE,
         top_margin: CollapsibleMarginSet::ZERO,
         bottom_margin: CollapsibleMarginSet::ZERO,
         margins_can_collapse_through: false,
+        // TODO(blitz-0.3 port): out-of-flow candidates bubbled up from
+        // the column children are dropped here.
+        oof_candidates: taffy::OofCandidates::NONE,
+        oof_positioning_area: None,
     }
 }
 
-/// Place `children` into `n` columns of `col_w`, stacking them vertically
-/// starting at `y_offset`. `avail_h` is the per-column budget ceiling
-/// (for balance / auto fallback); measurement happens inside via Taffy.
+/// Collapsed vertical margins between two adjoining blocks (CSS 2.2 §8.3.1):
+/// the largest positive margin plus the most negative one.
+#[derive(Clone, Copy, Debug, Default)]
+struct CollapsedMargin {
+    positive: f32,
+    negative: f32,
+}
+
+impl CollapsedMargin {
+    fn add(&mut self, margin: f32) {
+        if margin > 0.0 {
+            self.positive = self.positive.max(margin);
+        } else {
+            self.negative = self.negative.min(margin);
+        }
+    }
+
+    fn value(self) -> f32 {
+        self.positive + self.negative
+    }
+}
+
+/// One indivisible piece of a column group's content, in flow order.
+#[derive(Clone, Debug)]
+struct FlowUnit {
+    kind: FlowUnitKind,
+    /// Height of the piece itself.
+    height: f32,
+    /// Collapsed margin between the previous piece and this one. Dropped
+    /// when the piece starts a column after a break (margins adjoining an
+    /// unforced break are truncated, CSS Fragmentation 3 §5.2).
+    gap_before: f32,
+    /// Space above the piece that moves with it: the top border and
+    /// padding of the boxes the piece opens, and the margins inside them.
+    lead: f32,
+    /// Space below the piece that moves with it: the margins, bottom
+    /// padding and border of the boxes the piece closes.
+    trail: f32,
+    /// No column break before this piece: it flows beside a float that
+    /// starts above it, and the float goes to its anchor's column.
+    keep_with_previous: bool,
+    /// Room a float anchored above needs below this piece's extent, in
+    /// the same column. It does not push the next piece down.
+    overhang: f32,
+}
+
+impl FlowUnit {
+    /// Height the unit takes in a column.
+    fn extent(&self) -> f32 {
+        self.lead + self.height + self.trail
+    }
+}
+
+#[derive(Clone, Debug)]
+enum FlowUnitKind {
+    /// A box placed whole (`index` into `ColumnFlow::blocks`).
+    Block(usize),
+    /// One line of a paragraph that may break between lines (`index` into
+    /// `ColumnFlow::paragraphs`).
+    Line(usize),
+}
+
+/// A box placed whole, or a paragraph that breaks between lines. `x` is
+/// its left edge relative to the column.
+#[derive(Clone, Debug)]
+struct FlowBlock {
+    id: NodeId,
+    size: Size<f32>,
+    x: f32,
+    parent: Option<usize>,
+}
+
+/// A block whose children flow through the columns themselves.
+#[derive(Clone, Debug)]
+struct FlowWrapper {
+    id: NodeId,
+    parent: Option<usize>,
+    /// Left edge relative to the column.
+    x: f32,
+    units: std::ops::Range<usize>,
+    /// Set when the box paints something (border, padding, background).
+    /// Without it the box is invisible and is lent a box covering every
+    /// column it touches.
+    frame: Option<BoxFrame>,
+}
+
+/// The visible box of a [`FlowWrapper`] that breaks across columns.
+#[derive(Clone, Copy, Debug)]
+struct BoxFrame {
+    width: f32,
+    /// Distance from the top of the box's first unit (the start of its
+    /// `lead`) to the box's top border edge.
+    top_offset: f32,
+    /// Distance from the end of the box's last unit's content to the
+    /// box's bottom border edge.
+    bottom_offset: f32,
+}
+
+/// A float, carried along with the unit it sits beside.
+#[derive(Clone, Debug)]
+struct FlowFloat {
+    block: FlowBlock,
+    frame: u32,
+    /// Top margin edge, top border edge and bottom margin edge, in its
+    /// frame's natural coordinates (the single-column layout).
+    margin_top: f32,
+    top: f32,
+    margin_bottom: f32,
+    /// Unit the float moves with, and its top border edge relative to
+    /// that unit's content top. Set by [`ColumnFlow::anchor_floats`].
+    anchor: usize,
+    dy: f32,
+}
+
+/// Where a unit's content sits in the single-column layout that measured
+/// it. Positions compare only within one frame: a frame is a run of
+/// content laid out together (the whole group when it was laid out as one
+/// block, otherwise each top-level child).
+#[derive(Clone, Copy, Debug)]
+struct NaturalPos {
+    frame: u32,
+    top: f32,
+    /// The unit starts a box with `clear`.
+    clears: bool,
+}
+
+/// A column group flattened into flow units.
+#[derive(Default)]
+struct ColumnFlow {
+    units: Vec<FlowUnit>,
+    /// One per unit.
+    natural: Vec<NaturalPos>,
+    blocks: Vec<FlowBlock>,
+    paragraphs: Vec<FlowBlock>,
+    wrappers: Vec<FlowWrapper>,
+    floats: Vec<FlowFloat>,
+    /// Margin after the last unit (inside the multicol, a BFC root, it
+    /// still takes space).
+    trailing_margin: f32,
+    /// A box with `clear` was opened and its first unit is still to come.
+    pending_clear: bool,
+}
+
+/// What has been seen since the last unit: margins that may still
+/// collapse, and the edges of boxes opened since.
+#[derive(Default)]
+struct PendingSpace {
+    margin: CollapsedMargin,
+    /// The collapsed margin before the first box opened since the last
+    /// unit; the box's top edge stops it from collapsing further.
+    gap: Option<f32>,
+    /// Box edges and inner margins after `gap`.
+    lead: f32,
+}
+
+/// Deepest wrapper nesting that is flattened into the columns. Deeper
+/// wrappers are placed whole.
+const MAX_FLOW_WRAPPER_DEPTH: usize = 32;
+
+/// How a block takes part in column flow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum FlowBox {
+    /// Paints nothing and has no insets: it can be cut between columns,
+    /// or lent a bigger invisible box, without any visible difference.
+    Plain,
+    /// Has a border, padding or background, with a top and a bottom edge
+    /// (`top`, `bottom`: border plus padding). Its children flow through
+    /// the columns and its box is painted in slices, one per column
+    /// (`box-decoration-break: slice`).
+    Framed { top: f32, bottom: f32 },
+}
+
+/// Classify an in-flow `display: block` box that is statically positioned
+/// and has no transform, opacity, clipping, shadow or definite height.
+/// Anything else (and boxes with an edge on one side only) is placed whole.
+fn flow_box(tree: &FulgurLayoutTree<'_>, node_id: NodeId, col_w: f32) -> Option<FlowBox> {
+    use ::style::properties::longhands::position::computed_value::T as Pos;
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    use blitz_dom::CopyStyleGetters;
+
+    let node = tree
+        .doc
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))?;
+    if node.element_data().is_none()
+        || crate::blitz_adapter::is_multicol_container(node)
+        || crate::blitz_adapter::has_column_span_all(node)
+    {
+        return None;
+    }
+    let styles = node.primary_styles()?;
+    let display = styles.clone_display();
+    let flowing = display.outside() == DisplayOutside::Block
+        && display.inside() == DisplayInside::Flow
+        && !display.is_list_item()
+        && matches!(styles.get_box().slow_clone_position(), Pos::Static)
+        && styles.get_box().transform.0.is_empty()
+        && styles.clone_opacity() >= 1.0
+        && styles.clone_overflow_x() == ::style::values::computed::Overflow::Visible
+        && styles.clone_overflow_y() == ::style::values::computed::Overflow::Visible
+        && styles.slow_clone_box_shadow().0.is_empty();
+    if !flowing {
+        return None;
+    }
+    let style = tree.get_core_container_style(node_id);
+    if !style.size().height.is_auto() {
+        return None;
+    }
+    let calc = |val, basis| tree.resolve_calc_value(val, basis);
+    let padding = style.padding().resolve_or_zero(Some(col_w), calc);
+    let border = style.border().resolve_or_zero(Some(col_w), calc);
+    let insets_zero = [padding, border]
+        .iter()
+        .flat_map(|r| [r.top, r.bottom, r.left, r.right])
+        .all(|v| v == 0.0);
+    let background_transparent = styles
+        .slow_clone_background_color()
+        .resolve_to_absolute(&styles.clone_color())
+        .alpha
+        <= 0.0;
+    let no_background_image = styles
+        .slow_clone_background_image()
+        .0
+        .iter()
+        .all(|i| matches!(i, ::style::values::computed::image::Image::None));
+    if insets_zero && background_transparent && no_background_image {
+        return Some(FlowBox::Plain);
+    }
+    // A min or max height would have to be shared out between the slices.
+    if !style.min_size().height.is_auto() || !style.max_size().height.is_auto() {
+        return None;
+    }
+    let top = border.top + padding.top;
+    let bottom = border.bottom + padding.bottom;
+    // With no edge on one side, margins collapse through that side, which
+    // the flow does not model.
+    (top > 0.0 && bottom > 0.0).then_some(FlowBox::Framed { top, bottom })
+}
+
+/// Plain in-flow block: see [`FlowBox::Plain`].
+fn is_plain_flow_block(tree: &FulgurLayoutTree<'_>, node_id: NodeId, col_w: f32) -> bool {
+    flow_box(tree, node_id, col_w) == Some(FlowBox::Plain)
+}
+
+/// Margins of `node_id`, resolved against the column width.
+fn margins(tree: &FulgurLayoutTree<'_>, node_id: NodeId, col_w: f32) -> taffy::Rect<f32> {
+    let style = tree.get_core_container_style(node_id);
+    style.margin().resolve_or_zero(Some(col_w), |val, basis| {
+        tree.resolve_calc_value(val, basis)
+    })
+}
+
+/// Top and bottom margins of `node_id`, resolved against the column width.
+fn vertical_margins(tree: &FulgurLayoutTree<'_>, node_id: NodeId, col_w: f32) -> (f32, f32) {
+    let margin = margins(tree, node_id, col_w);
+    (margin.top, margin.bottom)
+}
+
+/// Per-line heights of `node_id` when it is a paragraph that may break
+/// between lines inside the columns: a plain block that is an inline root
+/// with text only (inline boxes cannot be re-drawn per slice yet), whose
+/// lines make up its whole height.
+fn splittable_line_heights(
+    tree: &FulgurLayoutTree<'_>,
+    node_id: NodeId,
+    size: Size<f32>,
+    col_w: f32,
+) -> Option<Vec<f32>> {
+    let node = tree
+        .doc
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))?;
+    if !node.flags.is_inline_root() {
+        return None;
+    }
+    let layout = &node.element_data()?.inline_layout_data.as_ref()?.layout;
+    if !parley_layout_is_glyph_run_only(layout) {
+        return None;
+    }
+    if !is_plain_flow_block(tree, node_id, col_w) {
+        return None;
+    }
+    let heights = crate::blitz_adapter::parley_line_heights(layout);
+    let total: f32 = heights.iter().sum();
+    (heights.len() > 1 && (total - size.height).abs() <= 0.5).then_some(heights)
+}
+
+/// `node_id` is floated.
+fn is_floated(tree: &FulgurLayoutTree<'_>, node_id: NodeId) -> bool {
+    use ::style::properties::longhands::float::computed_value::T as Float;
+    tree.doc
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
+        .and_then(|n| n.primary_styles())
+        .is_some_and(|s| !matches!(s.get_box().slow_clone_float(), Float::None))
+}
+
+/// A column group whose layout needs floats: a floated child next to an
+/// in-flow one.
+fn group_has_floats(tree: &FulgurLayoutTree<'_>, children: &[NodeId]) -> bool {
+    children.iter().any(|&c| is_floated(tree, c)) && children.iter().any(|&c| !is_floated(tree, c))
+}
+
+/// Drop the cached layouts of `node_id` and its descendants, so that the
+/// next layout recomputes them (and their text) at the size asked for.
+fn clear_layout_caches(tree: &mut FulgurLayoutTree<'_>, node_id: NodeId) {
+    let children: Vec<NodeId> = tree.child_ids(node_id).collect();
+    tree.cache_clear(node_id);
+    for child in children {
+        clear_layout_caches(tree, child);
+    }
+}
+
+/// `node_id` clears floats.
+fn clears_floats(tree: &FulgurLayoutTree<'_>, node_id: NodeId) -> bool {
+    use ::style::properties::longhands::clear::computed_value::T as Clear;
+    tree.doc
+        .get_node(crate::blitz_adapter::bid(usize::from(node_id)))
+        .and_then(|n| n.primary_styles())
+        .is_some_and(|s| !matches!(s.get_box().slow_clone_clear(), Clear::None))
+}
+
+/// Layout children of a wrapper candidate, or `None` when one of them is
+/// out of flow (positioned against the wrapper, which would move) or none
+/// is in flow. Floats are kept: they move with the content beside them.
+fn flow_children(tree: &FulgurLayoutTree<'_>, node_id: NodeId) -> Option<Vec<NodeId>> {
+    let children: Vec<NodeId> = tree.child_ids(node_id).collect();
+    if children.iter().any(|&child| tree.is_out_of_flow(child)) {
+        return None;
+    }
+    children
+        .iter()
+        .any(|&child| !is_floated(tree, child))
+        .then_some(children)
+}
+
+/// A child to flatten.
+#[derive(Clone, Copy, Debug)]
+struct FlowChild {
+    id: NodeId,
+    /// Border-box size.
+    size: Size<f32>,
+    /// Left edge relative to the column.
+    x: f32,
+    /// Top border edge in its frame's natural coordinates.
+    y: f32,
+    frame: u32,
+}
+
+impl ColumnFlow {
+    /// Flatten `children` (already laid out at `col_w`) into flow units.
+    /// Nested sizes and offsets are read from the layout their parent's
+    /// pass stored.
+    ///
+    /// Floats move with the unit their top sits beside, and the units
+    /// beside them stay in that column. Top-level floats are only taken as
+    /// floats when the group was laid out as one block
+    /// (`top_level_floats`); otherwise they are placed as blocks.
+    fn collect(
+        tree: &FulgurLayoutTree<'_>,
+        children: &[FlowChild],
+        col_w: f32,
+        top_level_floats: bool,
+    ) -> Self {
+        let mut flow = ColumnFlow::default();
+        let mut pending = PendingSpace::default();
+        flow.add_children(
+            tree,
+            children,
+            None,
+            col_w,
+            0,
+            top_level_floats,
+            &mut pending,
+        );
+        flow.trailing_margin = pending.margin.value().max(0.0);
+        if !flow.floats.is_empty() {
+            flow.add_clearance();
+            flow.anchor_floats();
+        }
+        flow
+    }
+
+    /// Append a unit, taking the space pending before it. `natural` is
+    /// its content top in its frame.
+    fn push_unit(
+        &mut self,
+        kind: FlowUnitKind,
+        height: f32,
+        pending: &mut PendingSpace,
+        frame: u32,
+        natural: f32,
+    ) {
+        let (gap_before, lead) = match pending.gap.take() {
+            Some(gap) => (gap, pending.lead + pending.margin.value()),
+            None => (pending.margin.value(), 0.0),
+        };
+        *pending = PendingSpace::default();
+        self.units.push(FlowUnit {
+            kind,
+            height,
+            gap_before,
+            lead,
+            trail: 0.0,
+            keep_with_previous: false,
+            overhang: 0.0,
+        });
+        self.natural.push(NaturalPos {
+            frame,
+            top: natural,
+            clears: std::mem::take(&mut self.pending_clear),
+        });
+    }
+
+    /// Give each unit that clears floats the space its single-column
+    /// layout gave it: the margin model alone would put it beside the
+    /// float. The space sits in the gap before the unit, so a column
+    /// break before it drops it, as the float stays behind.
+    fn add_clearance(&mut self) {
+        let mut reference: std::collections::BTreeMap<u32, (f32, f32)> = Default::default();
+        let mut y = 0.0_f32;
+        for (unit, natural) in self.units.iter_mut().zip(&self.natural) {
+            let mut top = y + unit.gap_before;
+            let content = top + unit.lead;
+            match reference.get(&natural.frame) {
+                Some(&(natural0, content0)) if natural.clears => {
+                    let expected = content0 + (natural.top - natural0);
+                    if expected > content + 0.5 {
+                        unit.gap_before += expected - content;
+                        top += expected - content;
+                    }
+                }
+                Some(_) => {}
+                None => {
+                    reference.insert(natural.frame, (natural.top, content));
+                }
+            }
+            y = top + unit.extent();
+        }
+    }
+
+    /// Tie each float to the first unit of its frame at or below its top
+    /// (or the frame's last unit), keep the units beside it with that
+    /// unit, and reserve the room it needs below the last of them.
+    fn anchor_floats(&mut self) {
+        const SNAP: f32 = 0.5;
+        for float in &mut self.floats {
+            let in_frame: Vec<usize> = (0..self.units.len())
+                .filter(|&i| self.natural[i].frame == float.frame)
+                .collect();
+            let Some(&last_in_frame) = in_frame.last() else {
+                continue;
+            };
+            let anchor = in_frame
+                .iter()
+                .copied()
+                .find(|&i| self.natural[i].top >= float.margin_top - SNAP)
+                .unwrap_or(last_in_frame);
+            float.anchor = anchor;
+            float.dy = float.top - self.natural[anchor].top;
+            let mut last = anchor;
+            for &i in in_frame.iter().filter(|&&i| i > anchor) {
+                if self.natural[i].top >= float.margin_bottom - SNAP {
+                    break;
+                }
+                self.units[i].keep_with_previous = true;
+                last = i;
+            }
+            let last_bottom = self.natural[last].top + self.units[last].height;
+            let unit = &mut self.units[last];
+            unit.overhang = unit.overhang.max(float.margin_bottom - last_bottom);
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_children(
+        &mut self,
+        tree: &FulgurLayoutTree<'_>,
+        children: &[FlowChild],
+        parent: Option<usize>,
+        col_w: f32,
+        depth: usize,
+        floats: bool,
+        pending: &mut PendingSpace,
+    ) {
+        for &FlowChild {
+            id,
+            size,
+            x,
+            y,
+            frame: natural_frame,
+        } in children
+        {
+            let (margin_top, margin_bottom) = vertical_margins(tree, id, col_w);
+            if floats && is_floated(tree, id) {
+                // Out of flow: no unit and no margin collapsing.
+                self.floats.push(FlowFloat {
+                    block: FlowBlock {
+                        id,
+                        size,
+                        x,
+                        parent,
+                    },
+                    frame: natural_frame,
+                    margin_top: y - margin_top,
+                    top: y,
+                    margin_bottom: y + size.height + margin_bottom,
+                    anchor: 0,
+                    dy: 0.0,
+                });
+                continue;
+            }
+            if clears_floats(tree, id) {
+                self.pending_clear = true;
+            }
+            pending.margin.add(margin_top);
+
+            let is_inline_root = tree
+                .doc
+                .get_node(crate::blitz_adapter::bid(usize::from(id)))
+                .is_some_and(|n| n.flags.is_inline_root());
+            let wrapper = (depth < MAX_FLOW_WRAPPER_DEPTH && !is_inline_root)
+                .then(|| flow_box(tree, id, col_w))
+                .flatten()
+                .and_then(|kind| flow_children(tree, id).map(|c| (kind, c)));
+
+            if let Some((kind, grandchildren)) = wrapper {
+                let index = self.wrappers.len();
+                let first = self.units.len();
+                let frame = match kind {
+                    // Margins collapse through a wrapper without padding or
+                    // border, so its own margins join its children's.
+                    FlowBox::Plain => None,
+                    // The top edge ends the collapsing: the margins before
+                    // it become the gap, the edge and what follows lead.
+                    FlowBox::Framed { top, .. } => {
+                        let top_offset = match pending.gap {
+                            None => {
+                                pending.gap = Some(pending.margin.value());
+                                0.0
+                            }
+                            Some(_) => {
+                                pending.lead += pending.margin.value();
+                                pending.lead
+                            }
+                        };
+                        pending.margin = CollapsedMargin::default();
+                        pending.lead += top;
+                        Some(BoxFrame {
+                            width: size.width,
+                            top_offset,
+                            bottom_offset: 0.0,
+                        })
+                    }
+                };
+                self.wrappers.push(FlowWrapper {
+                    id,
+                    parent,
+                    x,
+                    units: first..first,
+                    frame,
+                });
+                let nested: Vec<FlowChild> = grandchildren
+                    .iter()
+                    .map(|&c| {
+                        let layout = tree.get_unrounded_layout(c);
+                        FlowChild {
+                            id: c,
+                            size: layout.size,
+                            x: x + layout.location.x,
+                            y: y + layout.location.y,
+                            frame: natural_frame,
+                        }
+                    })
+                    .collect();
+                self.add_children(tree, &nested, Some(index), col_w, depth + 1, true, pending);
+                self.wrappers[index].units.end = self.units.len();
+                if let FlowBox::Framed { bottom, .. } = kind
+                    && let Some(last) = self.units[first..].last_mut()
+                {
+                    // The bottom edge keeps the last child's margin inside.
+                    last.trail += pending.margin.value() + bottom;
+                    pending.margin = CollapsedMargin::default();
+                    if let Some(frame) = self.wrappers[index].frame.as_mut() {
+                        frame.bottom_offset = last.trail;
+                    }
+                }
+            } else if let Some(lines) = splittable_line_heights(tree, id, size, col_w) {
+                let paragraph = self.paragraphs.len();
+                self.paragraphs.push(FlowBlock {
+                    id,
+                    size,
+                    x,
+                    parent,
+                });
+                let mut line_top = y;
+                for height in lines {
+                    self.push_unit(
+                        FlowUnitKind::Line(paragraph),
+                        height,
+                        pending,
+                        natural_frame,
+                        line_top,
+                    );
+                    line_top += height;
+                }
+            } else {
+                let block = self.blocks.len();
+                self.blocks.push(FlowBlock {
+                    id,
+                    size,
+                    x,
+                    parent,
+                });
+                self.push_unit(
+                    FlowUnitKind::Block(block),
+                    size.height,
+                    pending,
+                    natural_frame,
+                    y,
+                );
+            }
+            pending.margin.add(margin_bottom);
+        }
+    }
+}
+
+/// Where each unit lands: `(column, top)` with `top` relative to the
+/// column group and measured at the start of the unit's `lead`. Fills
+/// columns top to bottom, breaking before a unit that would end below
+/// `budget`. A column always takes at least one unit. With `strict`,
+/// running out of columns fails; otherwise the last column takes the rest.
+fn place_units(units: &[FlowUnit], n: u32, budget: f32, strict: bool) -> Option<Vec<(u32, f32)>> {
+    const EPSILON: f32 = 0.01;
+    let mut out = Vec::with_capacity(units.len());
+    let mut col: u32 = 0;
+    let mut y: f32 = 0.0;
+    let mut col_start = 0;
+    let mut index = 0;
+    while index < units.len() {
+        let unit = &units[index];
+        let column_has_content = index > col_start;
+        // The first column keeps its leading margin; later columns start
+        // after a break and drop it.
+        let gap = if column_has_content || col == 0 {
+            unit.gap_before
+        } else {
+            0.0
+        };
+        if column_has_content && y + gap + unit.extent() + unit.overhang > budget + EPSILON {
+            if col + 1 < n {
+                let restart = break_point(units, col_start, index);
+                out.truncate(restart);
+                col += 1;
+                y = 0.0;
+                col_start = restart;
+                index = restart;
+                continue;
+            } else if strict {
+                return None;
+            }
+        }
+        let top = y + gap;
+        out.push((col, top));
+        y = top + unit.extent();
+        index += 1;
+    }
+    Some(out)
+}
+
+/// Where a column that starts at `col_start` breaks when the unit at
+/// `index` does not fit: before the run of units kept together with it
+/// (beside a float), or at `index` when that run fills the column.
+fn break_point(units: &[FlowUnit], col_start: usize, index: usize) -> usize {
+    let mut start = index;
+    while start > col_start && units[start].keep_with_previous {
+        start -= 1;
+    }
+    if start == col_start { index } else { start }
+}
+
+/// The smallest column height that fits `units` into `n` columns.
+fn balanced_budget(units: &[FlowUnit], n: u32) -> f32 {
+    let Some(single) = place_units(units, 1, f32::INFINITY, true) else {
+        return 0.0;
+    };
+    let total = units
+        .iter()
+        .zip(&single)
+        .map(|(u, (_, top))| top + u.extent() + u.overhang)
+        .fold(0.0_f32, f32::max);
+    if total <= 0.0 || n <= 1 {
+        return total;
+    }
+    // Margins may fall at a break and be dropped, so only the units' own
+    // extents bound the column height from below.
+    let tallest = units.iter().map(FlowUnit::extent).fold(0.0_f32, f32::max);
+    let content: f32 = units.iter().map(FlowUnit::extent).sum();
+    let mut low = (content / n as f32).max(tallest);
+    let mut high = total;
+    if place_units(units, n, low, true).is_some() {
+        return low;
+    }
+    // `low` does not fit and `high` (everything in one column) does.
+    for _ in 0..40 {
+        if high - low <= 0.05 {
+            break;
+        }
+        let mid = (low + high) / 2.0;
+        if place_units(units, n, mid, true).is_some() {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    high
+}
+
+/// Consecutive units in the same column: `(column, first, last)` unit
+/// indices, inclusive.
+fn column_runs(tops: &[(u32, f32)], units: std::ops::Range<usize>) -> Vec<(u32, usize, usize)> {
+    let mut runs: Vec<(u32, usize, usize)> = Vec::new();
+    for index in units {
+        let col = tops[index].0;
+        match runs.last_mut() {
+            Some(run) if run.0 == col => run.2 = index,
+            _ => runs.push((col, index, index)),
+        }
+    }
+    runs
+}
+
+/// Fill one row of `n` columns, `budget` tall, with the leading units of
+/// `units`, stopping at the first unit that no longer fits. Returns the
+/// `(column, top)` of each placed unit. A unit taller than the row is
+/// placed alone in a column, unless `skip_oversized` (the row is the rest
+/// of a page that already has content), in which case that column stays
+/// empty.
+fn fill_row(units: &[FlowUnit], n: u32, budget: f32, skip_oversized: bool) -> Vec<(u32, f32)> {
+    const EPSILON: f32 = 0.01;
+    let mut out = Vec::new();
+    let mut col: u32 = 0;
+    let mut y: f32 = 0.0;
+    let mut col_start = 0;
+    let mut index = 0;
+    while index < units.len() {
+        let unit = &units[index];
+        let column_has_content = index > col_start;
+        let gap = if column_has_content {
+            unit.gap_before
+        } else {
+            0.0
+        };
+        if y + gap + unit.extent() + unit.overhang > budget + EPSILON
+            && (column_has_content || skip_oversized)
+        {
+            let restart = if column_has_content {
+                break_point(units, col_start, index)
+            } else {
+                index
+            };
+            out.truncate(restart);
+            index = restart;
+            if col + 1 < n {
+                col += 1;
+                y = 0.0;
+                col_start = restart;
+                continue;
+            }
+            break;
+        }
+        out.push((col, y + gap));
+        y += gap + unit.extent();
+        index += 1;
+    }
+    out
+}
+
+/// A row of columns in a column set: one per page when the set breaks
+/// across pages, otherwise just one.
+#[derive(Clone, Copy, Debug)]
+struct ColumnRow {
+    /// Top, relative to the column set.
+    top: f32,
+    /// Column height the units were placed against.
+    budget: f32,
+}
+
+/// Place `units` into rows of `n` columns. Returns each unit's
+/// `(slot, top)`, where `slot / n` is the row and `slot % n` the column
+/// and `top` is relative to the column set, and the rows.
+fn place_rows(
+    units: &[FlowUnit],
+    n: u32,
+    fill: crate::column_css::ColumnFill,
+    avail_h: f32,
+    paging: Option<Paging>,
+) -> (Vec<(u32, f32)>, Vec<ColumnRow>) {
+    const EPSILON: f32 = 0.01;
+    let last_row_budget = |units: &[FlowUnit], room: f32| match fill {
+        crate::column_css::ColumnFill::Auto => room,
+        crate::column_css::ColumnFill::Balance => balanced_budget(units, n).min(room),
+    };
+    let Some(paging) = paging else {
+        let budget = last_row_budget(units, avail_h);
+        let tops = place_units(units, n, budget, false).unwrap_or_default();
+        return (tops, vec![ColumnRow { top: 0.0, budget }]);
+    };
+
+    let mut tops: Vec<(u32, f32)> = Vec::with_capacity(units.len());
+    let mut rows: Vec<ColumnRow> = Vec::new();
+    let mut start = 0;
+    let mut row_top = 0.0_f32;
+    let mut room = paging.first_h;
+    while start < units.len() {
+        let row = rows.len() as u32;
+        let first_row = rows.is_empty();
+        // Units after a page break drop the margin before them.
+        let mut rest = units[start..].to_vec();
+        if !first_row {
+            rest[0].gap_before = 0.0;
+        }
+        let out_of_pages = rows.len() >= crate::MAX_PAGES as usize;
+        // The rest fits this page: it is the last row, balanced.
+        let budget = last_row_budget(&rest, room);
+        if out_of_pages || place_units(&rest, n, budget, true).is_some() {
+            let placed = place_units(&rest, n, budget, false).unwrap_or_default();
+            tops.extend(placed.into_iter().map(|(c, y)| (row * n + c, row_top + y)));
+            rows.push(ColumnRow {
+                top: row_top,
+                budget,
+            });
+            break;
+        }
+        let mut placed = fill_row(&rest, n, room, first_row && room + EPSILON < paging.page_h);
+        if placed.is_empty() && !first_row {
+            // Never stall: a full page takes at least one unit.
+            placed.push((0, 0.0));
+        }
+        start += placed.len();
+        tops.extend(placed.into_iter().map(|(c, y)| (row * n + c, row_top + y)));
+        rows.push(ColumnRow {
+            top: row_top,
+            budget: room,
+        });
+        row_top += room;
+        room = paging.page_h;
+    }
+    (tops, rows)
+}
+
+/// The multicol container's insets and basis, for laying it out as one
+/// block a column wide.
+#[derive(Clone, Copy, Debug)]
+struct SharedMeasure {
+    /// Left and right padding plus border.
+    inset_left: f32,
+    inset_right: f32,
+    parent_size: Size<Option<f32>>,
+}
+
+impl SharedMeasure {
+    /// Inputs that lay the container out as a block whose content box is
+    /// one column wide.
+    fn inputs_at(&self, col_w: f32) -> taffy::tree::LayoutInput {
+        let width = col_w + self.inset_left + self.inset_right;
+        taffy::tree::LayoutInput {
+            run_mode: RunMode::PerformLayout,
+            sizing_mode: SizingMode::InherentSize,
+            axis: RequestedAxis::Both,
+            known_dimensions: Size {
+                width: Some(width),
+                height: None,
+            },
+            known_dimensions_are_definite: Size {
+                width: true,
+                height: true,
+            },
+            parent_size: self.parent_size,
+            available_space: Size {
+                width: AvailableSpace::Definite(width),
+                height: AvailableSpace::MaxContent,
+            },
+            vertical_margins_are_collapsible: Line::FALSE,
+        }
+    }
+}
+
+/// Place `children` into `n` columns of `col_w`, starting at `y_offset`.
+/// `avail_h` caps the column height (for `column-fill: auto`, it is the
+/// column height). With `paging`, the columns are filled page by page and
+/// only the last page's columns are balanced.
 ///
-/// Returns `(placements, geometry)`:
+/// The children are flattened into flow units first: paragraphs break
+/// between lines, blocks without painting let their own children flow
+/// through the columns, blocks with a border, padding or background do
+/// too and are painted in one slice per column, and everything else is
+/// placed whole. Vertical margins collapse as in normal flow and are
+/// dropped at the top of a column after a break. `column-fill: balance`
+/// then searches for the smallest column height that holds everything.
 ///
-/// - `placements` is the `(child, location, size)` triples written back
-///   into Taffy's storage by `compute_multicol_layout`.
-/// - `geometry` carries the shape this segment contributes to the
-///   container's [`MulticolGeometry`]: column width, gap, column count,
-///   y-offset, and per-column filled height. The segment's vertical
-///   extent (what we used to return as `seg_h`) is recoverable as
-///   `geometry.col_heights.iter().copied().fold(0.0, f32::max)`.
+/// Returns `(placements, geometries, height)`:
+///
+/// - `placements` holds the `(child, location, size)` of the direct
+///   children, in the content-box frame. `compute_multicol_layout` shifts
+///   them by the container's insets and writes them to Taffy. Nested
+///   boxes (inside wrappers) are written here, relative to their wrapper.
+/// - `geometries` has one entry per row of columns (one per page when the
+///   set breaks across pages), each with the column width, gap, count,
+///   y-offset and per-column filled height. The first also carries the
+///   paragraphs and boxes split across columns, in its own frame.
+/// - `height` is the column set's height.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn layout_column_group(
     tree: &mut FulgurLayoutTree<'_>,
@@ -1049,319 +2134,387 @@ fn layout_column_group(
     children: &[NodeId],
     y_offset: f32,
     child_inputs: taffy::tree::LayoutInput,
-) -> (Vec<(NodeId, Point<f32>, Size<f32>)>, ColumnGroupGeometry) {
-    // 1. Measure
-    let mut measured: Vec<(NodeId, Size<f32>)> = Vec::with_capacity(children.len());
-    for &child in children {
-        let output = tree.compute_child_layout(child, child_inputs);
-        measured.push((child, output.size));
-    }
-
-    // 2. Budget selection — `column-fill: balance` (the default) searches
-    //    for the smallest budget that fits all children in `n` columns,
-    //    so the tallest column's height is minimised. `column-fill: auto`
-    //    (CSS Multi-column Level 1 §6.1) instead greedily fills columns
-    //    top-to-bottom up to `avail_h`, leaving trailing columns empty
-    //    when content fits in fewer than `n`.
-    let total_h: f32 = measured.iter().map(|(_, s)| s.height).sum();
-    let budget = match fill {
-        crate::column_css::ColumnFill::Auto => avail_h,
-        crate::column_css::ColumnFill::Balance => {
-            if total_h <= 0.0 {
-                0.0
-            } else if total_h >= avail_h * n as f32 {
-                avail_h
-            } else {
-                balance_budget(&measured, n, avail_h, total_h)
-            }
-        }
+    paging: Option<Paging>,
+    shared: Option<f32>,
+) -> (
+    Vec<(NodeId, Point<f32>, Size<f32>)>,
+    Vec<ColumnGroupGeometry>,
+    f32,
+) {
+    // 1. Measure at the column width. This also lays out every
+    //    descendant, so wrapper children have sizes and paragraphs have
+    //    lines broken at `col_w`.
+    //    A child with `width: auto` fills the column between its
+    //    margins; any other width is resolved against the column.
+    //    A group with a float among its children was laid out as part of
+    //    one block instead (`shared`, the container's left inset), so that
+    //    the content beside the float wraps around it.
+    let mut measured: Vec<FlowChild> = Vec::with_capacity(children.len());
+    let measure_alone = |tree: &mut FulgurLayoutTree<'_>, child: NodeId| {
+        let margin = margins(tree, child, col_w);
+        let auto_width = tree.get_core_container_style(child).size().width.is_auto();
+        let mut inputs = child_inputs;
+        inputs.known_dimensions.width =
+            auto_width.then(|| (col_w - margin.left - margin.right).max(0.0));
+        (tree.compute_child_layout(child, inputs).size, margin.left)
     };
-
-    // 3. Build the distribution work list. Each measured child becomes
-    //    either a single `Atomic` item (regular block / replaced / inline-
-    //    root that fits within the per-column budget) or a sequence of
-    //    `InlineRootSlice` items — one per non-empty column receiving lines
-    //    from a sliced inline-root paragraph (Case B in
-    //    `docs/plans/2026-05-03-multicol-inline-root-split.md`).
-    //
-    //    The pre-flight probe (commit 0c2c762) confirmed
-    //    `compute_child_layout(child, known_dimensions = col_w)` already
-    //    re-breaks parley to col_w during the measure step, so per-line
-    //    heights read from `inline_layout_data` reflect the column-width
-    //    wrap and don't need a manual `break_all_lines`.
-    enum DistItem {
-        Atomic {
-            id: NodeId,
-            size: Size<f32>,
-        },
-        InlineRootSlice {
-            source_id: NodeId,
-            line_range: std::ops::Range<usize>,
-            size: Size<f32>,
-        },
-    }
-
-    let mut items: Vec<DistItem> = Vec::with_capacity(measured.len());
-    // fulgur-6q5 Fix 3: pre-slicing assumed every InlineRootSlice
-    // sequence started in a fresh column (col_y = 0). When earlier
-    // atomic siblings have already consumed `virt_col_y > 0` of the
-    // current column, the slicer's per-column budgets no longer match
-    // what the distribute loop will actually grant — the first slice
-    // could be bumped to col 1, then two slices end up in the same
-    // output column, and the per-column `by_col` collector clobbers
-    // earlier ones. Track a virtual cursor that mirrors the distribute
-    // loop's column-advance rule, and feed the slicer the accurate
-    // (first_col_remainder, remaining_cols) pair.
-    let mut virt_col_idx: u32 = 0;
-    let mut virt_col_y: f32 = 0.0;
-    for (id, size) in &measured {
-        let id_u: usize = (*id).into();
-        // Borrow the post-measure parley layout only for plain paragraph
-        // children. The Case B materialiser reconstructs glyph runs, not
-        // arbitrary block boxes, so generic inline-root blocks must remain
-        // atomic to preserve padding/overflow/outline/background semantics.
-        let inline_root_layout = tree
-            .doc
-            .get_node(id_u)
-            .filter(|n| n.flags.is_inline_root())
-            .and_then(|n| n.element_data())
-            .filter(|e| e.name.local.as_ref() == "p")
-            .and_then(|e| e.inline_layout_data.as_ref())
-            .map(|tl| &tl.layout);
-
-        match inline_root_layout {
-            // fulgur-6q5 Fix 2: also gate on `parley_layout_is_glyph_run_only` —
-            // splitting a paragraph that contains inline images / inline-blocks
-            // would silently drop those items at convert time
-            // (`shape_paragraph_glyph_runs` reconstructs `GlyphRun`s only).
-            // Fall through to atomic placement instead so the paragraph
-            // renders intact in column 0.
-            Some(layout) if size.height > budget && parley_layout_is_glyph_run_only(layout) => {
-                let line_heights = crate::blitz_adapter::parley_line_heights(layout);
-                let first_remainder = (budget - virt_col_y).max(0.0);
-                let remaining_cols = n.saturating_sub(virt_col_idx);
-                let slices = slice_lines_with_first_col_remainder(
-                    &line_heights,
-                    first_remainder,
-                    budget,
-                    remaining_cols,
-                );
-                // Track the last non-empty slice's offset within
-                // `slices` (= relative column index from `virt_col_idx`)
-                // and its consumed height, so we can advance the virtual
-                // cursor to mirror the distribute loop's actual landing
-                // point for the next sibling.
-                let mut last_non_empty_col_offset: Option<usize> = None;
-                let mut last_non_empty_height: f32 = 0.0;
-                for (offset, (line_range, slice_h)) in slices.iter().enumerate() {
-                    if !line_range.is_empty() {
-                        items.push(DistItem::InlineRootSlice {
-                            source_id: *id,
-                            line_range: line_range.clone(),
-                            size: Size {
-                                width: col_w,
-                                height: *slice_h,
-                            },
-                        });
-                        last_non_empty_col_offset = Some(offset);
-                        last_non_empty_height = *slice_h;
-                    }
-                }
-                match last_non_empty_col_offset {
-                    Some(offset) => {
-                        if offset == 0 {
-                            // Landed in the same column the cursor was
-                            // already in; accumulate height.
-                            virt_col_y += last_non_empty_height;
-                        } else {
-                            // Advanced to a fresh column; restart at
-                            // that slice's height.
-                            virt_col_idx += offset as u32;
-                            virt_col_y = last_non_empty_height;
-                        }
-                    }
-                    None => {
-                        // No non-empty slices placed (degenerate: empty
-                        // inline-root). Cursor stays put.
-                    }
-                }
+    if let Some(inset_left) = shared {
+        for &child in children {
+            let layout = tree.get_unrounded_layout(child);
+            let mut size = layout.size;
+            if tree.is_multicol(child) {
+                // Blitz laid it out without columns.
+                size = measure_alone(tree, child).0;
             }
-            _ => {
-                // Atomic — mirror the distribute loop's column-advance
-                // check on the virtual cursor so subsequent slicing
-                // decisions see the right "remaining" state.
-                if virt_col_y > 0.0 && virt_col_y + size.height > budget && virt_col_idx + 1 < n {
-                    virt_col_idx += 1;
-                    virt_col_y = 0.0;
-                }
-                items.push(DistItem::Atomic {
-                    id: *id,
-                    size: *size,
-                });
-                virt_col_y += size.height;
-            }
+            measured.push(FlowChild {
+                id: child,
+                size,
+                x: layout.location.x - inset_left,
+                y: layout.location.y,
+                frame: 0,
+            });
+        }
+    } else {
+        for (index, &child) in children.iter().enumerate() {
+            let (size, x) = measure_alone(tree, child);
+            measured.push(FlowChild {
+                id: child,
+                size,
+                x,
+                y: 0.0,
+                frame: index as u32,
+            });
         }
     }
 
-    // 4. Distribute
-    let mut placements: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::with_capacity(items.len());
-    // Per-source accumulated slice metadata. `BTreeMap` (not `HashMap`)
-    // keeps iteration order deterministic — `paragraph_splits` flows into
-    // PDF byte order downstream.
-    let mut placed_slices: BTreeMap<usize, Vec<ColumnLineSlice>> = BTreeMap::new();
-    let mut col_idx: u32 = 0;
-    let mut col_y: f32 = 0.0;
-    for item in &items {
-        let size = match item {
-            DistItem::Atomic { size, .. } => *size,
-            DistItem::InlineRootSlice { size, .. } => *size,
-        };
+    // 2. Flatten into flow units and place them in rows of columns.
+    let flow = ColumnFlow::collect(tree, &measured, col_w, shared.is_some());
+    let (tops, rows) = place_rows(&flow.units, n, fill, avail_h, paging);
+    let content_top = |index: usize| tops[index].1 + flow.units[index].lead;
+    let content_bottom = |index: usize| content_top(index) + flow.units[index].height;
 
-        // Same column-advance check used for atomic children today.
-        if col_y > 0.0 && col_y + size.height > budget && col_idx + 1 < n {
-            col_idx += 1;
-            col_y = 0.0;
-        }
-
-        let col_x = col_idx as f32 * (col_w + gap);
-        let location = Point {
-            x: col_x,
-            y: y_offset + col_y,
-        };
-
-        match item {
-            DistItem::Atomic { id, .. } => {
-                placements.push((*id, location, size));
-            }
-            DistItem::InlineRootSlice {
-                source_id,
-                line_range,
-                ..
-            } => {
-                // Only the first slice owns the Taffy `set_unrounded_layout`
-                // write — that's what surrounding siblings position
-                // against. Later slices feed `paragraph_splits` only.
-                let id_u: usize = (*source_id).into();
-                let entry = placed_slices.entry(id_u).or_default();
-                if entry.is_empty() {
-                    placements.push((*source_id, location, size));
-                }
-                entry.push(ColumnLineSlice {
-                    line_range: line_range.clone(),
-                    // Slice origin in the *content-box frame* — same
-                    // convention used for `col_heights` (relative to
-                    // `y_offset`). The container-level border-box shift
-                    // applied in `compute_multicol_layout` updates these
-                    // alongside the rest of the geometry.
-                    origin: Point {
-                        x: col_x.as_px(),
-                        y: col_y.as_px(),
-                    },
-                    size: taffy::Size {
-                        width: size.width.as_px(),
-                        height: size.height.as_px(),
-                    },
-                });
-            }
-        }
-
-        col_y += size.height;
-    }
-
-    // 5. Per-column filled heights — bottom-most placement per column,
-    //    relative to y_offset. Empty columns stay at 0.0.
-    //
-    //    We recover each placement's column index by inverting the
-    //    `col_x = col_idx * (col_w + gap)` formula from step 4. The stride
-    //    `col_w + gap` is non-zero for any real multicol container (both
-    //    `col_w` and `gap` are `>= 0.0`, and `col_w == 0 && gap == 0`
-    //    indicates a degenerate container where the column index doesn't
-    //    meaningfully differ across placements anyway). The guard below
-    //    protects against a divide-by-zero; `round()` tolerates float
-    //    accumulation from the multiplication in step 4.
+    // 3. Column geometry, per row.
     let stride = col_w + gap;
-    let resolve_col_idx = |x: f32| -> usize {
-        if stride > 0.0 {
-            let raw = (x / stride).round();
-            if raw.is_finite() && raw >= 0.0 {
-                (raw as u32).min(n.saturating_sub(1)) as usize
+    let col_x = |slot: u32| (slot % n) as f32 * stride;
+    let row_of = |slot: u32| (slot / n) as usize;
+    let mut col_heights: Vec<Vec<f32>> = vec![vec![0.0_f32; n as usize]; rows.len()];
+    for (unit, &(slot, top)) in flow.units.iter().zip(&tops) {
+        let row = row_of(slot);
+        let h = &mut col_heights[row][(slot % n) as usize];
+        *h = h.max(top - rows[row].top + unit.extent());
+    }
+    if let Some(&(slot, _)) = tops.last() {
+        col_heights[row_of(slot)][(slot % n) as usize] += flow.trailing_margin;
+    }
+    // Each float's top, relative to the column set. A float above the top
+    // of a column its anchor starts after a break is moved down to it.
+    let float_tops: Vec<f32> = flow
+        .floats
+        .iter()
+        .map(|float| {
+            let (slot, _) = tops[float.anchor];
+            let top = content_top(float.anchor) + float.dy;
+            let starts_column = float.anchor == 0 || tops[float.anchor - 1].0 != slot;
+            if starts_column && slot >= n {
+                top.max(rows[row_of(slot)].top)
+            } else if starts_column {
+                top.max(0.0)
             } else {
-                0
-            }
-        } else {
-            0
-        }
-    };
-    let mut col_heights: Vec<f32> = vec![0.0_f32; n as usize];
-    for (_, loc, sz) in &placements {
-        let idx = resolve_col_idx(loc.x);
-        let bottom = (loc.y - y_offset) + sz.height;
-        if bottom > col_heights[idx] {
-            col_heights[idx] = bottom;
-        }
-    }
-    // Augment with later-column slices that don't appear in `placements`
-    // (only the first slice of each split paragraph is written back to
-    // Taffy storage).
-    for slices in placed_slices.values() {
-        for slice in slices.iter().skip(1) {
-            let idx = resolve_col_idx(slice.origin.x.to_f32());
-            let bottom = (slice.origin.y + slice.size.height).to_f32();
-            if bottom > col_heights[idx] {
-                col_heights[idx] = bottom;
-            }
-        }
-    }
-    // Guard against negative accumulation (should be unreachable given
-    // `y_offset` is the segment's top and placements live at or below it,
-    // but the clamp keeps the invariant `col_heights[i] >= 0.0` explicit).
-    for h in col_heights.iter_mut() {
-        if *h < 0.0 {
-            *h = 0.0;
-        }
-    }
-
-    // 6. Build `paragraph_splits` from the per-source slice accumulator.
-    //    Each entry's `column_slices` length equals `n`, with empty
-    //    `ColumnLineSlice` placeholders for unused columns so downstream
-    //    consumers can index by column position without bounds juggling.
-    let paragraph_splits: Vec<ParagraphSplitEntry> = placed_slices
-        .into_iter()
-        .map(|(source_id, mut slices)| {
-            let mut by_col: Vec<Option<ColumnLineSlice>> = (0..n).map(|_| None).collect();
-            for slice in slices.drain(..) {
-                let idx = resolve_col_idx(slice.origin.x.to_f32());
-                by_col[idx] = Some(slice);
-            }
-            let column_slices: Vec<ColumnLineSlice> =
-                by_col.into_iter().map(|s| s.unwrap_or_default()).collect();
-            debug_assert_eq!(column_slices.len(), n as usize);
-            ParagraphSplitEntry {
-                source_node_id: source_id,
-                column_slices,
+                top
             }
         })
         .collect();
-
-    let geometry = ColumnGroupGeometry {
-        // `x_offset` / `y_offset` here are in the container's *content-box*
-        // frame; `compute_multicol_layout` shifts them into the border-box
-        // frame after every segment is placed (see the inset loop that runs
-        // over `group_geometries` in that function).
-        x_offset: 0.0_f32.as_px(),
-        y_offset: y_offset.as_px(),
-        col_w: col_w.as_px(),
-        gap: gap.as_px(),
-        n,
-        col_heights: col_heights
-            .iter()
-            .copied()
-            .map(crate::units::F32Units::as_px)
-            .collect(),
-        paragraph_splits,
+    for (float, &top) in flow.floats.iter().zip(&float_tops) {
+        let slot = tops[float.anchor].0;
+        let row = row_of(slot);
+        let bottom = top + (float.margin_bottom - float.top);
+        let h = &mut col_heights[row][(slot % n) as usize];
+        *h = h.max(bottom - rows[row].top);
+    }
+    // Where a box broken at the end of a column ends: the column box.
+    let column_end = |slot: u32, run_bottom: f32| {
+        let row = rows[row_of(slot)];
+        if row.budget.is_finite() {
+            (row.top + row.budget).max(run_bottom)
+        } else {
+            run_bottom
+        }
     };
 
-    (placements, geometry)
+    // 4. Absolute (group-frame) boxes. Invisible wrappers cover every
+    //    column their units touch, from the highest to the lowest unit. A
+    //    framed box in one column gets its own box there; one that breaks
+    //    is lent the covering box too and painted from `box_splits`.
+    let full_w = n as f32 * col_w + n.saturating_sub(1) as f32 * gap;
+    let mut box_splits: Vec<BoxSplitEntry> = Vec::new();
+    let mut wrapper_boxes: Vec<(Point<f32>, Size<f32>)> = Vec::with_capacity(flow.wrappers.len());
+    for wrapper in &flow.wrappers {
+        let range = wrapper.units.clone();
+        let runs = column_runs(&tops, range.clone());
+        let covering = || {
+            let top = range
+                .clone()
+                .map(|i| tops[i].1)
+                .fold(f32::INFINITY, f32::min);
+            let bottom = range
+                .clone()
+                .map(|i| tops[i].1 + flow.units[i].extent())
+                .fold(0.0_f32, f32::max);
+            let top = if top.is_finite() { top } else { 0.0 };
+            (top, bottom)
+        };
+        let boxed = match (wrapper.frame, runs.as_slice()) {
+            (Some(frame), [(slot, first, last)]) => {
+                let top = tops[*first].1 + frame.top_offset;
+                let bottom = content_bottom(*last) + frame.bottom_offset;
+                (
+                    Point {
+                        x: col_x(*slot) + wrapper.x,
+                        y: y_offset + top,
+                    },
+                    Size {
+                        width: frame.width,
+                        height: (bottom - top).max(0.0),
+                    },
+                )
+            }
+            (Some(frame), [.., (_, _, last_unit)]) => {
+                let box_top = tops[range.start].1 + frame.top_offset;
+                let box_bottom = content_bottom(*last_unit) + frame.bottom_offset;
+                let mut fragments = Vec::with_capacity(runs.len());
+                let mut consumed = 0.0_f32;
+                for (i, &(slot, _, last)) in runs.iter().enumerate() {
+                    let top = if i == 0 {
+                        box_top
+                    } else {
+                        rows[row_of(slot)].top
+                    };
+                    let bottom = if i + 1 == runs.len() {
+                        box_bottom
+                    } else {
+                        column_end(slot, tops[last].1 + flow.units[last].extent())
+                    };
+                    let height = (bottom - top).max(0.0);
+                    fragments.push(BoxFragment {
+                        origin: Point {
+                            x: (col_x(slot) + wrapper.x).as_px(),
+                            y: top.as_px(),
+                        },
+                        size: Size {
+                            width: frame.width.as_px(),
+                            height: height.as_px(),
+                        },
+                        offset: consumed.as_px(),
+                    });
+                    consumed += height;
+                }
+                box_splits.push(BoxSplitEntry {
+                    source_node_id: usize::from(wrapper.id),
+                    height: consumed.as_px(),
+                    fragments,
+                });
+                let (top, bottom) = covering();
+                let top = top.min(box_top);
+                (
+                    Point {
+                        x: 0.0,
+                        y: y_offset + top,
+                    },
+                    Size {
+                        width: full_w,
+                        height: (bottom - top).max(0.0),
+                    },
+                )
+            }
+            _ => {
+                let (top, bottom) = covering();
+                (
+                    Point {
+                        x: 0.0,
+                        y: y_offset + top,
+                    },
+                    Size {
+                        width: full_w,
+                        height: (bottom - top).max(0.0),
+                    },
+                )
+            }
+        };
+        wrapper_boxes.push(boxed);
+    }
+    box_splits.sort_by_key(|b| b.source_node_id);
+
+    let mut top_level: Vec<(NodeId, Point<f32>, Size<f32>)> = Vec::new();
+    for (wrapper, &(abs, size)) in flow.wrappers.iter().zip(&wrapper_boxes) {
+        let parent_origin = wrapper.parent.map(|p| wrapper_boxes[p].0);
+        match parent_origin {
+            None => top_level.push((wrapper.id, abs, size)),
+            Some(origin) => {
+                let mut layout = tree.doc.get_unrounded_layout(wrapper.id);
+                layout.location = Point {
+                    x: abs.x - origin.x,
+                    y: abs.y - origin.y,
+                };
+                layout.size = size;
+                tree.set_unrounded_layout(wrapper.id, &layout);
+            }
+        }
+    }
+
+    let mut place = |tree: &mut FulgurLayoutTree<'_>,
+                     id: NodeId,
+                     parent: Option<usize>,
+                     abs: Point<f32>,
+                     size: Size<f32>| {
+        match parent {
+            None => top_level.push((id, abs, size)),
+            Some(p) => {
+                let origin = wrapper_boxes[p].0;
+                let mut layout = tree.doc.get_unrounded_layout(id);
+                layout.location = Point {
+                    x: abs.x - origin.x,
+                    y: abs.y - origin.y,
+                };
+                layout.size = size;
+                tree.set_unrounded_layout(id, &layout);
+            }
+        }
+    };
+
+    // 5. Blocks and paragraphs.
+    let mut paragraph_lines: Vec<Vec<(u32, f32, f32)>> = vec![Vec::new(); flow.paragraphs.len()];
+    for (index, unit) in flow.units.iter().enumerate() {
+        let slot = tops[index].0;
+        match unit.kind {
+            FlowUnitKind::Block(b) => {
+                let block = &flow.blocks[b];
+                let abs = Point {
+                    x: col_x(slot) + block.x,
+                    y: y_offset + content_top(index),
+                };
+                place(tree, block.id, block.parent, abs, block.size);
+            }
+            FlowUnitKind::Line(paragraph) => {
+                paragraph_lines[paragraph].push((slot, content_top(index), unit.height));
+            }
+        }
+    }
+
+    for (float, &top) in flow.floats.iter().zip(&float_tops) {
+        let slot = tops[float.anchor].0;
+        let abs = Point {
+            x: col_x(slot) + float.block.x,
+            y: y_offset + top,
+        };
+        place(
+            tree,
+            float.block.id,
+            float.block.parent,
+            abs,
+            float.block.size,
+        );
+    }
+
+    let mut paragraph_splits: Vec<ParagraphSplitEntry> = Vec::new();
+    for (paragraph, lines) in flow.paragraphs.iter().zip(&paragraph_lines) {
+        let Some(&(first_slot, first_top, _)) = lines.first() else {
+            continue;
+        };
+        // Consecutive lines per column: (slot, first line, line count,
+        // top, height).
+        let mut runs: Vec<(u32, usize, usize, f32, f32)> = Vec::new();
+        for (index, &(slot, top, height)) in lines.iter().enumerate() {
+            match runs.last_mut() {
+                Some(run) if run.0 == slot => {
+                    run.2 += 1;
+                    run.4 = top + height - run.3;
+                }
+                _ => runs.push((slot, index, 1, top, height)),
+            }
+        }
+        let first_abs = Point {
+            x: col_x(first_slot) + paragraph.x,
+            y: y_offset + first_top,
+        };
+        if runs.len() == 1 {
+            place(
+                tree,
+                paragraph.id,
+                paragraph.parent,
+                first_abs,
+                paragraph.size,
+            );
+            continue;
+        }
+        // The box keeps the first slice; the convert pass draws every
+        // slice from `paragraph_splits`. When the slices reach later rows
+        // (pages), the box reaches down to the last one, so that the
+        // paragraph is drawn on each of those pages.
+        let last = runs[runs.len() - 1];
+        let height = if row_of(last.0) == row_of(first_slot) {
+            runs[0].4
+        } else {
+            last.3 + last.4 - first_top
+        };
+        let first_size = Size {
+            width: paragraph.size.width,
+            height,
+        };
+        place(tree, paragraph.id, paragraph.parent, first_abs, first_size);
+        let column_slices: Vec<ColumnLineSlice> = runs
+            .iter()
+            .map(|&(slot, start, count, top, height)| ColumnLineSlice {
+                line_range: start..start + count,
+                origin: Point {
+                    x: (col_x(slot) + paragraph.x).as_px(),
+                    y: top.as_px(),
+                },
+                size: Size {
+                    width: paragraph.size.width.as_px(),
+                    height: height.as_px(),
+                },
+            })
+            .collect();
+        paragraph_splits.push(ParagraphSplitEntry {
+            source_node_id: usize::from(paragraph.id),
+            column_slices,
+        });
+    }
+    // `paragraph_splits` flows into PDF byte order downstream: keep it in
+    // node order, as the previous `BTreeMap` collector did.
+    paragraph_splits.sort_by_key(|p| p.source_node_id);
+
+    // `x_offset` / `y_offset` here are in the container's *content-box*
+    // frame; `compute_multicol_layout` shifts them into the border-box
+    // frame after every segment is placed. Split paragraphs and boxes are
+    // recorded on the first row, in its frame.
+    let mut paragraph_splits = Some(paragraph_splits);
+    let mut box_splits = Some(box_splits);
+    let geometries: Vec<ColumnGroupGeometry> = rows
+        .iter()
+        .zip(&col_heights)
+        .map(|(row, heights)| ColumnGroupGeometry {
+            x_offset: 0.0_f32.as_px(),
+            y_offset: (y_offset + row.top).as_px(),
+            col_w: col_w.as_px(),
+            gap: gap.as_px(),
+            n,
+            col_heights: heights
+                .iter()
+                .copied()
+                .map(crate::units::F32Units::as_px)
+                .collect(),
+            paragraph_splits: paragraph_splits.take().unwrap_or_default(),
+            box_splits: box_splits.take().unwrap_or_default(),
+        })
+        .collect();
+    let height = rows
+        .last()
+        .zip(col_heights.last())
+        .map(|(row, heights)| row.top + heights.iter().copied().fold(0.0_f32, f32::max))
+        .unwrap_or(0.0);
+
+    (top_level, geometries, height)
 }
 
 /// Distribute `line_heights` (per-line total height in CSS px) across
@@ -1413,66 +2566,6 @@ fn slice_lines_by_budget(
     out
 }
 
-/// fulgur-6q5 Fix 3: variant of [`slice_lines_by_budget`] that
-/// distributes lines into a sequence of columns where the first column
-/// has a smaller-than-`full_budget` remainder (because earlier siblings
-/// already consumed part of it). The non-first columns continue to use
-/// `full_budget`.
-///
-/// Returns one `(line_range, slice_height)` pair per *remaining* column
-/// (i.e. the slice has length `remaining_cols`).
-///
-/// The first column's budget is `first_col_remainder`, which may be
-/// zero or negative — in that case the first column produces an empty
-/// range (no line forced in, since the column has no room) unless it's
-/// also the only / last remaining column. All subsequent columns use
-/// `full_budget`. The same monolithic-line rule (first non-skipped line
-/// always fits) and "last column absorbs overflow" rule from
-/// [`slice_lines_by_budget`] apply.
-fn slice_lines_with_first_col_remainder(
-    line_heights: &[f32],
-    first_col_remainder: f32,
-    full_budget: f32,
-    remaining_cols: u32,
-) -> Vec<(std::ops::Range<usize>, f32)> {
-    let n = remaining_cols.max(1) as usize;
-    let mut out = Vec::with_capacity(n);
-    let mut start = 0_usize;
-    for col in 0..n {
-        let mut consumed = 0.0_f32;
-        let mut end = start;
-        let last_col = col == n - 1;
-        let this_budget = if col == 0 {
-            first_col_remainder.max(0.0)
-        } else {
-            full_budget
-        };
-        // First column with zero remainder: emit an empty slice so the
-        // existing column carries no extra lines, and let the next
-        // column take its first line at full budget. Skip this guard
-        // for the last column to keep the "absorb remainder" rule.
-        if this_budget <= 0.0 && !last_col {
-            out.push((start..start, 0.0));
-            continue;
-        }
-        while end < line_heights.len() {
-            let h = line_heights[end];
-            let line_count = end - start;
-            // First line in this column always fits (monolithic-line rule).
-            // Otherwise stop when adding this line would overflow,
-            // unless we are the final column (absorb remainder).
-            if line_count > 0 && consumed + h > this_budget && !last_col {
-                break;
-            }
-            consumed += h;
-            end += 1;
-        }
-        out.push((start..end, consumed));
-        start = end;
-    }
-    out
-}
-
 /// fulgur-6q5 Fix 2: returns true when every line of `layout` contains
 /// only `GlyphRun` items (no `InlineBox`).
 ///
@@ -1498,41 +2591,6 @@ fn parley_layout_is_glyph_run_only(layout: &parley::Layout<blitz_dom::node::Text
     true
 }
 
-/// Linear search for the smallest per-column budget (starting from `total / n`
-/// and growing in `avail_h / 20` increments) that fits all children in `n`
-/// columns with no overflow. Bounded to ≤ 20 iterations.
-fn balance_budget(measured: &[(NodeId, Size<f32>)], n: u32, avail_h: f32, total_h: f32) -> f32 {
-    let ideal = (total_h / n as f32).ceil().max(1.0);
-    let step = (avail_h / 20.0).max(1.0);
-    let mut budget = ideal;
-    while budget <= avail_h {
-        if fits_in_n_columns(measured, n, budget) {
-            return budget;
-        }
-        budget += step;
-    }
-    avail_h
-}
-
-/// Greedy pack: returns true when all children fit into `n` columns of the
-/// given per-column budget. Mirrors the placement loop in
-/// `compute_multicol_layout` but without writing back.
-fn fits_in_n_columns(measured: &[(NodeId, Size<f32>)], n: u32, budget: f32) -> bool {
-    let mut col_idx: u32 = 0;
-    let mut col_y: f32 = 0.0;
-    for (_, size) in measured {
-        if col_y > 0.0 && col_y + size.height > budget {
-            if col_idx + 1 >= n {
-                return false;
-            }
-            col_idx += 1;
-            col_y = 0.0;
-        }
-        col_y += size.height;
-    }
-    true
-}
-
 /// Recursively clear Taffy's layout cache for `node_id` and all its DOM
 /// descendants. Depth is bounded by `MAX_DOM_DEPTH` to match the rest of
 /// the DOM-walking helpers in this module.
@@ -1546,14 +2604,16 @@ fn clear_subtree_cache_inner(doc: &mut BaseDocument, node_id: usize, depth: usiz
     }
     // Single lookup: clear this node's cache and clone its children in one
     // `get_node_mut`, bailing early when the node is absent.
-    let children = if let Some(node) = doc.get_node_mut(node_id) {
-        node.cache.clear();
+    let children = if let Some(node) = doc.get_node_mut(crate::blitz_adapter::bid(node_id)) {
+        if let Some(ld) = node.try_layout_data_mut() {
+            ld.cache.clear();
+        }
         node.children.clone()
     } else {
         return;
     };
     for child_id in children {
-        clear_subtree_cache_inner(doc, child_id, depth + 1);
+        clear_subtree_cache_inner(doc, crate::blitz_adapter::uid(child_id), depth + 1);
     }
 }
 
@@ -1569,31 +2629,43 @@ fn clear_subtree_cache_inner(doc: &mut BaseDocument, node_id: usize, depth: usiz
 /// corrected positions.
 fn propagate_height_delta(doc: &mut BaseDocument, node_id: usize, delta: f32) {
     let mut current = node_id;
-    while let Some(parent_id) = doc.get_node(current).and_then(|n| n.parent) {
+    while let Some(parent_id) = doc
+        .get_node(crate::blitz_adapter::bid(current))
+        .and_then(|n| n.parent)
+    {
         let siblings_after: Vec<usize> = {
             let Some(parent_node) = doc.get_node(parent_id) else {
                 break;
             };
-            let Some(idx) = parent_node.children.iter().position(|&c| c == current) else {
+            let Some(idx) = parent_node
+                .children
+                .iter()
+                .position(|&c| c == crate::blitz_adapter::bid(current))
+            else {
                 break;
             };
-            parent_node.children[idx + 1..].to_vec()
+            crate::blitz_adapter::uids(&parent_node.children[idx + 1..])
         };
         for sibling in siblings_after {
-            if let Some(node) = doc.get_node_mut(sibling) {
-                node.unrounded_layout.location.y += delta;
-                node.final_layout.location.y += delta;
+            if let Some(node) = doc.get_node_mut(crate::blitz_adapter::bid(sibling)) {
+                // Text / comment siblings carry no layout in blitz-dom 0.3.
+                if let Some(ld) = node.try_layout_data_mut() {
+                    ld.unrounded_layout.location.y += delta;
+                    ld.final_layout.location.y += delta;
+                }
             }
         }
         if let Some(node) = doc.get_node_mut(parent_id) {
-            node.unrounded_layout.size.height += delta;
-            node.final_layout.size.height += delta;
-            // Invalidate Taffy's cached layout output for this ancestor;
-            // we just mutated its size, so a later layout pass must
-            // recompute rather than trust the pre-propagation entry.
-            node.cache.clear();
+            if let Some(ld) = node.try_layout_data_mut() {
+                ld.unrounded_layout.size.height += delta;
+                ld.final_layout.size.height += delta;
+                // Invalidate Taffy's cached layout output for this ancestor;
+                // we just mutated its size, so a later layout pass must
+                // recompute rather than trust the pre-propagation entry.
+                ld.cache.clear();
+            }
         }
-        current = parent_id;
+        current = crate::blitz_adapter::uid(parent_id);
     }
 }
 
@@ -1604,24 +2676,31 @@ fn collect_multicol_node_ids(doc: &BaseDocument) -> Vec<usize> {
         if depth >= crate::MAX_DOM_DEPTH {
             return;
         }
-        let Some(node) = doc.get_node(id) else {
+        let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
             return;
         };
         if crate::blitz_adapter::is_multicol_container(node) {
             out.push(id);
         }
         for &child in &node.children {
-            walk(doc, child, depth + 1, out);
+            walk(doc, crate::blitz_adapter::uid(child), depth + 1, out);
         }
     }
     let mut out = Vec::new();
-    walk(doc, doc.root_element().id, 0, &mut out);
+    walk(
+        doc,
+        crate::blitz_adapter::uid(doc.root_element().id),
+        0,
+        &mut out,
+    );
     out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use crate::blitz_adapter::TaffyDocExt;
 
     #[test]
     fn column_group_geometry_default_paragraph_splits_is_empty() {
@@ -1760,32 +2839,46 @@ mod tests {
         // Find nodes by element id for readability in the assertion.
         fn find_by_id(doc: &BaseDocument, id: &str) -> Option<usize> {
             fn walk(doc: &BaseDocument, node_id: usize, target: &str) -> Option<usize> {
-                let node = doc.get_node(node_id)?;
+                let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
                 if let Some(ed) = node.element_data() {
-                    if let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
-                    {
+                    if let Some(attr_id) = ed.attrs().iter().find(|a| (&a.name.local) == "id") {
                         if attr_id.value.as_str() == target {
                             return Some(node_id);
                         }
                     }
                 }
                 for &child in &node.children {
-                    if let Some(found) = walk(doc, child, target) {
+                    if let Some(found) = walk(doc, crate::blitz_adapter::uid(child), target) {
                         return Some(found);
                     }
                 }
                 None
             }
-            walk(doc, doc.root_element().id, id)
+            walk(doc, crate::blitz_adapter::uid(doc.root_element().id), id)
         }
 
         let mc_id = find_by_id(&doc, "mc").expect("multicol node");
         let after_id = find_by_id(&doc, "after").expect("after paragraph");
 
-        let mc_y_before = doc.get_node(mc_id).unwrap().unrounded_layout.location.y;
-        let mc_h_before = doc.get_node(mc_id).unwrap().unrounded_layout.size.height;
+        let mc_y_before = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
+        let mc_h_before = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
         let mc_bottom_before = mc_y_before + mc_h_before;
-        let after_y_before = doc.get_node(after_id).unwrap().unrounded_layout.location.y;
+        let after_y_before = doc
+            .get_node(crate::blitz_adapter::bid(after_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
         // Assert blitz stacked them in order with no overlap. CSS margins
         // can widen the gap, so just require `after` to start at or below
         // multicol's bottom.
@@ -1798,9 +2891,25 @@ mod tests {
         let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
-        let mc_h_after = doc.get_node(mc_id).unwrap().unrounded_layout.size.height;
-        let mc_bottom_after = doc.get_node(mc_id).unwrap().unrounded_layout.location.y + mc_h_after;
-        let after_y_after = doc.get_node(after_id).unwrap().unrounded_layout.location.y;
+        let mc_h_after = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
+        let mc_bottom_after = doc
+            .get_node(crate::blitz_adapter::bid(mc_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y
+            + mc_h_after;
+        let after_y_after = doc
+            .get_node(crate::blitz_adapter::bid(after_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
 
         // After balance, the multicol is shorter and the sibling below
         // it has moved up by the same delta (propagate_height_delta).
@@ -1949,65 +3058,85 @@ mod tests {
         assert_eq!(w, 300.0);
     }
 
-    // ── balance_budget / fits_in_n_columns ──────────────────────────
-    fn fake_sized(n: usize, h: f32) -> Vec<(NodeId, Size<f32>)> {
-        (0..n)
-            .map(|i| {
-                (
-                    NodeId::from(i),
-                    Size {
-                        width: 100.0,
-                        height: h,
-                    },
-                )
-            })
-            .collect()
+    // ── flow units: margins, placement, balancing ────────────────────
+    fn line(height: f32, gap_before: f32) -> FlowUnit {
+        FlowUnit {
+            kind: FlowUnitKind::Line(0),
+            height,
+            gap_before,
+            lead: 0.0,
+            trail: 0.0,
+            keep_with_previous: false,
+            overhang: 0.0,
+        }
     }
 
     #[test]
-    fn balance_budget_converges_at_ideal_when_divisible() {
-        // 4 children × 10pt = 40pt total, n=2 → ideal = 20pt budget which
-        // packs exactly 2 per column.
-        let children = fake_sized(4, 10.0);
-        let budget = balance_budget(
-            &children, 2, /* avail_h = */ 100.0, /* total_h = */ 40.0,
-        );
-        assert!(
-            (budget - 20.0).abs() < 0.01,
-            "expected budget ≈ 20, got {budget}"
-        );
+    fn collapsed_margin_takes_largest_positive_plus_most_negative() {
+        let mut m = CollapsedMargin::default();
+        m.add(10.0);
+        m.add(16.0);
+        assert_eq!(m.value(), 16.0);
+        m.add(-4.0);
+        m.add(-6.0);
+        assert_eq!(m.value(), 10.0);
     }
 
     #[test]
-    fn balance_budget_grows_when_ideal_leaves_overflow() {
-        // 5 children × 10pt, n=2: ideal = 25pt. Packing at 25pt fits 2+1
-        // with 2 overflow lines → balance grows.
-        let children = fake_sized(5, 10.0);
-        let budget = balance_budget(
-            &children, 2, /* avail_h = */ 100.0, /* total_h = */ 50.0,
-        );
-        assert!((25.0..=100.0).contains(&budget));
-        // At whatever budget balance settled on, fits_in_n_columns must be
-        // true — that's the stop condition.
-        assert!(fits_in_n_columns(&children, 2, budget));
+    fn place_units_keeps_margins_inside_a_column_and_drops_them_after_a_break() {
+        // Two paragraphs of two 10px lines, 5px apart, in columns of 25px.
+        let units = [
+            line(10.0, 5.0),
+            line(10.0, 0.0),
+            line(10.0, 5.0),
+            line(10.0, 0.0),
+        ];
+        let tops = place_units(&units, 2, 25.0, true).unwrap();
+        // The first column keeps its leading margin: 5, 15. The third line
+        // (5 + 10 = 15 → 25 + 5 + 10 = 40 > 25) moves to column 1, where
+        // the margin before it is dropped.
+        assert_eq!(tops, vec![(0, 5.0), (0, 15.0), (1, 0.0), (1, 10.0)]);
     }
 
     #[test]
-    fn balance_budget_caps_at_avail_h_when_content_overflows() {
-        // 10 children × 10pt = 100pt total, n=2, avail_h=30 → cannot fit
-        // in 2 × 30pt columns. Returns avail_h as the auto fallback.
-        let children = fake_sized(10, 10.0);
-        let budget = balance_budget(
-            &children, 2, /* avail_h = */ 30.0, /* total_h = */ 100.0,
-        );
-        assert!((budget - 30.0).abs() < 0.01);
+    fn place_units_strict_fails_when_columns_run_out_and_lenient_overflows() {
+        let units = [line(10.0, 0.0), line(10.0, 0.0), line(10.0, 0.0)];
+        assert!(place_units(&units, 1, 15.0, true).is_none());
+        let tops = place_units(&units, 1, 15.0, false).unwrap();
+        assert_eq!(tops, vec![(0, 0.0), (0, 10.0), (0, 20.0)]);
     }
 
     #[test]
-    fn fits_in_n_columns_detects_overflow() {
-        let children = fake_sized(6, 10.0);
-        assert!(fits_in_n_columns(&children, 2, 30.0)); // 3 per col at 30pt
-        assert!(!fits_in_n_columns(&children, 2, 20.0)); // 2 per col → 2 left over
+    fn place_units_puts_an_oversized_unit_alone_in_a_column() {
+        let units = [line(10.0, 0.0), line(50.0, 0.0), line(10.0, 0.0)];
+        let tops = place_units(&units, 3, 20.0, true).unwrap();
+        assert_eq!(tops, vec![(0, 0.0), (1, 0.0), (2, 0.0)]);
+    }
+
+    #[test]
+    fn balanced_budget_splits_lines_evenly() {
+        // 21 lines of 22px in 3 columns: 7 lines each.
+        let units: Vec<FlowUnit> = (0..21).map(|_| line(22.0, 0.0)).collect();
+        let budget = balanced_budget(&units, 3);
+        assert!((budget - 154.0).abs() < 0.1, "{budget}");
+    }
+
+    #[test]
+    fn balanced_budget_accounts_for_margins_and_breaks() {
+        // Seven lines, then a 10px margin, then seven more. In two columns
+        // the margin falls at the break and is dropped: 7 lines per column.
+        let mut units: Vec<FlowUnit> = (0..7).map(|_| line(20.0, 0.0)).collect();
+        units.extend((0..7).map(|i| line(20.0, if i == 0 { 10.0 } else { 0.0 })));
+        let budget = balanced_budget(&units, 2);
+        assert!((budget - 140.0).abs() < 0.1, "{budget}");
+        let tops = place_units(&units, 2, budget, true).unwrap();
+        assert_eq!(tops[7], (1, 0.0));
+    }
+
+    #[test]
+    fn balanced_budget_of_nothing_is_zero() {
+        assert_eq!(balanced_budget(&[], 3), 0.0);
+        assert_eq!(balanced_budget(&[line(0.0, 0.0)], 3), 0.0);
     }
 
     // ── slice_lines_by_budget ───────────────────────────────────────
@@ -2066,93 +3195,28 @@ mod tests {
         }
     }
 
-    // ── slice_lines_with_first_col_remainder (fulgur-6q5 Fix 3) ──────
-
-    #[test]
-    fn slice_lines_with_remainder_full_remainder_matches_basic_slice() {
-        // When the first column has a fresh budget (remainder == full
-        // budget), the helper must agree with `slice_lines_by_budget`.
-        let heights = [10.0_f32; 10];
-        let slices_basic = slice_lines_by_budget(&heights, /*budget*/ 50.0, /*n*/ 2);
-        let slices_rem = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 50.0, /*full_budget*/ 50.0,
-            /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices_basic, slices_rem);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_zero_first_col_is_empty() {
-        // First column already full → zero remainder. The helper must
-        // emit an empty col-0 slice and let col-1 pick up at full
-        // budget (without forcing a line into the empty col 0).
-        let heights = [10.0_f32; 5];
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 0.0, /*full_budget*/ 30.0,
-            /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices.len(), 2);
-        assert_eq!(slices[0], (0..0, 0.0));
-        // Last column absorbs all remaining lines.
-        assert_eq!(slices[1].0, 0..5);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_partial_first_col_smaller_share() {
-        // First column has a smaller budget (15 vs 30). It can fit one
-        // 10-line; the second line would push consumed to 20 > 15, so
-        // it advances. Subsequent columns at full budget take the rest.
-        let heights = [10.0_f32; 5]; // total 50
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 15.0, /*full_budget*/ 30.0,
-            /*remaining_cols*/ 3,
-        );
-        assert_eq!(slices.len(), 3);
-        assert_eq!(slices[0], (0..1, 10.0));
-        assert_eq!(slices[1], (1..4, 30.0));
-        assert_eq!(slices[2], (4..5, 10.0));
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_last_col_absorbs_overflow() {
-        // 5 lines × 20pt = 100pt total. First-col remainder 20, full
-        // budget 20, only 2 remaining columns — the second column must
-        // still absorb the rest (overflow), never silently drop.
-        let heights = [20.0_f32; 5];
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, /*first_remainder*/ 20.0, /*full_budget*/ 20.0,
-            /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices[0], (0..1, 20.0));
-        assert_eq!(slices[1].0, 1..5);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_empty_input_returns_n_empty_slices() {
-        let slices = slice_lines_with_first_col_remainder(&[], 50.0, 100.0, 3);
-        assert_eq!(slices.len(), 3);
-        for (range, h) in &slices {
-            assert!(range.is_empty());
-            assert_eq!(*h, 0.0);
-        }
-    }
-
     // ── propagate_height_delta: edge cases ──────────────────────────
     /// Walk a document and dump (node_id, y, height) for every node with
     /// a non-zero final_layout size. Used for delta-propagation assertions.
     fn node_layouts(doc: &BaseDocument) -> Vec<(usize, f32, f32)> {
         let mut out = Vec::new();
         fn walk(doc: &BaseDocument, id: usize, out: &mut Vec<(usize, f32, f32)>) {
-            let Some(node) = doc.get_node(id) else { return };
-            let sz = node.unrounded_layout.size;
+            let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
+                return;
+            };
+            let sz = node.unrounded_layout_or_zero().size;
             if sz.width > 0.0 || sz.height > 0.0 {
-                out.push((id, node.unrounded_layout.location.y, sz.height));
+                out.push((id, node.unrounded_layout_or_zero().location.y, sz.height));
             }
             for &c in &node.children {
-                walk(doc, c, out);
+                walk(doc, crate::blitz_adapter::uid(c), out);
             }
         }
-        walk(doc, doc.root_element().id, &mut out);
+        walk(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut out,
+        );
         out
     }
 
@@ -2165,7 +3229,7 @@ mod tests {
         crate::blitz_adapter::resolve(&mut doc);
         let before = node_layouts(&doc);
         let root_id = doc.root_element().id;
-        propagate_height_delta(&mut doc, root_id, 0.0);
+        propagate_height_delta(&mut doc, crate::blitz_adapter::uid(root_id), 0.0);
         assert_eq!(node_layouts(&doc), before);
     }
 
@@ -2178,7 +3242,7 @@ mod tests {
         crate::blitz_adapter::resolve(&mut doc);
         let before = node_layouts(&doc);
         let root_id = doc.root_element().id;
-        propagate_height_delta(&mut doc, root_id, 10.0);
+        propagate_height_delta(&mut doc, crate::blitz_adapter::uid(root_id), 10.0);
         assert_eq!(node_layouts(&doc), before);
     }
 
@@ -2202,31 +3266,47 @@ mod tests {
                 if out.is_some() {
                     return;
                 }
-                let Some(node) = doc.get_node(id) else { return };
+                let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
+                    return;
+                };
                 if let Some(ed) = node.element_data()
                     && ed
                         .attrs()
                         .iter()
-                        .any(|a| a.name.local.as_ref() == "id" && a.value.as_str() == "before")
+                        .any(|a| (&a.name.local) == "id" && a.value.as_str() == "before")
                 {
                     *out = Some(id);
                     return;
                 }
                 for &c in &node.children {
-                    walk(doc, c, out);
+                    walk(doc, crate::blitz_adapter::uid(c), out);
                 }
             }
-            walk(&doc, doc.root_element().id, &mut found);
+            walk(
+                &doc,
+                crate::blitz_adapter::uid(doc.root_element().id),
+                &mut found,
+            );
             found.expect("before node")
         };
 
-        let before_y_pre = doc.get_node(before_id).unwrap().unrounded_layout.location.y;
+        let before_y_pre = doc
+            .get_node(crate::blitz_adapter::bid(before_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
 
         let column_styles = crate::column_css::ColumnStyleTable::new();
         let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
-        let before_y_post = doc.get_node(before_id).unwrap().unrounded_layout.location.y;
+        let before_y_post = doc
+            .get_node(crate::blitz_adapter::bid(before_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .location
+            .y;
         assert!(
             (before_y_pre - before_y_post).abs() < 0.01,
             "earlier sibling y should not move: pre={before_y_pre}, post={before_y_post}"
@@ -2393,31 +3473,47 @@ mod tests {
                 if out.is_some() {
                     return;
                 }
-                let Some(node) = doc.get_node(id) else { return };
+                let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
+                    return;
+                };
                 if let Some(ed) = node.element_data()
                     && ed
                         .attrs()
                         .iter()
-                        .any(|a| a.name.local.as_ref() == "id" && a.value.as_str() == "outer")
+                        .any(|a| (&a.name.local) == "id" && a.value.as_str() == "outer")
                 {
                     *out = Some(id);
                     return;
                 }
                 for &c in &node.children {
-                    walk(doc, c, out);
+                    walk(doc, crate::blitz_adapter::uid(c), out);
                 }
             }
-            walk(&doc, doc.root_element().id, &mut found);
+            walk(
+                &doc,
+                crate::blitz_adapter::uid(doc.root_element().id),
+                &mut found,
+            );
             found.expect("outer div")
         };
 
-        let outer_h_pre = doc.get_node(outer_id).unwrap().unrounded_layout.size.height;
+        let outer_h_pre = doc
+            .get_node(crate::blitz_adapter::bid(outer_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
 
         let column_styles = crate::column_css::ColumnStyleTable::new();
         let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
         tree.layout_multicol_subtrees();
 
-        let outer_h_post = doc.get_node(outer_id).unwrap().unrounded_layout.size.height;
+        let outer_h_post = doc
+            .get_node(crate::blitz_adapter::bid(outer_id))
+            .unwrap()
+            .unrounded_layout_or_zero()
+            .size
+            .height;
         assert!(
             (outer_h_pre - outer_h_post).abs() > 0.1,
             "the multicol's ancestor should have absorbed the height delta: \
@@ -2466,23 +3562,28 @@ mod tests {
     /// Find the layout of a child node of the multicol container by its DOM id.
     fn layout_of_id(doc: &BaseDocument, html_id: &str) -> taffy::Layout {
         fn walk(doc: &BaseDocument, node_id: usize, target: &str) -> Option<usize> {
-            let node = doc.get_node(node_id)?;
+            let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
             if let Some(ed) = node.element_data()
                 && ed
                     .attrs()
                     .iter()
-                    .any(|a| a.name.local.as_ref() == "id" && a.value.as_str() == target)
+                    .any(|a| (&a.name.local) == "id" && a.value.as_str() == target)
             {
                 return Some(node_id);
             }
             for &c in &node.children {
-                if let Some(found) = walk(doc, c, target) {
+                if let Some(found) = walk(doc, crate::blitz_adapter::uid(c), target) {
                     return Some(found);
                 }
             }
             None
         }
-        let id = walk(doc, doc.root_element().id, html_id).expect("id not found");
+        let id = walk(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            html_id,
+        )
+        .expect("id not found");
         doc.get_unrounded_layout(NodeId::from(id))
     }
 
@@ -2491,7 +3592,7 @@ mod tests {
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
               <p id="before">before</p>
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="after">after</p>
             </div>
         </body></html>"#;
@@ -2524,7 +3625,7 @@ mod tests {
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
               <p id="before">before</p>
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="after">after</p>
             </div>
         </body></html>"#;
@@ -2556,7 +3657,7 @@ mod tests {
     fn span_at_top_produces_one_segment_below() {
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0;">
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="a">a</p>
               <p id="b">b</p>
             </div>
@@ -2589,7 +3690,7 @@ mod tests {
             <div id="mc" style="column-count: 2; column-gap: 0;">
               <p id="a">a</p>
               <p id="b">b</p>
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
             </div>
         </body></html>"#;
         let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
@@ -2653,7 +3754,7 @@ mod tests {
         // and the container height was purely content-driven with no padding
         // contribution. Reference examples: examples/multicol,
         // examples/multicol-span-all.
-        let html = r#"<!doctype html><html><body>
+        let html = r#"<!doctype html><html><body><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: 6px 10px;">
               <p id="a">alpha alpha alpha alpha</p>
               <p id="b">beta beta beta beta</p>
@@ -2716,7 +3817,7 @@ mod tests {
 
     #[test]
     fn multicol_container_border_offsets_children_and_contributes_height() {
-        let html = r#"<!doctype html><html><body>
+        let html = r#"<!doctype html><html><body><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; border: 5px solid black;">
               <p id="a">alpha alpha alpha alpha</p>
               <p id="b">beta beta beta beta</p>
@@ -2779,7 +3880,7 @@ mod tests {
         // the border edge.
         let html = r#"<!doctype html><html><body>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: 8px 10px;">
-              <h1 id="title" style="column-span: all;">title</h1>
+              <h1 id="title" style="column-span: all; margin: 0">title</h1>
               <p id="a">a</p>
               <p id="b">b</p>
             </div>
@@ -2824,7 +3925,7 @@ mod tests {
         //
         // Zero the body margin so the containing block basis is a clean
         // 400px, then `.mc { padding: 10% }` = 40px on every side.
-        let html = r#"<!doctype html><html><body style="margin:0">
+        let html = r#"<!doctype html><html><body style="margin:0"><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: 10%;">
               <p id="a">alpha</p>
               <p id="b">beta</p>
@@ -3199,7 +4300,9 @@ mod tests {
         // collide on the same column and the BTreeMap-backed
         // `by_col[idx] = Some(...)` collector would clobber the earlier
         // one, dropping its lines.
-        let source_node = doc.get_node(split.source_node_id).expect("source node");
+        let source_node = doc
+            .get_node(crate::blitz_adapter::bid(split.source_node_id))
+            .expect("source node");
         let elem = source_node.element_data().expect("element data");
         let text_layout = elem
             .inline_layout_data
@@ -3433,80 +4536,6 @@ mod tests {
         assert_eq!(slices[1], (1..3, 20.0)); // col 1 (last): absorbs the rest
     }
 
-    // ── slice_lines_with_first_col_remainder: untested branches ──────
-
-    #[test]
-    fn slice_lines_with_remainder_remaining_cols_1_single_column_absorbs_all() {
-        // remaining_cols=1 means `last_col` is always true, so the
-        // "zero-budget early emit" guard (`!last_col`) is never satisfied
-        // even when first_col_remainder is zero. All lines are absorbed.
-        let heights = [10.0_f32; 5];
-        let slices =
-            slice_lines_with_first_col_remainder(&heights, 0.0, /*full_budget*/ 30.0, 1);
-        assert_eq!(slices.len(), 1);
-        assert_eq!(slices[0].0, 0..5, "single column must absorb all lines");
-        assert_eq!(slices[0].1, 50.0);
-    }
-
-    #[test]
-    fn slice_lines_with_remainder_negative_first_col_is_clamped_to_zero_and_emits_empty_slice() {
-        // A negative first_col_remainder is clamped to 0.0 via `.max(0.0)`,
-        // which triggers the "zero budget → emit empty slice" path for
-        // non-last columns. Subsequent columns use full_budget.
-        let heights = [10.0_f32; 5];
-        let slices = slice_lines_with_first_col_remainder(
-            &heights, -5.0, // negative → clamped to 0.0
-            /*full_budget*/ 30.0, /*remaining_cols*/ 2,
-        );
-        assert_eq!(slices.len(), 2);
-        // col 0: remainder was 0 and it's not the last col → empty slice.
-        assert_eq!(slices[0], (0..0, 0.0));
-        // col 1 (last): full_budget=30 absorbs all 5 lines (overflow allowed).
-        assert_eq!(slices[1].0, 0..5);
-    }
-
-    // ── fits_in_n_columns: boundary and zero-height cases ────────────
-
-    #[test]
-    fn fits_in_n_columns_exact_budget_boundary_does_not_trigger_overflow() {
-        // The overflow condition is `col_y + size.height > budget` (strict >).
-        // When col_y + h == budget exactly, the item must stay in the current
-        // column (no advance). Two items of height 10 in n=1, budget=20:
-        //   • item 0: col_y=0, 0>0 false → add. col_y=10.
-        //   • item 1: col_y=10, 10+10=20, 20>20 false → add. col_y=20.
-        // Returns true (fits). budget=19 would return false (10+10=20>19).
-        let children = fake_sized(2, 10.0);
-        assert!(
-            fits_in_n_columns(&children, 1, 20.0),
-            "col_y + h == budget must not trigger overflow (strict >)"
-        );
-        assert!(
-            !fits_in_n_columns(&children, 1, 19.0),
-            "col_y + h > budget must overflow and spill (single column)"
-        );
-    }
-
-    #[test]
-    fn fits_in_n_columns_zero_height_items_never_trigger_overflow() {
-        // Zero-height items leave col_y at 0.0 forever. The guard
-        // `col_y > 0.0` is never satisfied, so they never advance to the
-        // next column and always return true regardless of n or budget.
-        let children: Vec<(NodeId, Size<f32>)> = (0..10usize)
-            .map(|i| {
-                (
-                    NodeId::from(i),
-                    Size {
-                        width: 100.0,
-                        height: 0.0,
-                    },
-                )
-            })
-            .collect();
-        assert!(fits_in_n_columns(&children, 1, 0.0));
-        assert!(fits_in_n_columns(&children, 1, 100.0));
-        assert!(fits_in_n_columns(&children, 3, 0.0));
-    }
-
     // ── resolve_column_layout: count == fits_count tie ───────────────
 
     #[test]
@@ -3532,34 +4561,6 @@ mod tests {
         );
     }
 
-    // ── balance_budget: edge cases ───────────────────────────────────
-
-    #[test]
-    fn balance_budget_empty_children_returns_smallest_ideal() {
-        // No children → `fits_in_n_columns` is vacuously true on the first
-        // iteration (ideal = max(ceil(0/n), 1) = 1). Returns 1.0.
-        let children: Vec<(NodeId, Size<f32>)> = vec![];
-        let budget = balance_budget(&children, 2, 100.0, 0.0);
-        assert!(
-            (budget - 1.0).abs() < 0.01,
-            "empty children: expected budget=1.0, got {budget}"
-        );
-    }
-
-    #[test]
-    fn balance_budget_single_item_fits_immediately_at_ideal() {
-        // 1 item of height 10 in n=2: ideal = ceil(10/2) = 5.
-        // `fits_in_n_columns([10], 2, 5)`:
-        //   col_y=0, 0>0 false → add h=10. col_y=10. (loop ends)
-        //   Returns true → budget converges at 5 on the first iteration.
-        let children = fake_sized(1, 10.0);
-        let budget = balance_budget(&children, 2, 100.0, 10.0);
-        assert!(
-            (budget - 5.0).abs() < 0.01,
-            "single item: expected ideal budget=5.0, got {budget}"
-        );
-    }
-
     // ── resolve_column_layout: fits_count denom ≤ 0 branch ──────────────
 
     #[test]
@@ -3575,36 +4576,6 @@ mod tests {
     }
 
     // ── layout_column_group: zero total_h → balance budget zero ─────────
-
-    #[test]
-    fn zero_height_children_give_zero_balance_budget() {
-        // A multicol container whose block children all measure to height=0
-        // drives total_h to 0.0 in layout_column_group, exercising the
-        // `total_h <= 0.0 → budget = 0` Balance-mode branch (line 1071).
-        let html = r#"<!doctype html><html><body>
-            <div style="column-count: 2; column-gap: 0;">
-              <div></div>
-            </div>
-        </body></html>"#;
-        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
-        crate::blitz_adapter::resolve(&mut doc);
-
-        let column_styles = crate::column_css::ColumnStyleTable::new();
-        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
-        let laid_out = tree.layout_multicol_subtrees();
-        assert_eq!(laid_out, 1);
-
-        let geom = tree.take_geometry();
-        assert_eq!(geom.len(), 1);
-        let mc_geom = geom.values().next().unwrap();
-        let group = &mc_geom.groups[0];
-        assert_eq!(group.n, 2);
-        assert!(
-            group.col_heights.iter().all(|h| h.to_f32() <= 0.01),
-            "zero-height children must produce near-zero column heights: {:?}",
-            group.col_heights
-        );
-    }
 
     // ── parley_layout_is_glyph_run_only: InlineBox arm ──────────────────
 
@@ -3663,7 +4634,7 @@ mod tests {
         //
         // With body margin:0 and viewport 400px the containing block is 400px
         // wide. `calc(10% + 5px)` resolves to 40 + 5 = 45px on every side.
-        let html = r#"<!doctype html><html><body style="margin:0">
+        let html = r#"<!doctype html><html><body style="margin:0"><style>p { margin: 0 }</style>
             <div id="mc" style="column-count: 2; column-gap: 0; padding: calc(10% + 5px);">
               <p id="a">alpha alpha alpha alpha</p>
               <p id="b">beta beta beta beta</p>
@@ -3730,23 +4701,27 @@ mod tests {
         let root = doc.root_element().id;
 
         // Pre-condition: Taffy caches layout results during resolve().
-        let pre = doc.get_node(root).is_none_or(|n| n.cache.is_empty());
+        let pre = doc.get_node(root).is_none_or(|n| n.cache().is_empty());
         assert!(
             !pre,
             "resolve() must populate the root node cache (pre-condition for this test)"
         );
 
         // Depth-limit call: cache must be unchanged (still non-empty).
-        clear_subtree_cache_inner(&mut doc, root, crate::MAX_DOM_DEPTH);
-        let after_limit = doc.get_node(root).is_none_or(|n| n.cache.is_empty());
+        clear_subtree_cache_inner(
+            &mut doc,
+            crate::blitz_adapter::uid(root),
+            crate::MAX_DOM_DEPTH,
+        );
+        let after_limit = doc.get_node(root).is_none_or(|n| n.cache().is_empty());
         assert!(
             !after_limit,
             "depth-limit guard must not clear the root node cache"
         );
 
         // Contrast: depth=0 must actually clear the cache.
-        clear_subtree_cache_inner(&mut doc, root, 0);
-        let after_zero = doc.get_node(root).is_some_and(|n| n.cache.is_empty());
+        clear_subtree_cache_inner(&mut doc, crate::blitz_adapter::uid(root), 0);
+        let after_zero = doc.get_node(root).is_some_and(|n| n.cache().is_empty());
         assert!(
             after_zero,
             "depth=0 must clear the root node cache (confirms clearing itself works)"
@@ -3773,5 +4748,372 @@ mod tests {
 
         clear_subtree_cache_inner(&mut doc, 9_999_999, 0);
         // No panic ⇒ the absent-node guard fired correctly.
+    }
+
+    fn lay_out_multicol(html: &str) -> blitz_html::HtmlDocument {
+        lay_out_multicol_with_geometry(html).0
+    }
+
+    fn lay_out_multicol_with_geometry(
+        html: &str,
+    ) -> (blitz_html::HtmlDocument, MulticolGeometryTable) {
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+        tree.layout_multicol_subtrees();
+        let geometry = tree.take_geometry();
+        (doc, geometry)
+    }
+
+    fn node_id_of(doc: &BaseDocument, html_id: &str) -> usize {
+        fn walk(doc: &BaseDocument, node_id: usize, target: &str) -> Option<usize> {
+            let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
+            if node.element_data().is_some_and(|e| {
+                e.attrs()
+                    .iter()
+                    .any(|a| (&a.name.local) == "id" && a.value.as_str() == target)
+            }) {
+                return Some(node_id);
+            }
+            node.children
+                .iter()
+                .find_map(|&c| walk(doc, crate::blitz_adapter::uid(c), target))
+        }
+        walk(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            html_id,
+        )
+        .expect("id")
+    }
+
+    #[test]
+    fn a_bordered_box_breaks_across_columns_in_slices() {
+        // Border 2 + padding 8 on each side; four 50px children in two
+        // columns: 10 + 4×50 + 10 = 220, so 110px columns.
+        let (doc, geometry) = lay_out_multicol_with_geometry(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px">
+              <div id="card" style="border: 2px solid red; padding: 8px; margin-left: 5px; width: 150px">
+                <div id="a" style="height: 50px"></div><div id="b" style="height: 50px"></div>
+                <div id="c" style="height: 50px"></div><div id="d" style="height: 50px"></div>
+              </div>
+            </div></body></html>"#,
+        );
+        let mc = node_id_of(&doc, "mc");
+        let card = node_id_of(&doc, "card");
+        let group = &geometry[&mc].groups[0];
+        assert_eq!(group.box_splits.len(), 1);
+        let split = &group.box_splits[0];
+        assert_eq!(split.source_node_id, card);
+        let frags: Vec<(f32, f32, f32, f32, f32)> = split
+            .fragments
+            .iter()
+            .map(|f| {
+                (
+                    f.origin.x.to_f32(),
+                    f.origin.y.to_f32(),
+                    f.size.width.to_f32(),
+                    f.size.height.to_f32(),
+                    f.offset.to_f32(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            frags,
+            vec![
+                (5.0, 0.0, 170.0, 110.0, 0.0),
+                (205.0, 0.0, 170.0, 110.0, 110.0)
+            ]
+        );
+        assert_eq!(split.height.to_f32(), 220.0);
+        // `c` starts column 2, inside the card's padding box: x = 200 + 5 +
+        // 10. Positions are relative to the card's covering box at (0, 0).
+        let card_box = layout_of_id(&doc, "card");
+        let c = layout_of_id(&doc, "c");
+        assert_eq!((card_box.location.x, card_box.location.y), (0.0, 0.0));
+        assert_eq!((c.location.x, c.location.y), (215.0, 0.0));
+        let a = layout_of_id(&doc, "a");
+        assert_eq!((a.location.x, a.location.y), (15.0, 10.0));
+        assert!((layout_of_id(&doc, "mc").size.height - 110.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_bordered_box_that_fits_one_column_keeps_its_own_box() {
+        let (doc, geometry) = lay_out_multicol_with_geometry(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px">
+              <div id="x" style="height: 100px; margin-bottom: 10px"></div>
+              <div id="card" style="border: 1px solid red; padding: 4px; margin-top: 6px">
+                <div id="a" style="height: 80px; margin-top: 3px"></div>
+              </div>
+            </div></body></html>"#,
+        );
+        assert!(
+            geometry[&node_id_of(&doc, "mc")].groups[0]
+                .box_splits
+                .is_empty()
+        );
+        let card = layout_of_id(&doc, "card");
+        // The 10px and 6px margins collapse to 10px, which the break drops.
+        assert_eq!((card.location.x, card.location.y), (200.0, 0.0));
+        assert_eq!(card.size.width, 200.0);
+        // 1 + 4 + 3 (the child's margin stays inside) + 80 + 4 + 1.
+        assert!(
+            (card.size.height - 93.0).abs() < 0.01,
+            "{}",
+            card.size.height
+        );
+        let a = layout_of_id(&doc, "a");
+        assert_eq!((a.location.x, a.location.y), (5.0, 8.0));
+    }
+
+    #[test]
+    fn text_between_column_blocks_is_laid_out_in_its_anonymous_block() {
+        // Bare text next to blocks used to reach the column layout as a
+        // text node, which has no styles: a panic.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; width: 400px"><p>a</p>loose text<p>b</p></div>
+            </body></html>"#,
+        );
+        assert!(layout_of_id(&doc, "mc").size.height > 0.0);
+    }
+
+    #[test]
+    fn a_column_break_moves_the_units_beside_a_float_together() {
+        let mut units: Vec<FlowUnit> = (0..6).map(|_| line(10.0, 0.0)).collect();
+        // Units 2 and 3 sit beside a float anchored at unit 2.
+        units[3].keep_with_previous = true;
+        let placed = place_units(&units, 2, 30.0, false).unwrap();
+        let columns: Vec<u32> = placed.iter().map(|&(c, _)| c).collect();
+        assert_eq!(columns, vec![0, 0, 1, 1, 1, 1]);
+        // A run that starts the column breaks where it must.
+        units[1].keep_with_previous = true;
+        units[2].keep_with_previous = true;
+        let placed = place_units(&units, 2, 30.0, false).unwrap();
+        let columns: Vec<u32> = placed.iter().map(|&(c, _)| c).collect();
+        assert_eq!(columns, vec![0, 0, 0, 1, 1, 1]);
+    }
+
+    #[test]
+    fn a_float_in_a_wrapper_moves_with_the_content_beside_it() {
+        // Floats used to keep the whole wrapper in one column.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px">
+              <div id="w">
+                <div id="a" style="height: 50px"></div>
+                <div id="f" style="float: left; width: 20px; height: 40px"></div>
+                <div id="b" style="height: 30px"></div>
+                <div id="c" style="height: 30px"></div>
+                <div id="d" style="height: 50px"></div>
+              </div>
+            </div></body></html>"#,
+        );
+        let w = layout_of_id(&doc, "w");
+        let abs = |id: &str| {
+            let l = layout_of_id(&doc, id);
+            (w.location.x + l.location.x, w.location.y + l.location.y)
+        };
+        // Balanced at 80px, `c` would start column 2 and leave the float
+        // overhanging `b`; `b` and `c` stay together beside it instead.
+        assert_eq!(abs("f"), (0.0, 50.0));
+        assert_eq!(abs("c"), (0.0, 80.0));
+        assert_eq!(abs("d"), (200.0, 0.0));
+        assert!((layout_of_id(&doc, "mc").size.height - 110.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn text_beside_a_top_level_float_wraps_around_it() {
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px; font: 10px/10px sans-serif">
+              <div id="f" style="float: left; width: 150px; height: 30px"></div>
+              <p id="p" style="margin: 0">aaa bbb ccc ddd eee fff ggg hhh iii jjj kkk lll mmm nnn ooo ppp</p>
+            </div></body></html>"#,
+        );
+        let f = layout_of_id(&doc, "f");
+        assert_eq!((f.location.x, f.location.y), (0.0, 0.0));
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(node_id_of(&doc, "p")))
+            .unwrap();
+        let layout = &node
+            .element_data()
+            .unwrap()
+            .inline_layout_data
+            .as_ref()
+            .unwrap()
+            .layout;
+        let first = layout.lines().next().unwrap();
+        // The first line has the 50px beside the float, not the column.
+        assert!(
+            first.metrics().advance <= 50.5,
+            "first line is {}px wide",
+            first.metrics().advance
+        );
+    }
+
+    #[test]
+    fn a_spanner_before_a_float_group_keeps_its_full_width_lines() {
+        // Measuring the float group lays the whole container out one column
+        // wide; the spanner used to keep the lines broken at that width.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px; font: 10px/10px sans-serif">
+              <p style="margin: 0">aaa</p>
+              <h2 id="h" style="column-span: all; margin: 0; font: 10px/10px sans-serif">aaa bbb ccc ddd eee fff ggg hhh</h2>
+              <div style="float: left; width: 20px; height: 20px"></div>
+              <p style="margin: 0">aaa bbb</p>
+            </div></body></html>"#,
+        );
+        let node = doc
+            .get_node(crate::blitz_adapter::bid(node_id_of(&doc, "h")))
+            .unwrap();
+        let layout = &node
+            .element_data()
+            .unwrap()
+            .inline_layout_data
+            .as_ref()
+            .unwrap()
+            .layout;
+        assert_eq!(layout.lines().count(), 1);
+        assert!((layout_of_id(&doc, "h").size.height - 10.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn fill_row_stops_at_the_first_unit_that_does_not_fit() {
+        let units: Vec<FlowUnit> = (0..7).map(|_| line(20.0, 0.0)).collect();
+        // Two columns of 50px take two lines each.
+        let placed = fill_row(&units, 2, 50.0, false);
+        assert_eq!(placed, vec![(0, 0.0), (0, 20.0), (1, 0.0), (1, 20.0)]);
+    }
+
+    #[test]
+    fn fill_row_leaves_a_short_page_rest_empty_rather_than_overflow_it() {
+        let units = [line(40.0, 0.0), line(10.0, 0.0)];
+        assert!(fill_row(&units, 2, 30.0, true).is_empty());
+        // On a whole page, the unit is placed anyway.
+        assert_eq!(fill_row(&units, 1, 30.0, false), vec![(0, 0.0)]);
+    }
+
+    #[test]
+    fn place_rows_fills_pages_and_balances_the_last() {
+        // 30 lines of 10px, 2 columns, 45px left on the first page, 100px
+        // pages: 4 + 4, then 10 + 10, then the last 2 balanced as 1 + 1.
+        let units: Vec<FlowUnit> = (0..30).map(|_| line(10.0, 0.0)).collect();
+        let paging = Paging {
+            first_h: 45.0,
+            page_h: 100.0,
+        };
+        let (tops, rows) = place_rows(
+            &units,
+            2,
+            crate::column_css::ColumnFill::Balance,
+            f32::INFINITY,
+            Some(paging),
+        );
+        let tops_of_rows: Vec<f32> = rows.iter().map(|r| r.top).collect();
+        assert_eq!(tops_of_rows, vec![0.0, 45.0, 145.0]);
+        assert_eq!(rows[2].budget, 10.0);
+        assert_eq!(tops[0], (0, 0.0));
+        assert_eq!(tops[4], (1, 0.0));
+        assert_eq!(tops[8], (2, 45.0));
+        assert_eq!(tops[18], (3, 45.0));
+        assert_eq!(tops[28], (4, 145.0));
+        assert_eq!(tops[29], (5, 145.0));
+    }
+
+    #[test]
+    fn place_rows_balances_in_one_row_when_everything_fits_the_page() {
+        let units: Vec<FlowUnit> = (0..6).map(|_| line(10.0, 0.0)).collect();
+        let paging = Paging {
+            first_h: 45.0,
+            page_h: 100.0,
+        };
+        let (tops, rows) = place_rows(
+            &units,
+            2,
+            crate::column_css::ColumnFill::Balance,
+            f32::INFINITY,
+            Some(paging),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].budget, 30.0);
+        assert_eq!(tops[3], (1, 0.0));
+    }
+
+    #[test]
+    fn framed_box_edges_move_with_the_first_and_last_unit() {
+        // Unit extents include the lead and trail, so a box's edges never
+        // stay behind at a column end.
+        let mut first = line(20.0, 4.0);
+        first.lead = 10.0;
+        let mut last = line(20.0, 0.0);
+        last.trail = 10.0;
+        let units = [first, line(20.0, 0.0), last];
+        assert_eq!(units[0].extent(), 30.0);
+        let tops = place_units(&units, 2, 60.0, true).unwrap();
+        assert_eq!(tops, vec![(0, 4.0), (0, 34.0), (1, 0.0)]);
+    }
+
+    #[test]
+    fn children_of_a_plain_wrapper_flow_across_columns() {
+        // Content wrapped in one <div> used to be placed whole in the
+        // first column.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px">
+              <div id="w"><div id="a" style="height: 50px"></div><div id="b" style="height: 50px"></div></div>
+            </div></body></html>"#,
+        );
+        let (w, a, b) = (
+            layout_of_id(&doc, "w"),
+            layout_of_id(&doc, "a"),
+            layout_of_id(&doc, "b"),
+        );
+        assert_eq!((a.location.x, a.location.y), (0.0, 0.0));
+        // `b` is relative to the wrapper, which covers both columns.
+        assert!(
+            (w.location.x + b.location.x - 200.0).abs() < 0.5,
+            "b in column 2"
+        );
+        assert!(
+            (w.location.y + b.location.y).abs() < 0.5,
+            "b at the column top"
+        );
+        assert!((w.size.width - 400.0).abs() < 0.5);
+        assert!((layout_of_id(&doc, "mc").size.height - 50.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn margins_between_column_children_are_kept() {
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 1; width: 400px">
+              <div id="a" style="height: 20px; margin-bottom: 10px"></div>
+              <div id="b" style="height: 20px; margin-top: 4px; margin-bottom: 6px"></div>
+            </div></body></html>"#,
+        );
+        // 10px and 4px collapse to 10px; the last margin stays inside the
+        // multicol, which is a block formatting context root.
+        assert!((layout_of_id(&doc, "b").location.y - 30.0).abs() < 0.5);
+        assert!((layout_of_id(&doc, "mc").size.height - 56.0).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_wrapper_with_a_background_is_placed_whole() {
+        // Its background would show the cut, so its children stay together.
+        let doc = lay_out_multicol(
+            r#"<!doctype html><html><body style="margin:0">
+            <div id="mc" style="columns: 2; column-gap: 0; width: 400px">
+              <div style="background: red"><div id="a" style="height: 50px"></div><div id="b" style="height: 50px"></div></div>
+              <div id="c" style="height: 100px"></div>
+            </div></body></html>"#,
+        );
+        let b = layout_of_id(&doc, "b");
+        assert_eq!((b.location.x, b.location.y), (0.0, 50.0));
+        assert!((layout_of_id(&doc, "c").location.x - 200.0).abs() < 0.5);
     }
 }

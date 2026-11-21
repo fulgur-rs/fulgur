@@ -131,6 +131,10 @@ impl Engine {
         // discarded on the 2-pass path (fulgur-6vl0). Mirrors `layout()`'s
         // 2-pass loop; the final PDF serialization happens exactly once.
         let pass1 = self.layout_to_drawables(html, None)?;
+        if let Some(shrunk) = self.shrunk_to_fit(&pass1) {
+            drop(pass1);
+            return shrunk.render(html);
+        }
         if !pass1.needs_pass_two {
             return self.render_artifacts(pass1, None);
         }
@@ -143,6 +147,53 @@ impl Engine {
         } = pass1;
         let pass2 = self.layout_to_drawables(html, Some(&anchor_map))?;
         self.render_artifacts(pass2, Some(&anchor_map))
+    }
+
+    /// With [`Config::shrink_to_fit`] set and `artifacts` laid out wider than
+    /// the first page's content area: this engine at the scale that fits the
+    /// content (no lower than the minimum), to lay the document out again
+    /// with. The returned engine does not shrink again, so a document whose
+    /// content grows with the viewport is laid out at most twice.
+    fn shrunk_to_fit(&self, artifacts: &LayoutArtifacts) -> Option<Engine> {
+        let min_scale = self.config.shrink_to_fit?;
+        let (size, margin, landscape) = crate::gcpm::page_settings::resolve_page_settings(
+            &artifacts.gcpm.page_settings,
+            1,
+            0,
+            &self.config,
+            artifacts.drawables.root_dir_rtl,
+        );
+        let size = if landscape { size.landscape() } else { size };
+        let content_px = (size.width - margin.left - margin.right)
+            .as_pt()
+            .in_px()
+            .to_f32();
+        // Fragments are relative to the content area's left edge.
+        let right = artifacts
+            .pagination_geometry
+            .values()
+            .flat_map(|g| g.fragments.iter())
+            .map(|f| f.x.to_f32() + f.width.to_f32())
+            .fold(0.0_f32, f32::max);
+        if content_px <= 0.0 || content_px.is_nan() || right <= content_px + 0.5 {
+            return None;
+        }
+        let scale = (self.config.scale * content_px / right).max(min_scale);
+        if scale >= self.config.scale * 0.999 {
+            return None;
+        }
+        let mut config = self.config.clone();
+        config.scale = scale;
+        config.shrink_to_fit = None;
+        Some(Engine {
+            config,
+            assets: self.assets.clone(),
+            base_path: self.base_path.clone(),
+            template: self.template.clone(),
+            data: self.data.clone(),
+            serialize_settings: self.serialize_settings.clone(),
+            system_fonts: self.system_fonts,
+        })
     }
 
     /// Run the full parse → style → layout → convert pipeline for a single
@@ -271,7 +322,9 @@ impl Engine {
         crate::blitz_adapter::set_viewport_size_px(
             &mut doc,
             resolved_content_width_px,
-            resolved_content_height_px,
+            self.config
+                .viewport_height
+                .unwrap_or(resolved_content_height_px),
         );
 
         // Build and apply DOM passes
@@ -548,7 +601,9 @@ impl Engine {
         // containers with the rule spec + geometry they need to render.
         // See docs/plans/2026-04-20-css-multicol-design.md and
         // docs/plans/2026-04-21-fulgur-v7a-column-rule.md.
-        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        let mut multicol_geometry =
+            crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        crate::blitz_adapter::rebase_out_of_flow_locations(&mut doc);
 
         // Run the pagination_layout fragmenter (fulgur-4cbc). Walks
         // body's children's existing `final_layout` (populated by
@@ -593,11 +648,22 @@ impl Engine {
         // here so the fragmenter, fixed-element layout, and viewport
         // sizing all share a single content box — see the resolve block
         // up at the start of this function.
-        let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_and_running(
+        //
+        // Multicol containers that break across pages are laid out again
+        // page by page once their start is known, then paginated again.
+        let mut pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),
-            resolved_content_height_px,
             &column_styles,
-            &running_store,
+            &mut multicol_geometry,
+            resolved_content_height_px,
+            |doc| {
+                crate::pagination_layout::run_pass_with_break_and_running(
+                    doc,
+                    resolved_content_height_px,
+                    &column_styles,
+                    &running_store,
+                )
+            },
         );
 
         // fulgur-rpvu: append per-page fragments for every `position:
@@ -847,6 +913,10 @@ impl Engine {
         // `target-*` cross-references, pass 2 re-lays-out with the pass-1
         // AnchorMap so those resolve. Project the final artifacts once.
         let pass1 = self.layout_to_drawables(html, None)?;
+        if let Some(shrunk) = self.shrunk_to_fit(&pass1) {
+            drop(pass1);
+            return shrunk.layout(html);
+        }
         let artifacts = if pass1.needs_pass_two {
             // Retain only the AnchorMap across passes (as `render`'s loop
             // does — its pass-1 drawables/geometry are dropped when only
@@ -960,11 +1030,22 @@ impl Engine {
         );
         let column_styles =
             crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
-        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        let pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+        let mut multicol_geometry =
+            crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        crate::blitz_adapter::rebase_out_of_flow_locations(&mut doc);
+        let page_height_px = self.config.content_height().as_pt().in_px();
+        let pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),
-            self.config.content_height().as_pt().in_px(),
             &column_styles,
+            &mut multicol_geometry,
+            page_height_px.to_f32(),
+            |doc| {
+                crate::pagination_layout::run_pass_with_break_styles(
+                    doc,
+                    page_height_px,
+                    &column_styles,
+                )
+            },
         );
 
         let running_store = crate::gcpm::running::RunningElementStore::new();
@@ -1027,11 +1108,22 @@ impl Engine {
         );
         let column_styles =
             crate::blitz_adapter::extract_column_style_table(&doc, &link_column_css);
-        let multicol_geometry = crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
-        let mut pagination_geometry = crate::pagination_layout::run_pass_with_break_styles(
+        let mut multicol_geometry =
+            crate::multicol_layout::run_pass(doc.deref_mut(), &column_styles);
+        crate::blitz_adapter::rebase_out_of_flow_locations(&mut doc);
+        let page_height_px = self.config.content_height().as_pt().in_px();
+        let mut pagination_geometry = crate::pagination_layout::paginate_with_paged_multicol(
             doc.deref_mut(),
-            self.config.content_height().as_pt().in_px(),
             &column_styles,
+            &mut multicol_geometry,
+            page_height_px.to_f32(),
+            |doc| {
+                crate::pagination_layout::run_pass_with_break_styles(
+                    doc,
+                    page_height_px,
+                    &column_styles,
+                )
+            },
         );
 
         // Mirror the production `render` path so test callers that
@@ -1113,7 +1205,7 @@ fn build_anchor_map(
     let mut map = AnchorMap::new();
     walk_anchors(
         doc,
-        doc.root_element().id,
+        crate::blitz_adapter::uid(doc.root_element().id),
         0,
         pagination_geometry,
         counter_snapshots,
@@ -1133,7 +1225,7 @@ fn walk_anchors(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     // Skip nodes that the fragmenter never assigned a page to (out-of-flow
@@ -1147,8 +1239,10 @@ fn walk_anchors(
     {
         let counters = snapshots.get(&node_id).cloned().unwrap_or_default();
         let text = collect_text_content(doc, node_id);
-        let before_text = collect_pseudo_text(doc, node.before, elem);
-        let after_text = collect_pseudo_text(doc, node.after, elem);
+        let before_text =
+            collect_pseudo_text(doc, node.before().map(crate::blitz_adapter::uid), elem);
+        let after_text =
+            collect_pseudo_text(doc, node.after().map(crate::blitz_adapter::uid), elem);
         out.insert(
             frag.to_string(),
             AnchorEntry {
@@ -1160,7 +1254,7 @@ fn walk_anchors(
             },
         );
     }
-    let children: Vec<usize> = node.children.clone();
+    let children: Vec<usize> = crate::blitz_adapter::uids(&node.children.clone());
     for c in children {
         walk_anchors(doc, c, depth + 1, geometry, snapshots, out);
     }
@@ -1191,13 +1285,13 @@ fn walk_anchors(
 fn collect_pseudo_text(
     doc: &BaseDocument,
     pseudo_id: Option<usize>,
-    parent_elem: &blitz_dom::node::ElementData,
+    _parent_elem: &blitz_dom::node::ElementData,
 ) -> String {
     use style::values::generics::counters::{Content, ContentItem as Sci};
     let Some(pid) = pseudo_id else {
         return String::new();
     };
-    let Some(node) = doc.get_node(pid) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(pid)) else {
         return String::new();
     };
     let Some(styles) = node.primary_styles() else {
@@ -1211,16 +1305,10 @@ fn collect_pseudo_text(
     // Only the "main" items (before `alt_start`); content after is
     // alt-text in CSS Level 3 Content.
     for item in &item_data.items[..item_data.alt_start] {
-        match item {
-            Sci::String(s) => out.push_str(s.as_ref()),
-            Sci::Attr(a) => {
-                let name = a.attribute.as_ref();
-                match get_attr(parent_elem, name) {
-                    Some(v) => out.push_str(v),
-                    None => out.push_str(a.fallback.as_ref()),
-                }
-            }
-            _ => {}
+        // Stylo 0.24 substitutes `attr()` at computed-value time, so it
+        // arrives here as a plain `String` item.
+        if let Sci::String(s) = item {
+            out.push_str(s.as_ref());
         }
     }
     collapse_ws_keep_edges(&out)
@@ -1284,7 +1372,7 @@ fn build_implicit_href_map(
     let mut map = BTreeMap::new();
     walk_implicit_href(
         doc,
-        doc.root_element().id,
+        crate::blitz_adapter::uid(doc.root_element().id),
         0,
         None,
         pagination_geometry,
@@ -1304,7 +1392,7 @@ fn walk_implicit_href(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     // Block-level ancestors get their own fragments; inline descendants
@@ -1313,7 +1401,7 @@ fn walk_implicit_href(
     // assigned to their nearest paginated ancestor.
     let resolved_page = page_for_node(geometry, node_id).or(inherited_page);
     if let Some(elem) = node.element_data()
-        && elem.name.local.as_ref() == "a"
+        && (&elem.name.local) == "a"
         && let Some(href) = get_attr(elem, "href")
         && fragment_id_from_href(href).is_some()
         && let Some(page_num) = resolved_page
@@ -1321,7 +1409,7 @@ fn walk_implicit_href(
         let page_idx = page_num.saturating_sub(1) as usize;
         out.entry(page_idx).or_insert_with(|| href.to_string());
     }
-    let children: Vec<usize> = node.children.clone();
+    let children: Vec<usize> = crate::blitz_adapter::uids(&node.children.clone());
     for c in children {
         walk_implicit_href(doc, c, depth + 1, resolved_page, geometry, out);
     }
@@ -1348,6 +1436,14 @@ impl EngineBuilder {
         self
     }
 
+    /// The page margins used where the document's `@page` rules do not set
+    /// them; CSS `@page` margins still win, as in browsers. See
+    /// [`margin`](Self::margin) for margins that override `@page`.
+    pub fn default_margin(mut self, margin: Margin) -> Self {
+        self.config_builder = self.config_builder.default_margin(margin);
+        self
+    }
+
     pub fn landscape(mut self, landscape: bool) -> Self {
         self.config_builder = self.config_builder.landscape(landscape);
         self
@@ -1355,6 +1451,26 @@ impl EngineBuilder {
 
     pub fn title(mut self, title: impl Into<String>) -> Self {
         self.config_builder = self.config_builder.title(title);
+        self
+    }
+
+    /// Viewport height in CSS px for `vh` and root percentage heights,
+    /// independent of the page height. See `Config::viewport_height`.
+    pub fn viewport_height(mut self, height_px: f32) -> Self {
+        self.config_builder = self.config_builder.viewport_height(height_px);
+        self
+    }
+
+    /// Content scale. See `Config::scale`.
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.config_builder = self.config_builder.scale(scale);
+        self
+    }
+
+    /// Shrink content wider than the page, down to `min_scale`. See
+    /// `Config::shrink_to_fit`.
+    pub fn shrink_to_fit(mut self, min_scale: f32) -> Self {
+        self.config_builder = self.config_builder.shrink_to_fit(min_scale);
         self
     }
 
@@ -1679,21 +1795,25 @@ mod tests {
     /// fixtures that don't run a real fragmenter.
     fn collect_anchor_node_ids(doc: &blitz_dom::BaseDocument) -> Vec<usize> {
         fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, out: &mut Vec<usize>) {
-            let Some(node) = doc.get_node(node_id) else {
+            let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
                 return;
             };
             if let Some(elem) = node.element_data()
-                && elem.name.local.as_ref() == "a"
+                && (&elem.name.local) == "a"
             {
                 out.push(node_id);
             }
-            let children: Vec<usize> = node.children.clone();
+            let children: Vec<usize> = crate::blitz_adapter::uids(&node.children.clone());
             for c in children {
                 walk(doc, c, out);
             }
         }
         let mut out = Vec::new();
-        walk(doc, doc.root_element().id, &mut out);
+        walk(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            &mut out,
+        );
         out
     }
 
@@ -1814,20 +1934,20 @@ mod tests {
         // it is inline and intentionally has no geometry entry.
         fn find_first_tag(doc: &blitz_dom::BaseDocument, tag: &str) -> Option<usize> {
             fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, tag: &str) -> Option<usize> {
-                let n = doc.get_node(node_id)?;
+                let n = doc.get_node(crate::blitz_adapter::bid(node_id))?;
                 if let Some(elem) = n.element_data()
-                    && elem.name.local.as_ref() == tag
+                    && (&elem.name.local) == tag
                 {
                     return Some(node_id);
                 }
                 for c in n.children.iter().copied() {
-                    if let Some(found) = walk(doc, c, tag) {
+                    if let Some(found) = walk(doc, crate::blitz_adapter::uid(c), tag) {
                         return Some(found);
                     }
                 }
                 None
             }
-            walk(doc, doc.root_element().id, tag)
+            walk(doc, crate::blitz_adapter::uid(doc.root_element().id), tag)
         }
         let p_id = find_first_tag(&doc, "p").expect("find <p>");
         let mut geometry = PaginationGeometryTable::new();

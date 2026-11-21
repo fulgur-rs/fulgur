@@ -1,3 +1,4 @@
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::config::Config;
 use crate::draw_primitives::Canvas;
 use crate::drawables::Drawables;
@@ -69,7 +70,15 @@ pub fn render_v2(
     // (shared node_id case — see `convert::replaced` /
     // `convert::inline_root`); paragraph wins so the shared-id case
     // resolves to the inline-root's anchor.
+    // The layout works on the page divided by `config.scale` (see
+    // `resolve_page_settings`); each page is drawn scaled back onto the real
+    // page, and the link and destination coordinates scaled with it.
+    let scale = config.scale;
+    let page_scale = crate::draw_primitives::Affine2D::scale(scale, scale);
     let mut dest_registry = crate::draw_primitives::DestinationRegistry::new();
+    if scale != 1.0 {
+        dest_registry.push_transform(page_scale);
+    }
     for (&node_id, geom) in geometry {
         let Some(first_frag) = geom.fragments.first() else {
             continue;
@@ -125,6 +134,10 @@ pub fn render_v2(
     // unclipped so `@page @bottom-*` anchors remain clickable.
     let mut body_link_collector = crate::draw_primitives::LinkCollector::new();
     let mut margin_link_collector = crate::draw_primitives::LinkCollector::new();
+    if scale != 1.0 {
+        body_link_collector.push_transform(page_scale);
+        margin_link_collector.push_transform(page_scale);
+    }
 
     let mut link_annot_ids: BTreeMap<usize, Vec<krilla::tagging::Identifier>> = BTreeMap::new();
 
@@ -141,6 +154,7 @@ pub fn render_v2(
         string_set_by_node,
         page_count,
         implicit_href_by_page,
+        drawables.root_dir_rtl,
     );
 
     // Page-independent skip sets. These reference only `drawables.*`
@@ -197,8 +211,9 @@ pub fn render_v2(
         } else {
             resolved_size
         };
-        let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
-            .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
+        let settings =
+            krilla::page::PageSettings::from_wh(page_size.width * scale, page_size.height * scale)
+                .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
         let content_area = resolved_content_area(page_size, resolved_margin);
         let mut page = document.start_page_with(settings);
         if let Some(c) = bookmark_collector.as_mut() {
@@ -209,6 +224,9 @@ pub fn render_v2(
         let page_has_margin_box_paint;
         {
             let mut surface = page.surface();
+            if scale != 1.0 {
+                surface.push_transform(&krilla::geom::Transform::from_scale(scale, scale));
+            }
             {
                 let mut canvas = crate::draw_primitives::Canvas {
                     surface: &mut surface,
@@ -321,6 +339,9 @@ pub fn render_v2(
                 anchor_map,
             );
             page_has_margin_box_paint = any_margin_box_painted;
+            if scale != 1.0 {
+                surface.pop();
+            }
         }
         // Body occurrences are clipped to the content area rect ONLY
         // when at least one `@page` margin box actually painted on
@@ -336,7 +357,14 @@ pub fn render_v2(
         // used earlier this iteration — see `resolved_content_area`.
         let raw_body_page = body_link_collector.take_page(page_idx);
         let body_per_page = if page_has_margin_box_paint {
-            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &content_area)
+            // The occurrences are already scaled to the real page.
+            let scaled_area = crate::draw_primitives::Rect {
+                x: content_area.x * scale,
+                y: content_area.y * scale,
+                width: content_area.width * scale,
+                height: content_area.height * scale,
+            };
+            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &scaled_area)
         } else {
             raw_body_page
         };
@@ -372,7 +400,10 @@ pub fn render_v2(
     }
 
     if let Some(c) = bookmark_collector {
-        let entries = c.into_entries();
+        let mut entries = c.into_entries();
+        for entry in &mut entries {
+            entry.y_pt *= scale;
+        }
         if !entries.is_empty() {
             document.set_outline(crate::outline::build_outline(&entries));
         }
@@ -1188,7 +1219,20 @@ pub(crate) fn dispatch_fragment(
             }
             return;
         }
-        draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
+        if drawables.block_slices.contains_key(&node_id) {
+            paint_multicol_block_slices(
+                canvas,
+                block,
+                drawables,
+                geometry,
+                node_id,
+                margin_left_pt,
+                margin_top_pt,
+                page_index,
+            );
+        } else {
+            draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
+        }
     }
     if let Some(img) = drawables.images.get(&node_id) {
         draw_image_v2(canvas, img, x_pt, y_pt);
@@ -1391,9 +1435,14 @@ fn paint_multicol_paragraph_slices(
                 // a slice that crosses a fragment break disappears on
                 // every page it would have crossed. Revisit once
                 // split-aware rendering of multicol slices lands.
+                // Half a point of slack: the multicol pass ends column
+                // rows exactly at page boundaries, and the px → pt
+                // conversion must not push a slice that ends there onto
+                // neither page.
+                const SLACK: f32 = 0.5;
                 let above = slice_bottom <= 0.0;
                 let below = slice_top >= cutoff;
-                let straddles = slice_top < 0.0 || slice_bottom > cutoff;
+                let straddles = slice_top < -SLACK || slice_bottom > cutoff + SLACK;
                 if above || below || straddles {
                     continue;
                 }
@@ -1406,6 +1455,92 @@ fn paint_multicol_paragraph_slices(
     if use_run_tagging {
         canvas.link_run_node_id = None;
     }
+}
+
+/// Paint a box that `multicol_layout` broke across columns
+/// (`box-decoration-break: slice`): in every slice, the whole box
+/// (`entry.height_pt` tall) is painted from `slice.offset_pt` above the
+/// slice's top and clipped to the slice, so borders, radii and
+/// backgrounds continue from one column to the next.
+///
+/// Slices are anchored at the multicol container's fragment on this page,
+/// as in [`paint_multicol_paragraph_slices`]. When the container itself
+/// breaks across pages, each slice is clipped to the part of the
+/// container on this page.
+#[allow(clippy::too_many_arguments)]
+fn paint_multicol_block_slices(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    node_id: usize,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::draw_primitives::draw_with_opacity;
+    let Some(entry) = drawables.block_slices.get(&node_id) else {
+        return;
+    };
+    if !block.visible {
+        return;
+    }
+    let Some(container_geom) = geometry.get(&entry.container_node_id) else {
+        return;
+    };
+    let Some(target_pos) = container_geom
+        .fragments
+        .iter()
+        .position(|f| f.page_index == page_index)
+    else {
+        return;
+    };
+    let target_frag = &container_geom.fragments[target_pos];
+    let partition = container_geom.is_split();
+    let consumed: f32 = container_geom.fragments[..target_pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<crate::units::Px>()
+        .in_pt()
+        .to_f32();
+    let cutoff = target_frag.height.in_pt().to_f32();
+    let container_x = margin_left_pt + target_frag.x.in_pt().to_f32();
+    let container_y = margin_top_pt + target_frag.y.in_pt().to_f32();
+    let height = entry.height_pt.to_f32();
+
+    draw_with_opacity(canvas, block.opacity, |canvas| {
+        for slice in &entry.slices {
+            let (w, h) = (slice.size_pt.0.to_f32(), slice.size_pt.1.to_f32());
+            let mut top = slice.origin_pt.1.to_f32() - consumed;
+            let mut bottom = top + h;
+            if partition {
+                top = top.max(0.0);
+                bottom = bottom.min(cutoff);
+            }
+            if bottom <= top || w <= 0.0 {
+                continue;
+            }
+            let x = container_x + slice.origin_pt.0.to_f32();
+            let box_y =
+                container_y + slice.origin_pt.1.to_f32() - consumed - slice.offset_pt.to_f32();
+            let Some(clip) = krilla::geom::Rect::from_xywh(x, container_y + top, w, bottom - top)
+                .and_then(|rect| {
+                    let mut pb = krilla::geom::PathBuilder::new();
+                    pb.push_rect(rect);
+                    pb.finish()
+                })
+            else {
+                continue;
+            };
+            canvas
+                .surface
+                .push_clip_path(&clip, &krilla::paint::FillRule::default());
+            crate::background::draw_box_shadows(canvas, &block.style, x, box_y, w, height);
+            crate::background::draw_background(canvas, &block.style, x, box_y, w, height);
+            crate::draw_primitives::draw_block_border(canvas, &block.style, x, box_y, w, height);
+            canvas.surface.pop();
+        }
+    });
 }
 
 /// Collect the inline-box subtrees that paragraphs drawn *inside a scope*
@@ -3628,6 +3763,10 @@ pub(crate) struct MarginBoxRenderer<'a> {
     /// `target-*(attr(href), ...)` evaluated inside `@page` margin
     /// boxes. Built once per render pass by `engine::Engine::layout_to_drawables`.
     pub implicit_href_by_page: &'a BTreeMap<usize, String>,
+    /// The opening `<html>` tag of each margin box's document. Margin boxes
+    /// take their direction from the root element, as the page context
+    /// does, so a right-to-left document gets right-to-left boxes.
+    pub html_open: &'static str,
 }
 
 impl<'a> MarginBoxRenderer<'a> {
@@ -3648,6 +3787,7 @@ impl<'a> MarginBoxRenderer<'a> {
         string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
         total_pages: usize,
         implicit_href_by_page: &'a BTreeMap<usize, String>,
+        root_dir_rtl: bool,
     ) -> Self {
         let string_set_states = if gcpm.string_set_mappings.is_empty() {
             vec![BTreeMap::new(); total_pages]
@@ -3678,6 +3818,11 @@ impl<'a> MarginBoxRenderer<'a> {
             height_cache: HashMap::new(),
             render_cache: HashMap::new(),
             implicit_href_by_page,
+            html_open: if root_dir_rtl {
+                "<html dir=\"rtl\">"
+            } else {
+                "<html>"
+            },
         }
     }
 
@@ -3781,15 +3926,15 @@ impl<'a> MarginBoxRenderer<'a> {
                 implicit_href,
             );
             if !content_html.is_empty() {
-                let html = if rule.declarations.is_empty() {
+                // Each box starts from its default `text-align` (css-page-3
+                // §5.3: right-hand boxes align right, centre boxes centre);
+                // the rule's own declarations come after it and win.
+                let html = format!(
+                    "<div style=\"text-align:{};{}\">{}</div>",
+                    pos.default_text_align(),
+                    escape_attr(&rule.declarations),
                     content_html
-                } else {
-                    format!(
-                        "<div style=\"{}\">{}</div>",
-                        escape_attr(&rule.declarations),
-                        content_html
-                    )
-                };
+                );
                 resolved_htmls.insert(pos, html);
             }
         }
@@ -3815,8 +3960,8 @@ impl<'a> MarginBoxRenderer<'a> {
             );
             self.measure_cache.entry(measure_key).or_insert_with(|| {
                 let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
+                    self.html_open, self.margin_css, html
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
@@ -3850,8 +3995,8 @@ impl<'a> MarginBoxRenderer<'a> {
             );
             self.height_cache.entry(hc_key).or_insert_with(|| {
                 let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
+                    self.html_open, self.margin_css, html
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
@@ -3915,15 +4060,25 @@ impl<'a> MarginBoxRenderer<'a> {
                 .copied()
                 .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
 
+            // The vertical position is part of the key: boxes with the same
+            // content and size can sit at different heights.
             let cache_key = (
-                html.clone(),
+                format!("{}|{html}", pos.default_justify_content()),
                 width_key(rect.width.to_f32()),
                 width_key(rect.height.to_f32()),
             );
             if !self.render_cache.contains_key(&cache_key) {
+                // The body fills the box, and the content sits at the box's
+                // default vertical position (middle for the top and bottom
+                // edges).
                 let render_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\
+                     height:100vh;display:flex;flex-direction:column;\
+                     justify-content:{};\">{}</body></html>",
+                    self.html_open,
+                    self.margin_css,
+                    pos.default_justify_content(),
+                    html
                 );
                 let mut render_doc = crate::blitz_adapter::parse_and_layout(
                     &render_html,
@@ -4025,17 +4180,17 @@ fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> 
             for &child_id in &root_node.children {
                 if let Some(child) = base_doc.get_node(child_id) {
                     if let blitz_dom::NodeData::Element(elem) = &child.data {
-                        if elem.name.local.as_ref() == "body" {
+                        if (&elem.name.local) == "body" {
                             for &body_child_id in &child.children {
                                 if let Some(body_child) = base_doc.get_node(body_child_id) {
-                                    let size = &body_child.final_layout.size;
+                                    let size = &body_child.final_layout_or_zero().size;
                                     let v = if use_width { size.width } else { size.height };
                                     if v > 0.0 {
                                         break 'outer v;
                                     }
                                 }
                             }
-                            let size = &child.final_layout.size;
+                            let size = &child.final_layout_or_zero().size;
                             break 'outer if use_width { size.width } else { size.height };
                         }
                     }
@@ -4524,8 +4679,9 @@ mod tests {
         link: Option<std::sync::Arc<crate::paragraph::LinkSpan>>,
     ) -> crate::paragraph::ShapedGlyphRun {
         crate::paragraph::ShapedGlyphRun {
-            font_data: std::sync::Arc::new(vec![]),
+            font_data: Vec::new().into(),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: crate::paragraph::TextDecoration::default(),
@@ -5907,6 +6063,30 @@ mod tests {
     }
 
     #[test]
+    fn margin_boxes_of_a_right_to_left_document_are_right_to_left() {
+        let gcpm = crate::gcpm::GcpmContext::default();
+        let store = RunningElementStore::default();
+        let geom = empty_geometry();
+        let implicit: BTreeMap<usize, String> = BTreeMap::new();
+        let new = |rtl| {
+            MarginBoxRenderer::new(
+                &gcpm,
+                &store,
+                &[],
+                false,
+                &geom,
+                &HashMap::new(),
+                1,
+                &implicit,
+                rtl,
+            )
+            .html_open
+        };
+        assert_eq!(new(true), "<html dir=\"rtl\">");
+        assert_eq!(new(false), "<html>");
+    }
+
+    #[test]
     fn margin_box_renderer_new_with_string_set_mappings_takes_else_branch() {
         // Non-empty string_set_mappings forces the else branch at
         // `collect_string_set_states(pagination_geometry, &by_node_btree)`.
@@ -5930,6 +6110,7 @@ mod tests {
             &HashMap::new(),
             1,
             &implicit,
+            false,
         );
     }
 
@@ -5956,6 +6137,7 @@ mod tests {
             &HashMap::new(),
             1,
             &implicit,
+            false,
         );
     }
 

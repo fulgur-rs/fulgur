@@ -7,6 +7,7 @@
 //! independently.
 
 use crate::asset::AssetBundle;
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::blitz_adapter::{BaseDocument, Node, NodeData};
 use crate::draw_primitives::{BlockStyle, Size};
 use crate::drawables::{ImageMarker, ListItemMarker};
@@ -18,6 +19,7 @@ use crate::paragraph::{
     ShapedLine, TextDecoration, TextDecorationLine, TextDecorationStyle, VerticalAlign,
 };
 use crate::units::{F32Units, Pt, Px};
+use blitz_dom::CopyStyleGetters;
 use blitz_html::HtmlDocument;
 use skrifa::MetadataProvider;
 use std::collections::HashMap;
@@ -93,7 +95,7 @@ pub struct ConvertContext<'a> {
     pub running_store: &'a RunningElementStore,
     pub assets: Option<&'a AssetBundle>,
     /// Cache font data by (data pointer address, font index) to avoid redundant .to_vec() copies.
-    pub(crate) font_cache: HashMap<(usize, u32), Arc<Vec<u8>>>,
+    pub(crate) font_cache: HashMap<(usize, u32), crate::paragraph::FontBytes>,
     /// String-set entries from DOM walk, keyed by node_id for O(1) lookup.
     pub string_set_by_node: HashMap<usize, Vec<(String, String)>>,
     /// Counter operations from CounterPass, keyed by node_id for O(1) lookup.
@@ -133,19 +135,19 @@ pub struct ConvertContext<'a> {
 }
 
 impl ConvertContext<'_> {
-    /// Return a shared Arc for the given font data, caching by data pointer + index.
+    /// Return the given font's bytes, shared with Parley's blob (no copy),
+    /// caching by data pointer + index.
     ///
     /// Safety assumption: Parley font data pointers remain stable for the lifetime of
     /// this ConvertContext (scoped to a single `dom_to_drawables` call). HashMap is used
     /// (not BTreeMap) because this cache is lookup-only — iteration order does not
     /// affect PDF output.
-    fn get_or_insert_font(&mut self, font: &parley::FontData) -> Arc<Vec<u8>> {
+    fn get_or_insert_font(&mut self, font: &parley::FontData) -> crate::paragraph::FontBytes {
         let key = (font.data.data().as_ptr() as usize, font.index);
-        Arc::clone(
-            self.font_cache
-                .entry(key)
-                .or_insert_with(|| Arc::new(font.data.data().to_vec())),
-        )
+        self.font_cache
+            .entry(key)
+            .or_insert_with(|| crate::paragraph::FontBytes::from_blob(&font.data))
+            .clone()
     }
 }
 
@@ -164,13 +166,19 @@ pub fn dom_to_drawables(
     let mut drawables = crate::drawables::Drawables::new();
     let root = doc.root_element();
     if std::env::var("FULGUR_DEBUG").is_ok() {
-        debug_print_tree(doc.deref(), root.id, 0);
+        debug_print_tree(doc.deref(), crate::blitz_adapter::uid(root.id), 0);
     }
-    convert_node(doc.deref(), root.id, ctx, 0, &mut drawables);
+    convert_node(
+        doc.deref(),
+        crate::blitz_adapter::uid(root.id),
+        ctx,
+        0,
+        &mut drawables,
+    );
     drawables.bookmark_anchors = extract_bookmark_anchors(doc, &bookmark_snapshot, ctx.assets);
     drawables.body_offset_pt = extract_body_offset_pt(doc);
     drawables.root_dir_rtl = extract_root_dir_rtl(doc);
-    drawables.root_id = Some(root.id);
+    drawables.root_id = Some(crate::blitz_adapter::uid(root.id));
     drawables.body_id = find_body_id_in_dom(doc);
     record_semantics_pass(doc, &mut drawables);
     drawables
@@ -189,9 +197,9 @@ fn find_body_id_in_dom(doc: &HtmlDocument) -> Option<usize> {
             continue;
         };
         if let blitz_dom::NodeData::Element(elem) = &child.data
-            && elem.name.local.as_ref() == "body"
+            && (&elem.name.local) == "body"
         {
-            return Some(child_id);
+            return Some(crate::blitz_adapter::uid(child_id));
         }
     }
     None
@@ -214,9 +222,9 @@ fn extract_body_offset_pt(doc: &HtmlDocument) -> (crate::units::Pt, crate::units
             continue;
         };
         if let blitz_dom::NodeData::Element(elem) = &child.data
-            && elem.name.local.as_ref() == "body"
+            && (&elem.name.local) == "body"
         {
-            let (x, y, _, _) = layout_in_pt(&child.final_layout);
+            let (x, y, _, _) = layout_in_pt(child.final_layout_or_zero());
             return (x, y);
         }
     }
@@ -231,7 +239,7 @@ fn extract_root_dir_rtl(doc: &HtmlDocument) -> bool {
     let base = doc.deref();
     base.get_node(doc.root_element().id)
         .and_then(|n| n.primary_styles())
-        .is_some_and(|s| matches!(s.get_inherited_box().clone_direction(), Dir::Rtl))
+        .is_some_and(|s| matches!(s.get_inherited_box().slow_clone_direction(), Dir::Rtl))
 }
 
 /// O(1) probe answering "did *any* per-NodeId map grow?" — sums `.len()`
@@ -279,15 +287,15 @@ fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
         eprintln!("{}... (max depth reached)", "  ".repeat(depth));
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
-    let (x, y, width, height) = layout_in_pt(&node.final_layout);
+    let (x, y, width, height) = layout_in_pt(node.final_layout_or_zero());
     let indent = "  ".repeat(depth);
     let tag = match &node.data {
         NodeData::Element(e) => e.name.local.to_string(),
         NodeData::Text(_) => "#text".to_string(),
-        NodeData::Comment => "#comment".to_string(),
+        NodeData::Comment { .. } => "#comment".to_string(),
         _ => "#other".to_string(),
     };
     // `Pt` has no `Display` by design (a length must not silently format as a
@@ -305,7 +313,7 @@ fn debug_print_tree(doc: &BaseDocument, node_id: usize, depth: usize) {
         node.flags.is_inline_root()
     );
     for &child_id in &node.children {
-        debug_print_tree(doc, child_id, depth + 1);
+        debug_print_tree(doc, crate::blitz_adapter::uid(child_id), depth + 1);
     }
 }
 
@@ -343,6 +351,7 @@ pub(super) fn convert_node(
     convert_node_inner(doc, node_id, ctx, depth, out);
     record_multicol_rule(doc, node_id, ctx, out);
     convert_multicol_paragraph_slices(doc, node_id, ctx, out);
+    convert_multicol_box_slices(node_id, ctx, out);
     if let Some(mark) = mark {
         record_transform(doc, node_id, mark, out);
     }
@@ -356,10 +365,10 @@ pub(super) fn convert_node(
 /// branch-free invariant that `record_transform`'s snapshot consumer
 /// only fires for nodes that produce a `TransformEntry`.
 fn node_has_transform(doc: &BaseDocument, node_id: usize) -> bool {
-    doc.get_node(node_id)
+    doc.get_node(crate::blitz_adapter::bid(node_id))
         .and_then(|node| {
             let styles = node.primary_styles()?;
-            let (w, h) = size_in_pt(node.final_layout.size);
+            let (w, h) = size_in_pt(node.final_layout_or_zero().size);
             crate::blitz_adapter::compute_transform(&styles, w.to_f32(), h.to_f32())
         })
         .is_some()
@@ -400,24 +409,28 @@ fn walk_semantics(
     if depth >= MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
 
     let child_override = if let Some(elem) = node.element_data() {
-        if let Some(mut tag) = crate::tagging::classify_element(elem.name.local.as_ref()) {
+        if let Some(mut tag) = crate::tagging::classify_element(&elem.name.local) {
             // CSS list-style-type を読んで ListNumbering をオーバーライド
             if matches!(tag, crate::tagging::PdfTag::L { .. }) {
                 if let Some(styles) = node.primary_styles() {
                     use crate::tagging::ListNumbering;
-                    use ::style::properties::longhands::list_style_type::computed_value::T as LST;
-                    let numbering = match styles.clone_list_style_type() {
-                        LST::Disc => ListNumbering::Disc,
-                        LST::Circle => ListNumbering::Circle,
-                        LST::Square => ListNumbering::Square,
-                        LST::Decimal => ListNumbering::Decimal,
-                        LST::LowerAlpha => ListNumbering::LowerAlpha,
-                        LST::UpperAlpha => ListNumbering::UpperAlpha,
+                    use ::style::counter_style::CounterStyle as CS;
+                    let lst = styles.slow_clone_list_style_type();
+                    let numbering = match &lst.0 {
+                        CS::Name(name) => match &*name.0 {
+                            "disc" => ListNumbering::Disc,
+                            "circle" => ListNumbering::Circle,
+                            "square" => ListNumbering::Square,
+                            "decimal" => ListNumbering::Decimal,
+                            "lower-alpha" | "lower-latin" => ListNumbering::LowerAlpha,
+                            "upper-alpha" | "upper-latin" => ListNumbering::UpperAlpha,
+                            _ => ListNumbering::None,
+                        },
                         _ => ListNumbering::None,
                     };
                     tag = crate::tagging::PdfTag::L { numbering };
@@ -431,11 +444,12 @@ fn walk_semantics(
                 let mut p = node.parent;
                 loop {
                     let Some(pid) = p else { break None };
-                    if out.semantics.contains_key(&pid) {
+                    if out.semantics.contains_key(&crate::blitz_adapter::uid(pid)) {
                         break Some(pid);
                     }
                     p = doc.get_node(pid).and_then(|n| n.parent);
                 }
+                .map(crate::blitz_adapter::uid)
             };
 
             // `visibility: hidden` / `collapse` excludes the subtree from
@@ -511,7 +525,13 @@ fn walk_semantics(
                 out.li_lbody_ids.insert(node_id, lbody_id);
                 // li の子は lbody_id を parent として再帰
                 for &child_id in &node.children {
-                    walk_semantics(doc, child_id, depth + 1, Some(lbody_id), out);
+                    walk_semantics(
+                        doc,
+                        crate::blitz_adapter::uid(child_id),
+                        depth + 1,
+                        Some(lbody_id),
+                        out,
+                    );
                 }
                 return; // 通常の再帰をスキップ
             }
@@ -525,7 +545,13 @@ fn walk_semantics(
     };
 
     for &child_id in &node.children {
-        walk_semantics(doc, child_id, depth + 1, child_override, out);
+        walk_semantics(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            depth + 1,
+            child_override,
+            out,
+        );
     }
 }
 
@@ -573,7 +599,7 @@ fn record_transform(
     mark: crate::drawables::DrawMark,
     out: &mut crate::drawables::Drawables,
 ) {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     let Some(styles) = node.primary_styles() else {
@@ -597,7 +623,7 @@ fn record_transform(
     // by the time `render::draw_under_transform` consumes `tx.origin` and
     // the matrix — do not fold again there. Re-enabled by
     // `transform_integration::rotate_90_at_default_center_origin_fixes_center`.
-    let (width_pt, height_pt) = size_in_pt(node.final_layout.size);
+    let (width_pt, height_pt) = size_in_pt(node.final_layout_or_zero().size);
     let Some((matrix, origin)) =
         crate::blitz_adapter::compute_transform(&styles, width_pt.to_f32(), height_pt.to_f32())
     else {
@@ -627,22 +653,29 @@ fn record_multicol_rule(
     ctx: &ConvertContext<'_>,
     out: &mut crate::drawables::Drawables,
 ) {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     if !crate::blitz_adapter::is_multicol_container(node) {
         return;
     }
-    let Some(rule) = ctx
-        .column_styles
-        .get(&node_id)
-        .and_then(|props| props.rule)
-        .filter(|r| {
-            r.style != crate::column_css::ColumnRuleStyle::None && r.width > crate::units::Pt::ZERO
-        })
-    else {
+    let props = ctx.column_styles.get(&node_id);
+    let Some(mut rule) = props.and_then(|props| props.rule).filter(|r| {
+        r.style != crate::column_css::ColumnRuleStyle::None && r.width > crate::units::Pt::ZERO
+    }) else {
         return;
     };
+    if let Some(source) = props.and_then(|p| p.rule_color_source.as_deref()) {
+        // A `var()` that does not resolve makes the value invalid at
+        // computed-value time, which falls back to the initial value,
+        // `currentcolor`.
+        if let Some(rgba) = node.primary_styles().and_then(|styles| {
+            resolve_css_color(source, &styles)
+                .or_else(|| resolve_css_color("currentcolor", &styles))
+        }) {
+            rule.color = rgba;
+        }
+    }
     let Some(geometry) = ctx.multicol_geometry.get(&node_id) else {
         return;
     };
@@ -701,7 +734,7 @@ fn convert_multicol_paragraph_slices(
     ctx: &mut ConvertContext<'_>,
     out: &mut crate::drawables::Drawables,
 ) {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     if !crate::blitz_adapter::is_multicol_container(node) {
@@ -728,7 +761,7 @@ fn convert_multicol_paragraph_slices(
             // indices recorded by `layout_self_inline_root_container`
             // resolve correctly. (Case B's layout was already re-broken
             // by Blitz during `compute_child_layout`.)
-            let Some(source_node) = doc.get_node(source_id) else {
+            let Some(source_node) = doc.get_node(crate::blitz_adapter::bid(source_id)) else {
                 continue;
             };
             let Some(elem) = source_node.element_data() else {
@@ -759,12 +792,8 @@ fn convert_multicol_paragraph_slices(
                     .map(|s| css_text_align_to_parley_alignment(s.clone_text_align()))
                     .unwrap_or(parley::Alignment::Start);
                 let mut cloned = text_layout.layout.clone();
+                cloned.set_alignment(alignment, parley::AlignmentOptions::default());
                 cloned.break_all_lines(Some(group.col_w.to_f32()));
-                cloned.align(
-                    Some(group.col_w.to_f32()),
-                    alignment,
-                    parley::AlignmentOptions::default(),
-                );
                 Some(cloned)
             } else {
                 None
@@ -860,6 +889,45 @@ fn convert_multicol_paragraph_slices(
     }
 }
 
+/// Record the boxes `multicol_layout` broke across the columns of the
+/// multicol container `node_id`, in container border-box pt, for
+/// `render::paint_multicol_block_slices`.
+fn convert_multicol_box_slices(
+    node_id: usize,
+    ctx: &ConvertContext<'_>,
+    out: &mut crate::drawables::Drawables,
+) {
+    let Some(geometry) = ctx.multicol_geometry.get(&node_id) else {
+        return;
+    };
+    for group in &geometry.groups {
+        let group_x_pt = group.x_offset.in_pt();
+        let group_y_pt = group.y_offset.in_pt();
+        for split in &group.box_splits {
+            let slices = split
+                .fragments
+                .iter()
+                .map(|f| crate::drawables::BlockSlice {
+                    origin_pt: (
+                        group_x_pt + f.origin.x.in_pt(),
+                        group_y_pt + f.origin.y.in_pt(),
+                    ),
+                    size_pt: (f.size.width.in_pt(), f.size.height.in_pt()),
+                    offset_pt: f.offset.in_pt(),
+                })
+                .collect();
+            out.block_slices.insert(
+                split.source_node_id,
+                crate::drawables::BlockSlicesEntry {
+                    container_node_id: node_id,
+                    height_pt: split.height.in_pt(),
+                    slices,
+                },
+            );
+        }
+    }
+}
+
 /// Shape one `Vec<ShapedLine>` out of a parley layout, covering only
 /// `GlyphRun` items (no inline boxes). Used by
 /// [`convert_multicol_paragraph_slices`] — see that function for scope
@@ -896,11 +964,13 @@ fn shape_paragraph_glyph_runs(
                 let font_size = font_size_parley.as_px().in_pt();
 
                 let brush = &glyph_run.style().brush;
-                let color = get_text_color(doc, brush.id);
-                let decoration = get_text_decoration(doc, brush.id);
-                let link = ctx.link_cache.lookup(doc, brush.id);
+                let color = get_text_color(doc, crate::blitz_adapter::uid(brush.id));
+                let decoration = get_text_decoration(doc, crate::blitz_adapter::uid(brush.id));
+                let link = ctx
+                    .link_cache
+                    .lookup(doc, crate::blitz_adapter::uid(brush.id));
 
-                let run_key = run.cluster_range().start;
+                let run_key = run.index();
                 if run_key != prev_run_key {
                     prev_run_key = run_key;
                     run_glyph_offset = 0;
@@ -929,7 +999,9 @@ fn shape_paragraph_glyph_runs(
                         id: g.id,
                         x_advance: ShapedGlyph::normalize_by_font_size(g.advance, font_size_parley),
                         x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
-                        y_offset: ShapedGlyph::normalize_by_font_size(g.y, font_size_parley),
+                        // Parley's `y` grows downwards; krilla's `y_offset` is the
+                        // font's, which grows upwards (marks below the baseline).
+                        y_offset: ShapedGlyph::normalize_by_font_size(-g.y, font_size_parley),
                         text_range,
                     });
                 }
@@ -940,6 +1012,7 @@ fn shape_paragraph_glyph_runs(
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
+                        variations: crate::paragraph::run_variations(run),
                         font_size,
                         color,
                         decoration,
@@ -986,7 +1059,7 @@ fn extract_block_id(node: &Node) -> Option<Arc<String>> {
 fn is_pseudo_node(doc: &BaseDocument, node: &Node) -> bool {
     node.parent
         .and_then(|pid| doc.get_node(pid))
-        .is_some_and(|p| p.before == Some(node.id) || p.after == Some(node.id))
+        .is_some_and(|p| p.before() == Some(node.id) || p.after() == Some(node.id))
 }
 
 /// Geometry of a parent's content-box, used by the pseudo-image helpers so
@@ -1012,8 +1085,8 @@ struct ContentBox {
 /// delegates the arithmetic to `content_box_from_geometry` (which is unit-
 /// tested).
 fn compute_content_box(node: &Node, style: &BlockStyle) -> ContentBox {
-    let border_w = node.final_layout.size.width.as_px();
-    let border_h = node.final_layout.size.height.as_px();
+    let border_w = node.final_layout_or_zero().size.width.as_px();
+    let border_h = node.final_layout_or_zero().size.height.as_px();
     content_box_from_geometry(border_w, border_h, &style.border_widths, &style.padding)
 }
 
@@ -1082,15 +1155,95 @@ impl LinkCache {
     }
 }
 
+/// Resolve a CSS colour written for `styles`' element: `var()` references
+/// are replaced by the element's computed custom properties (whose own
+/// `var()`s Stylo has already substituted), then Stylo's colour parser
+/// computes the value, `currentcolor` included. For properties Stylo does
+/// not compute for Servo, such as `column-rule-color`.
+pub(crate) fn resolve_css_color(
+    source: &str,
+    styles: &::style::properties::ComputedValues,
+) -> Option<[u8; 4]> {
+    use blitz_dom::CopyStyleGetters;
+
+    let text = substitute_css_vars(source, |name| {
+        styles
+            .custom_properties()
+            .get_for_cssom(&::style::Atom::from(name))
+            .map(::style_traits::ToCss::to_css_string)
+    })?;
+    let computed = crate::column_css::parse_stylo_color(&text)?;
+    let rgba = style::absolute_to_rgba(computed.resolve_to_absolute(&styles.clone_color()));
+    Some(rgba)
+}
+
+/// Replace every `var(--name[, fallback])` in `css` with `lookup(name)`
+/// (the name without its leading `--`), or with the fallback when the
+/// lookup fails. Returns `None` when a reference has neither. Nesting
+/// (`var(--a, var(--b))`) is handled by repeating the pass, a bounded
+/// number of times.
+fn substitute_css_vars(css: &str, lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    const MAX_PASSES: usize = 16;
+    let mut text = css.to_string();
+    for _ in 0..MAX_PASSES {
+        let lower = text.to_ascii_lowercase();
+        let Some(start) = lower.find("var(") else {
+            return Some(text);
+        };
+        // The matching close parenthesis, and the first top-level comma.
+        let mut depth = 0usize;
+        let mut comma = None;
+        let mut end = None;
+        for (i, c) in text[start + 4..].char_indices() {
+            let i = start + 4 + i;
+            match c {
+                '(' => depth += 1,
+                ')' if depth == 0 => {
+                    end = Some(i);
+                    break;
+                }
+                ')' => depth -= 1,
+                ',' if depth == 0 && comma.is_none() => comma = Some(i),
+                _ => {}
+            }
+        }
+        let end = end?;
+        let name_end = comma.unwrap_or(end);
+        let name = text[start + 4..name_end].trim();
+        let value = name
+            .strip_prefix("--")
+            .and_then(&lookup)
+            .or_else(|| comma.map(|c| text[c + 1..end].trim().to_string()))?;
+        text.replace_range(start..=end, &value);
+    }
+    None
+}
+
 /// Extract the asset name from a URL that Stylo may have resolved to absolute.
 fn extract_asset_name(url: &str) -> &str {
     url.strip_prefix("file:///").unwrap_or(url)
 }
 
+/// Image bytes for an `<img src>`, `content`, `list-style-image` or
+/// `background-image` reference: `data:` URLs are decoded in place (they are
+/// part of the document, so no bundle entry is needed), anything else is
+/// looked up in the asset bundle.
+pub(crate) fn image_bytes(assets: Option<&AssetBundle>, src: &str) -> Option<Arc<Vec<u8>>> {
+    if src
+        .get(..5)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("data:"))
+    {
+        let url = data_url::DataUrl::process(src).ok()?;
+        let (body, _fragment) = url.decode_to_vec().ok()?;
+        return Some(Arc::new(body));
+    }
+    assets?.get_image(src).cloned()
+}
+
 /// Check if a node is a non-visual element (head, script, style, etc.)
 fn is_non_visual_element(node: &Node) -> bool {
     if let Some(elem) = node.element_data() {
-        let tag = elem.name.local.as_ref();
+        let tag = &*elem.name.local;
         matches!(
             tag,
             "head" | "script" | "style" | "link" | "meta" | "title" | "noscript"
@@ -1102,7 +1255,7 @@ fn is_non_visual_element(node: &Node) -> bool {
 
 /// Get text color from a DOM node's computed styles.
 fn get_text_color(doc: &BaseDocument, node_id: usize) -> [u8; 4] {
-    if let Some(node) = doc.get_node(node_id)
+    if let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id))
         && let Some(styles) = node.primary_styles()
     {
         return absolute_to_rgba(styles.clone_color());
@@ -1112,13 +1265,13 @@ fn get_text_color(doc: &BaseDocument, node_id: usize) -> [u8; 4] {
 
 /// Get text-decoration properties from a DOM node's computed styles.
 fn get_text_decoration(doc: &BaseDocument, node_id: usize) -> TextDecoration {
-    if let Some(node) = doc.get_node(node_id)
+    if let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id))
         && let Some(styles) = node.primary_styles()
     {
         let current_color = styles.clone_color();
 
         // text-decoration-line (bitflags)
-        let stylo_line = styles.clone_text_decoration_line();
+        let stylo_line = styles.slow_clone_text_decoration_line();
         let mut line = TextDecorationLine::NONE;
         if stylo_line.contains(::style::values::specified::TextDecorationLine::UNDERLINE) {
             line = line | TextDecorationLine::UNDERLINE;
@@ -1132,7 +1285,7 @@ fn get_text_decoration(doc: &BaseDocument, node_id: usize) -> TextDecoration {
 
         // text-decoration-style
         use ::style::properties::longhands::text_decoration_style::computed_value::T as StyloTDS;
-        let style = match styles.clone_text_decoration_style() {
+        let style = match styles.slow_clone_text_decoration_style() {
             StyloTDS::Solid => TextDecorationStyle::Solid,
             StyloTDS::Dashed => TextDecorationStyle::Dashed,
             StyloTDS::Dotted => TextDecorationStyle::Dotted,
@@ -1142,7 +1295,7 @@ fn get_text_decoration(doc: &BaseDocument, node_id: usize) -> TextDecoration {
         };
 
         // text-decoration-color (resolve currentcolor)
-        let deco_color = styles.clone_text_decoration_color();
+        let deco_color = styles.slow_clone_text_decoration_color();
         let color = absolute_to_rgba(deco_color.resolve_to_absolute(&current_color));
 
         return TextDecoration { line, style, color };
@@ -1745,7 +1898,7 @@ mod debug_print_tree_tests {
             "<!DOCTYPE html><html><body><p>text</p><!-- comment --><div><span>nested</span></div></body></html>",
         );
         let root_id = doc.root_element().id;
-        super::debug_print_tree(doc.deref(), root_id, 0);
+        super::debug_print_tree(doc.deref(), crate::blitz_adapter::uid(root_id), 0);
     }
 
     #[test]
@@ -1755,7 +1908,11 @@ mod debug_print_tree_tests {
         // pathologically deep DOM or running a large-stack thread.
         let doc = parsed_doc("<!DOCTYPE html><html><body><p>x</p></body></html>");
         let root_id = doc.root_element().id;
-        super::debug_print_tree(doc.deref(), root_id, crate::MAX_DOM_DEPTH);
+        super::debug_print_tree(
+            doc.deref(),
+            crate::blitz_adapter::uid(root_id),
+            crate::MAX_DOM_DEPTH,
+        );
     }
 }
 
@@ -1803,6 +1960,31 @@ mod utility_fn_tests {
     fn extract_asset_name_strips_file_scheme() {
         assert_eq!(extract_asset_name("file:///foo/bar.png"), "foo/bar.png");
         assert_eq!(extract_asset_name("file:///"), "");
+    }
+
+    #[test]
+    fn image_bytes_decodes_data_urls_without_a_bundle() {
+        assert_eq!(
+            image_bytes(None, "data:image/png;base64,iVBORw0K").as_deref(),
+            Some(&b"\x89PNG\r\n"[..].to_vec())
+        );
+        assert_eq!(
+            image_bytes(None, "DATA:text/plain,a%20b").as_deref(),
+            Some(&b"a b".to_vec())
+        );
+        assert!(image_bytes(None, "data:image/png;base64,***").is_none());
+        assert!(image_bytes(None, "logo.png").is_none());
+    }
+
+    #[test]
+    fn image_bytes_looks_up_other_references_in_the_bundle() {
+        let mut bundle = AssetBundle::new();
+        bundle.add_image("logo.png", vec![1, 2, 3]);
+        assert_eq!(
+            image_bytes(Some(&bundle), "./logo.png").as_deref(),
+            Some(&vec![1, 2, 3])
+        );
+        assert!(image_bytes(Some(&bundle), "other.png").is_none());
     }
 
     #[test]
@@ -1971,15 +2153,13 @@ mod utility_fn_tests {
     // Covered here by calling `lookup` twice for the same node id.
 
     fn find_first_by_tag_in_tests(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
-        let node = doc.get_node(start_id)?;
-        if node
-            .element_data()
-            .is_some_and(|e| e.name.local.as_ref() == tag)
-        {
+        let node = doc.get_node(crate::blitz_adapter::bid(start_id))?;
+        if node.element_data().is_some_and(|e| (&e.name.local) == tag) {
             return Some(start_id);
         }
         for &c in &node.children {
-            if let Some(found) = find_first_by_tag_in_tests(doc, c, tag) {
+            if let Some(found) = find_first_by_tag_in_tests(doc, crate::blitz_adapter::uid(c), tag)
+            {
                 return Some(found);
             }
         }
@@ -2001,9 +2181,9 @@ mod utility_fn_tests {
         let root_id = doc.root_element().id;
 
         let mut cache = LinkCache::default();
-        let first = cache.lookup(base, root_id);
+        let first = cache.lookup(base, crate::blitz_adapter::uid(root_id));
         // Second call: cache hit → `(*cached)?` at line 1064 returns None.
-        let second = cache.lookup(base, root_id);
+        let second = cache.lookup(base, crate::blitz_adapter::uid(root_id));
 
         assert!(
             first.is_none(),
@@ -2028,7 +2208,7 @@ mod utility_fn_tests {
         );
         let base: &BaseDocument = doc.deref();
         let root_id = doc.root_element().id;
-        let span_id = find_first_by_tag_in_tests(base, root_id, "span")
+        let span_id = find_first_by_tag_in_tests(base, crate::blitz_adapter::uid(root_id), "span")
             .expect("<span> should exist inside <a>");
 
         let mut cache = LinkCache::default();
@@ -2113,6 +2293,44 @@ mod edge_case_tests {
             viewport_size_px: Some((595.0, 842.0)),
         };
         super::dom_to_drawables(&doc, &mut ctx)
+    }
+
+    // --- border colors per side ---
+
+    #[test]
+    fn a_lone_bottom_border_keeps_its_color() {
+        // The other sides keep the initial `currentcolor` (red here), so the
+        // sides differ and each keeps its own color.
+        let d = build_drawables(
+            "<!DOCTYPE html><body style='color:#f00'>\
+             <div style='height:10px;border-bottom:2px solid #3346a8'></div></body>",
+        );
+        let colors: Vec<_> = d
+            .block_styles
+            .iter()
+            .filter(|(_, e)| e.style.border_widths[2].to_f32() > 0.0)
+            .map(|(_, e)| e.style.side_colors)
+            .collect();
+        assert_eq!(
+            colors,
+            vec![Some([
+                [255, 0, 0, 255],
+                [255, 0, 0, 255],
+                [0x33, 0x46, 0xa8, 255],
+                [255, 0, 0, 255]
+            ])]
+        );
+        // One color for all sides needs no per-side drawing.
+        let d = build_drawables(
+            "<!DOCTYPE html><body><div style='height:10px;border:2px solid #3346a8'></div></body>",
+        );
+        let block = d
+            .block_styles
+            .iter()
+            .find(|(_, e)| e.style.border_widths[0].to_f32() > 0.0)
+            .expect("bordered block");
+        assert_eq!(block.1.style.side_colors, None);
+        assert_eq!(block.1.style.border_color, [0x33, 0x46, 0xa8, 255]);
     }
 
     // --- MAX_DOM_DEPTH guard in convert_node and walk_semantics ---
@@ -2289,5 +2507,78 @@ mod edge_case_tests {
             "whitespace-only id must not be stored in block entries; found {}",
             bad_block_ids.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod css_color_tests {
+    use super::{resolve_css_color, substitute_css_vars};
+
+    fn lookup(name: &str) -> Option<String> {
+        match name {
+            "a" => Some("red".into()),
+            "b" => Some("var(--a)".into()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn substitutes_vars_fallbacks_and_nesting() {
+        assert_eq!(
+            substitute_css_vars("var(--a)", lookup).as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            substitute_css_vars("var(--b)", lookup).as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            substitute_css_vars("var(--x, var(--a))", lookup).as_deref(),
+            Some("red")
+        );
+        assert_eq!(
+            substitute_css_vars("color-mix(in srgb, var(--a) 50%, var(--x, blue))", lookup)
+                .as_deref(),
+            Some("color-mix(in srgb, red 50%, blue)")
+        );
+        assert_eq!(substitute_css_vars("var(--x)", lookup), None);
+        assert_eq!(substitute_css_vars("var(--a", lookup), None);
+    }
+
+    fn styles_of_body(html: &str) -> ::style::servo_arc::Arc<::style::properties::ComputedValues> {
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+        let body = (0..10_000)
+            .filter_map(|id| doc.get_node(crate::blitz_adapter::bid(id)))
+            .find(|n| n.element_data().is_some_and(|e| &*e.name.local == "body"))
+            .expect("body");
+        body.primary_styles().expect("styles").clone()
+    }
+
+    #[test]
+    fn resolves_custom_properties_modern_colours_and_currentcolor() {
+        let styles = styles_of_body(
+            r#"<!doctype html><html><head><style>
+            :root { --ink: rgb(0 0 255); --line: color-mix(in srgb, var(--ink) 50%, white); }
+            body { color: rgb(0 128 0); }
+            </style></head><body>x</body></html>"#,
+        );
+        assert_eq!(
+            resolve_css_color("var(--ink)", &styles),
+            Some([0, 0, 255, 255])
+        );
+        let mixed = resolve_css_color("var(--line)", &styles).expect("color-mix");
+        assert!(mixed[0].abs_diff(128) <= 1 && mixed[2] == 255, "{mixed:?}");
+        assert_eq!(
+            resolve_css_color("currentcolor", &styles),
+            Some([0, 128, 0, 255])
+        );
+        let oklch = resolve_css_color("oklch(62.8% 0.2577 29.23)", &styles).expect("oklch");
+        assert!(
+            oklch[0] >= 250 && oklch[1] <= 5 && oklch[2] <= 5,
+            "{oklch:?}"
+        );
+        assert_eq!(resolve_css_color("var(--missing)", &styles), None);
+        assert_eq!(resolve_css_color("not-a-colour", &styles), None);
     }
 }

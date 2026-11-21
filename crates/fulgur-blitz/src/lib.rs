@@ -321,6 +321,8 @@ pub mod draw_primitives;
 #[doc(hidden)]
 pub mod drawables;
 pub mod engine;
+#[cfg(not(target_arch = "wasm32"))]
+mod font_aliases;
 pub mod gcpm;
 pub(crate) mod link;
 #[doc(hidden)]
@@ -342,6 +344,7 @@ pub use asset::AssetBundle;
 pub use config::{Config, ConfigBuilder, Margin, PageSize};
 pub use engine::{Engine, EngineBuilder, LayoutOutput};
 pub use error::{Error, Result};
+pub use font_aliases::{FontSubstitutes, set_font_substitutes};
 pub use outline::build_outline;
 
 /// Convert HTML to PDF with default settings.

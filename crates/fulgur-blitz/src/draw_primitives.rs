@@ -728,8 +728,11 @@ pub struct BlockStyle {
     pub background_color: Option<[u8; 4]>,
     /// Background image layers (first = top-most, rendered in reverse order).
     pub background_layers: Vec<BackgroundLayer>,
-    /// Border color as RGBA
+    /// Border color as RGBA: the top side's, and every side's unless
+    /// `side_colors` is set
     pub border_color: [u8; 4],
+    /// The colors of the sides (top, right, bottom, left) when they differ
+    pub side_colors: Option<[[u8; 4]; 4]>,
     /// Border widths: top, right, bottom, left
     pub border_widths: [crate::units::Pt; 4],
     /// Padding: top, right, bottom, left
@@ -744,6 +747,26 @@ pub struct BlockStyle {
     pub overflow_y: Overflow,
     /// Box shadows in CSS declaration order (first = top-most in paint stack).
     pub box_shadows: Vec<BoxShadow>,
+    /// The border of a table or table cell in the collapsing border model,
+    /// drawn instead of `border_widths` / `border_styles`.
+    pub collapsed_border: Option<CollapsedBorder>,
+}
+
+/// A border in the collapsing border model (CSS 2.1 §17.6.2). Blitz lays the
+/// table out with uniform gutters between the cells and leaves the cells
+/// without a border, so the border is drawn on the box widened by `outsets`
+/// (top, right, bottom, left; negative shrinks it): centred on the gutter
+/// for a cell, on the table's edge gutter for the table.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CollapsedBorder {
+    /// Border widths: top, right, bottom, left
+    pub widths: [crate::units::Pt; 4],
+    /// Border styles: top, right, bottom, left
+    pub styles: [BorderStyleValue; 4],
+    /// Border colors as RGBA: top, right, bottom, left
+    pub colors: [[u8; 4]; 4],
+    /// How far each side of the drawn border lies outside the box.
+    pub outsets: [crate::units::Pt; 4],
 }
 
 /// CSS border-style values supported by fulgur.
@@ -1009,6 +1032,7 @@ impl BlockStyle {
         self.background_color.is_some()
             || !self.background_layers.is_empty()
             || self.border_widths.iter().any(|&w| w.to_f32() > 0.0)
+            || self.collapsed_border.is_some()
             || self.padding.iter().any(|&p| p.to_f32() > 0.0)
             || !self.box_shadows.is_empty()
     }
@@ -1477,7 +1501,7 @@ fn draw_border_line(
 
     match style {
         // CSS Backgrounds L3: border-width < 3 の double は solid として描画。
-        BorderStyleValue::Double if width >= 3.0 => {
+        BorderStyleValue::Double if draws_two_lines(width) => {
             let gap = width / 3.0;
             let dx = x2 - x1;
             let dy = y2 - y1;
@@ -1542,6 +1566,16 @@ fn draw_border_line(
     }
 }
 
+/// The narrowest `double` border drawn as two lines: 3 CSS px, as in
+/// browsers, which is 2.25pt. Border widths here are in points; comparing
+/// them with 3 drew a 3px `double` border as one solid line.
+const DOUBLE_MIN_WIDTH_PT: f32 = 2.25 - 1e-4;
+
+/// Whether a `double` border `width` points wide is drawn as two lines.
+fn draws_two_lines(width: f32) -> bool {
+    width >= DOUBLE_MIN_WIDTH_PT
+}
+
 pub(crate) fn draw_block_border(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
@@ -1550,6 +1584,37 @@ pub(crate) fn draw_block_border(
     w: f32,
     h: f32,
 ) {
+    if let Some(collapsed) = &style.collapsed_border {
+        // One side at a time, each in its own color.
+        let [ot, or, ob, ol] = collapsed.outsets.map(crate::units::Pt::to_f32);
+        for side in 0..4 {
+            let mut widths = [crate::units::Pt::default(); 4];
+            widths[side] = collapsed.widths[side];
+            let own = BlockStyle {
+                border_color: collapsed.colors[side],
+                border_widths: widths,
+                border_styles: collapsed.styles,
+                ..BlockStyle::default()
+            };
+            draw_block_border(canvas, &own, x - ol, y - ot, w + ol + or, h + ot + ob);
+        }
+        return;
+    }
+    if let Some(colors) = style.side_colors {
+        // Sides in different colors: one side at a time, each in its own.
+        for (side, color) in colors.into_iter().enumerate() {
+            let mut widths = [crate::units::Pt::default(); 4];
+            widths[side] = style.border_widths[side];
+            let own = BlockStyle {
+                border_color: color,
+                border_widths: widths,
+                border_styles: style.border_styles,
+                ..BlockStyle::default()
+            };
+            draw_block_border(canvas, &own, x, y, w, h);
+        }
+        return;
+    }
     let [bt, br, bb, bl] = style.border_widths.map(crate::units::Pt::to_f32);
     let [st, sr, sb, sl] = style.border_styles;
     if !(bt > 0.0 || br > 0.0 || bb > 0.0 || bl > 0.0) {
@@ -1596,7 +1661,7 @@ pub(crate) fn draw_block_border(
         canvas.surface.set_fill(None);
 
         // CSS Backgrounds L3: border-width < 3 の double は solid として描画。
-        if st == BorderStyleValue::Double && bt >= 3.0 {
+        if st == BorderStyleValue::Double && draws_two_lines(bt) {
             // Double = 3 equal bands (border/gap/border): thin_w = bt/3.
             // Stroke centerlines: outer at bt/6, inner at bt*5/6.
             let thin_w = bt / 3.0;
@@ -2878,6 +2943,13 @@ mod dp_unit_tests {
         with_canvas_smoke(|canvas| {
             draw_block_border(canvas, &style, 0.0, 0.0, 80.0, 80.0);
         });
+    }
+
+    #[test]
+    fn a_3px_double_border_draws_two_lines() {
+        // 3 CSS px is 2.25pt: browsers draw it as two lines, narrower as one.
+        assert!(super::draws_two_lines(3.0_f32.as_px().in_pt().to_f32()));
+        assert!(!super::draws_two_lines(2.0_f32.as_px().in_pt().to_f32()));
     }
 
     #[test]

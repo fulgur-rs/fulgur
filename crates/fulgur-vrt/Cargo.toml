@@ -9,7 +9,8 @@ description = "Visual regression testing harness for fulgur (dev-only, not publi
 
 [dependencies]
 fulgur = { path = "../fulgur" }
-fulgur-raikiri = { path = "../fulgur-raikiri", optional = true }
+# TODO(blitz-master): re-enable once raikiri-svg allows svgtypes ^0.16.2
+# fulgur-raikiri = { path = "../fulgur-raikiri", optional = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
 toml = "1.1"
 serde = { version = "1", features = ["derive"] }
@@ -34,5 +35,8 @@ default = []
 ## Compare every fixture rendered through the unpublished Raikiri backend
 ## against the committed Blitz goldens (`tests/raikiri_compare.rs`). Off by
 ## default so the byte-exact VRT job in ci.yml never compiles Raikiri.
-raikiri = ["dep:fulgur-raikiri", "dep:fontique"]
+# TODO(blitz-master): restore `["dep:fulgur-raikiri", "dep:fontique"]` with
+# the dependency. Kept as an empty feature so `cfg(feature = "raikiri")`
+# stays a known cfg value.
+raikiri = []
 chrome-golden = ["dep:chromiumoxide", "dep:tokio", "dep:futures"]

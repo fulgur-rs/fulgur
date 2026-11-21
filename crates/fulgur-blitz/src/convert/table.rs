@@ -1,4 +1,5 @@
 use super::*;
+use crate::blitz_adapter::NodeLayoutExt;
 
 /// Dispatcher entry for `<table>` elements. Returns `true` when an entry
 /// was inserted into `out.tables` (and any cell descendants registered).
@@ -9,13 +10,13 @@ pub(super) fn try_convert(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
     let Some(elem_data) = node.element_data() else {
         return false;
     };
-    if elem_data.name.local.as_ref() != "table" {
+    if (&elem_data.name.local) != "table" {
         return false;
     }
     convert_table(doc, node, ctx, depth, out);
@@ -29,13 +30,13 @@ fn convert_table(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) {
-    let (width, height) = size_in_pt(node.final_layout.size);
+    let (width, height) = size_in_pt(node.final_layout_or_zero().size);
     let style = extract_block_style(node, ctx.assets);
     let clipping = style.has_overflow_clip();
     let (opacity, visible) = extract_opacity_visible(node);
 
     out.tables.insert(
-        node.id,
+        crate::blitz_adapter::uid(node.id),
         crate::drawables::TableEntry {
             style,
             opacity,
@@ -56,16 +57,23 @@ fn convert_table(
             continue;
         };
         let is_thead = is_table_section(child_node, "thead");
-        collect_table_cells(doc, child_id, is_thead, ctx, depth, out);
+        collect_table_cells(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            is_thead,
+            ctx,
+            depth,
+            out,
+        );
     }
 
     if let Some(mark) = mark {
         let descendants: Vec<usize> = out
             .drawn_since(mark)
             .into_iter()
-            .filter(|&id| id != node.id)
+            .filter(|&id| id != crate::blitz_adapter::uid(node.id))
             .collect();
-        if let Some(entry) = out.tables.get_mut(&node.id) {
+        if let Some(entry) = out.tables.get_mut(&crate::blitz_adapter::uid(node.id)) {
             entry.clip_descendants = descendants;
         }
     }
@@ -73,7 +81,7 @@ fn convert_table(
 
 fn is_table_section(node: &Node, section_name: &str) -> bool {
     if let Some(elem) = node.element_data() {
-        elem.name.local.as_ref() == section_name
+        (&elem.name.local) == section_name
     } else {
         false
     }
@@ -90,7 +98,7 @@ fn collect_table_cells(
     if depth >= MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
 
@@ -100,15 +108,20 @@ fn collect_table_cells(
         let Some(child_node) = doc.get_node(child_id) else {
             continue;
         };
-        if matches!(&child_node.data, NodeData::Comment) {
+        if matches!(&child_node.data, NodeData::Comment { .. }) {
             continue;
         }
         if is_non_visual_element(child_node) {
             continue;
         }
 
-        let cw = child_node.final_layout.size.width.as_px().in_pt();
-        let ch = child_node.final_layout.size.height.as_px().in_pt();
+        let cw = child_node.final_layout_or_zero().size.width.as_px().in_pt();
+        let ch = child_node
+            .final_layout_or_zero()
+            .size
+            .height
+            .as_px()
+            .in_pt();
 
         let child_effective_is_empty = child_node
             .layout_children
@@ -118,7 +131,14 @@ fn collect_table_cells(
             .is_empty();
         if ch == Pt::ZERO && cw == Pt::ZERO && !child_effective_is_empty {
             let child_is_header = is_header || is_table_section(child_node, "thead");
-            collect_table_cells(doc, child_id, child_is_header, ctx, depth + 1, out);
+            collect_table_cells(
+                doc,
+                crate::blitz_adapter::uid(child_id),
+                child_is_header,
+                ctx,
+                depth + 1,
+                out,
+            );
             continue;
         }
 
@@ -128,7 +148,13 @@ fn collect_table_cells(
 
         // Actual cell — recurse via convert_node so its block / paragraph
         // entries land in the standard maps.
-        convert_node(doc, child_id, ctx, depth + 1, out);
+        convert_node(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            ctx,
+            depth + 1,
+            out,
+        );
     }
 }
 

@@ -171,10 +171,90 @@ pub struct LinkSpan {
 /// so `extract_paragraph` can bump-clone the same buffer per run rather than
 /// pay a String allocation each time; it is passed by reference to krilla's
 /// `draw_glyphs` and read via `as_str` in `render` — no mutation callers.
+/// Variation axis tags and values in user space (`wght` 700, `wdth` 75).
+pub type FontVariations = Vec<([u8; 4], f32)>;
+
+/// The variation axis values fontique chose for a parley run: when a font
+/// is variable, a requested `font-weight`, `font-stretch` or `font-style` is
+/// matched by setting its axes rather than by picking another file.
+pub(crate) fn run_variations<B: parley::Brush>(run: &parley::Run<'_, B>) -> FontVariations {
+    run.synthesis()
+        .variation_settings()
+        .iter()
+        .map(|(tag, value)| (tag.to_be_bytes(), *value))
+        .collect()
+}
+
+/// The bytes of a font file, shared without copying. Fonts found by Parley
+/// keep the [`parley::FontData`] blob they were loaded into (a CJK collection
+/// is tens of megabytes), and `@font-face` fonts keep their `Arc<Vec<u8>>`.
+#[derive(Clone)]
+pub struct FontBytes(Arc<dyn AsRef<[u8]> + Send + Sync>);
+
+impl FontBytes {
+    /// Shares the blob Parley loaded the font into.
+    pub fn from_blob(blob: &parley::fontique::Blob<u8>) -> Self {
+        Self(blob.clone().into_raw_parts().0)
+    }
+}
+
+impl std::ops::Deref for FontBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        (*self.0).as_ref()
+    }
+}
+
+impl AsRef<[u8]> for FontBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::fmt::Debug for FontBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FontBytes({} bytes)", self.len())
+    }
+}
+
+impl From<Vec<u8>> for FontBytes {
+    fn from(data: Vec<u8>) -> Self {
+        Self(Arc::new(data))
+    }
+}
+
+impl From<Arc<Vec<u8>>> for FontBytes {
+    fn from(data: Arc<Vec<u8>>) -> Self {
+        Self(data)
+    }
+}
+
+impl From<FontBytes> for krilla::Data {
+    fn from(data: FontBytes) -> Self {
+        data.0.into()
+    }
+}
+
+#[cfg(test)]
+mod font_bytes_tests {
+    use super::FontBytes;
+
+    #[test]
+    fn from_blob_shares_the_font_data() {
+        let blob = parley::fontique::Blob::from(vec![1u8, 2, 3]);
+        let bytes = FontBytes::from_blob(&blob);
+        assert_eq!(&*bytes, &[1, 2, 3]);
+        assert!(std::ptr::eq(bytes.as_ptr(), blob.data().as_ptr()));
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ShapedGlyphRun {
-    pub font_data: Arc<Vec<u8>>,
+    pub font_data: FontBytes,
     pub font_index: u32,
+    /// Variation axis values (e.g. `wght` = 700) that select the instance
+    /// of a variable font. Empty for static fonts.
+    pub variations: FontVariations,
     pub font_size: crate::units::Pt,
     pub color: [u8; 4], // RGBA
     pub decoration: TextDecoration,
@@ -523,7 +603,7 @@ struct DecorationSpan {
     width: crate::units::Pt,
     decoration: TextDecoration,
     /// Use metrics from the first run in the span
-    font_data: Arc<Vec<u8>>,
+    font_data: FontBytes,
     font_index: u32,
     font_size: crate::units::Pt,
 }
@@ -565,7 +645,7 @@ fn draw_line_decorations(
             x: run_x,
             width: run_width,
             decoration: run.decoration,
-            font_data: Arc::clone(&run.font_data),
+            font_data: run.font_data.clone(),
             font_index: run.font_index,
             font_size: run.font_size,
         });
@@ -761,8 +841,15 @@ pub fn draw_shaped_lines(
                         tracker.transition_to(canvas, link_span_ptr(run.link.as_ref()));
                     }
                     // Create Krilla font from cached data
-                    let data: krilla::Data = Arc::clone(&run.font_data).into();
-                    let Some(font) = krilla::text::Font::new(data, run.font_index) else {
+                    let data: krilla::Data = run.font_data.clone().into();
+                    let coords: Vec<(krilla::text::Tag, f32)> = run
+                        .variations
+                        .iter()
+                        .map(|(tag, value)| (krilla::text::Tag::new(tag), *value))
+                        .collect();
+                    let Some(font) =
+                        krilla::text::Font::new_variable(data, run.font_index, &coords)
+                    else {
                         continue;
                     };
 
@@ -1576,8 +1663,9 @@ mod tests {
     fn line_item_debug_impl_covers_all_variants() {
         // Text variant — delegates to the ShapedGlyphRun derive.
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -1617,8 +1705,9 @@ mod tests {
     #[test]
     fn recalculate_line_box_text_items_are_skipped() {
         let run = ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -1830,8 +1919,9 @@ mod link_span_tests {
     #[test]
     fn shaped_glyph_run_default_has_no_link() {
         let run = ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -2483,8 +2573,9 @@ mod draw_decoration_direct_tests {
         };
 
         let make_run = |x_offset_pt: f32| ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration,

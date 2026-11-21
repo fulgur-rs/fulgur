@@ -4,27 +4,26 @@ use crate::units::F32Units;
 
 /// Resolve a node's computed `list-style-image` to bundled asset bytes and
 /// detected asset kind. Returns `None` when there is no `list-style-image`,
-/// the computed value is not a plain `url(...)`, no asset bundle is set, or
-/// the asset is not registered in the bundle.
-fn resolve_list_style_image_asset<'a>(
+/// the computed value is not a plain `url(...)`, or the image is neither a
+/// `data:` URL nor registered in the bundle.
+fn resolve_list_style_image_asset(
     node: &Node,
-    assets: Option<&'a AssetBundle>,
-) -> Option<(&'a Arc<Vec<u8>>, crate::image::AssetKind)> {
+    assets: Option<&AssetBundle>,
+) -> Option<(Arc<Vec<u8>>, crate::image::AssetKind)> {
     use ::style::values::computed::image::Image;
-    let assets = assets?;
     let styles = node.primary_styles()?;
-    let image = styles.clone_list_style_image();
+    let image = styles.slow_clone_list_style_image();
     let url = match image {
         Image::Url(u) => u,
         _ => return None,
     };
     let raw_src = match &url {
-        ::style::servo::url::ComputedUrl::Valid(u) => u.as_str(),
-        ::style::servo::url::ComputedUrl::Invalid(s) => s.as_str(),
+        ::style::url::ComputedUrl::Valid(u) => u.as_str(),
+        ::style::url::ComputedUrl::Invalid(s) => s.as_str(),
     };
     let src = extract_asset_name(raw_src);
-    let data = assets.get_image(src)?;
-    let kind = crate::image::AssetKind::detect(data);
+    let data = super::image_bytes(assets, src)?;
+    let kind = crate::image::AssetKind::detect(&data);
     Some((data, kind))
 }
 
@@ -70,9 +69,9 @@ pub(super) fn resolve_list_marker(
     let (data, kind) = resolve_list_style_image_asset(node, assets)?;
     match kind {
         AssetKind::Raster(format) => {
-            let (width, height) = size_raster_marker(data, format, line_height)?;
+            let (width, height) = size_raster_marker(&data, format, line_height)?;
             let entry = crate::drawables::ImageEntry {
-                image_data: Arc::clone(data),
+                image_data: Arc::clone(&data),
                 format,
                 width,
                 height,
@@ -86,7 +85,7 @@ pub(super) fn resolve_list_marker(
             })
         }
         AssetKind::Svg => {
-            let tree = usvg::Tree::from_data(data, &crate::svg::sandboxed_options()).ok()?;
+            let tree = usvg::Tree::from_data(&data, &crate::svg::sandboxed_options()).ok()?;
             let size = tree.size();
             let intrinsic_w = size.width().as_px().in_pt();
             let intrinsic_h = size.height().as_px().in_pt();
@@ -133,9 +132,9 @@ pub(super) fn resolve_inside_image_marker(
     let (data, kind) = resolve_list_style_image_asset(node, assets)?;
     match kind {
         AssetKind::Raster(format) => {
-            let (width, height) = size_raster_marker(data, format, first_line_height)?;
+            let (width, height) = size_raster_marker(&data, format, first_line_height)?;
             Some(InlineImage {
-                data: Arc::clone(data),
+                data: Arc::clone(&data),
                 format,
                 width,
                 height,
@@ -205,9 +204,9 @@ pub(super) fn extract_marker_lines(
                 let font_size = font_size_parley.as_px().in_pt();
 
                 let brush = &glyph_run.style().brush;
-                let color = get_text_color(doc, brush.id);
+                let color = get_text_color(doc, crate::blitz_adapter::uid(brush.id));
 
-                let run_key = run.cluster_range().start;
+                let run_key = run.index();
                 if run_key != prev_run_key {
                     prev_run_key = run_key;
                     run_glyph_offset = 0;
@@ -237,7 +236,9 @@ pub(super) fn extract_marker_lines(
                         id: g.id,
                         x_advance: ShapedGlyph::normalize_by_font_size(g.advance, font_size_parley),
                         x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
-                        y_offset: ShapedGlyph::normalize_by_font_size(g.y, font_size_parley),
+                        // Parley's `y` grows downwards; krilla's `y_offset` is the
+                        // font's, which grows upwards (marks below the baseline).
+                        y_offset: ShapedGlyph::normalize_by_font_size(-g.y, font_size_parley),
                         text_range,
                     });
                 }
@@ -246,6 +247,7 @@ pub(super) fn extract_marker_lines(
                     items.push(LineItem::Text(ShapedGlyphRun {
                         font_data: font_arc,
                         font_index,
+                        variations: crate::paragraph::run_variations(run),
                         font_size,
                         color,
                         decoration: Default::default(),
@@ -282,7 +284,7 @@ pub(super) fn find_marker_font(
     marker: &Marker,
     assets: Option<&AssetBundle>,
     drawables: &crate::drawables::Drawables,
-) -> Option<(Arc<Vec<u8>>, u32)> {
+) -> Option<(crate::paragraph::FontBytes, u32)> {
     let marker_text = marker_to_string(marker);
     let check_chars: Vec<char> = marker_text.chars().filter(|c| !c.is_whitespace()).collect();
 
@@ -294,7 +296,7 @@ pub(super) fn find_marker_font(
                 if let Ok(font_ref) = skrifa::FontRef::from_index(font_arc, idx) {
                     let charmap = font_ref.charmap();
                     if check_chars.iter().all(|&c| charmap.map(c).is_some()) {
-                        return Some((Arc::clone(font_arc), idx));
+                        return Some((Arc::clone(font_arc).into(), idx));
                     }
                 } else {
                     break; // No more sub-fonts
@@ -315,7 +317,7 @@ pub(super) fn find_marker_font(
                     {
                         let charmap = font_ref.charmap();
                         if check_chars.iter().all(|c| charmap.map(*c).is_some()) {
-                            return Some((Arc::clone(&run.font_data), run.font_index));
+                            return Some((run.font_data.clone(), run.font_index));
                         }
                     }
                 }
@@ -341,7 +343,7 @@ pub(super) fn find_marker_font(
 /// (see `extract_marker_lines`).
 pub(super) fn shape_marker_with_skrifa(
     marker: &Marker,
-    font_data: &Arc<Vec<u8>>,
+    font_data: &crate::paragraph::FontBytes,
     font_index: u32,
     font_size: crate::units::Pt,
     color: [u8; 4],
@@ -373,8 +375,9 @@ pub(super) fn shape_marker_with_skrifa(
     }
 
     Some(ShapedGlyphRun {
-        font_data: Arc::clone(font_data),
+        font_data: font_data.clone(),
         font_index,
+        variations: Vec::new(),
         font_size,
         color,
         decoration: TextDecoration::default(),
@@ -499,8 +502,9 @@ mod tests {
         let empty_bundle = AssetBundle::new();
 
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::clone(&font_data),
+            font_data: Arc::clone(&font_data).into(),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -569,7 +573,7 @@ mod tests {
         let bad_font = Arc::new(vec![0u8; 16]);
         let result = shape_marker_with_skrifa(
             &Marker::Char('•'),
-            &bad_font,
+            &Arc::clone(&bad_font).into(),
             0,
             12.0.as_pt(),
             [0, 0, 0, 255],
@@ -583,7 +587,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::Char('•'),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0.as_pt(),
             [255, 0, 0, 255],
@@ -604,7 +608,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::String("1. ".to_string()),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             10.0.as_pt(),
             [0, 0, 0, 255],
@@ -622,7 +626,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::String("A".to_string()),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0.as_pt(),
             [0, 0, 0, 255],
@@ -643,7 +647,7 @@ mod tests {
         let font_data = load_noto_sans_ttf();
         let result = shape_marker_with_skrifa(
             &Marker::String("AB".to_string()),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0.as_pt(),
             [0, 0, 0, 255],
@@ -720,8 +724,9 @@ mod tests {
         // font is available.
         let bad_font = Arc::new(vec![0u8; 16]);
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::clone(&bad_font),
+            font_data: Arc::clone(&bad_font).into(),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -759,8 +764,9 @@ mod tests {
         // and continue iterating rather than returning the non-covering font.
         let font_data = load_noto_sans_ttf();
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::clone(&font_data),
+            font_data: Arc::clone(&font_data).into(),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -803,7 +809,7 @@ mod tests {
         let result = shape_marker_with_skrifa(
             // marker_skrifa_text(Char(U+E000)) → "\u{E000} " (char + trailing space)
             &Marker::Char('\u{E000}'),
-            &font_data,
+            &Arc::clone(&font_data).into(),
             0,
             12.0_f32.as_pt(),
             [0, 0, 0, 255],
@@ -923,5 +929,47 @@ mod tests {
             </body></html>"#,
         );
         assert!(pdf.starts_with(b"%PDF"));
+    }
+}
+
+#[cfg(test)]
+mod outside_marker_whitespace {
+    use crate::units::F32Units;
+
+    /// The UA stylesheet gives `::marker` `white-space: pre`, so the outside
+    /// marker for a decimal list is "1. " with its trailing space. With
+    /// collapsing whitespace the space is dropped, the marker is measured one
+    /// space too narrow and ends flush against the item text ("1.Author").
+    #[test]
+    fn decimal_outside_marker_keeps_trailing_space() {
+        let doc = crate::blitz_adapter::parse_and_layout(
+            "<html><body><ol><li>Author</li></ol></body></html>",
+            600.0_f32.as_px(),
+            800.0_f32.as_px(),
+            &[],
+            true,
+        );
+        let layout = doc
+            .tree()
+            .iter()
+            .find_map(|(_, n)| {
+                let li = n.element_data()?.list_item_data.as_ref()?;
+                crate::blitz_adapter::list_position_outside_layout(&li.position)
+            })
+            .expect("an outside marker layout");
+        let line = layout.lines().next().expect("one marker line");
+        assert_eq!(
+            line.text_range(),
+            0..3,
+            "marker text must be \"1. \" including the space"
+        );
+        let glyphs: usize = line
+            .items()
+            .filter_map(|i| match i {
+                parley::PositionedLayoutItem::GlyphRun(g) => Some(g.glyphs().count()),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(glyphs, 3, "'1', '.', and the trailing space are all shaped");
     }
 }

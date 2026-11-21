@@ -1,5 +1,6 @@
 use super::*;
 use super::{positioned, pseudo};
+use crate::blitz_adapter::NodeLayoutExt;
 
 /// Catch-all dispatch for nodes not matched by list_item / table / replaced /
 /// inline_root. Inserts a `BlockEntry` into `out.block_styles` (and walks
@@ -13,13 +14,14 @@ pub(super) fn convert(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
-    let (width, height) = size_in_pt(node.final_layout.size);
+    let (width, height) = size_in_pt(node.final_layout_or_zero().size);
 
     let layout_children_guard = node.layout_children.borrow();
-    let children: &[usize] = layout_children_guard.as_deref().unwrap_or(&node.children);
+    let children: &[usize] =
+        &crate::blitz_adapter::uids(layout_children_guard.as_deref().unwrap_or(&node.children));
 
     if children.is_empty() {
         let style = extract_block_style(node, ctx.assets);
@@ -86,7 +88,7 @@ fn insert_block_entry(
 ) {
     let (opacity, visible) = extract_opacity_visible(node);
     out.block_styles.insert(
-        node.id,
+        crate::blitz_adapter::uid(node.id),
         crate::drawables::BlockEntry {
             style,
             opacity,

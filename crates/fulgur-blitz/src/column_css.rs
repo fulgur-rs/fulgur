@@ -46,7 +46,7 @@ use std::collections::BTreeMap;
 
 use cssparser::{
     AtRuleParser, BasicParseErrorKind, CowRcStr, DeclarationParser, ParseError, Parser,
-    ParserInput, QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
+    QualifiedRuleParser, RuleBodyItemParser, RuleBodyParser, StyleSheetParser, Token,
     color::{parse_hash_color, parse_named_color},
 };
 
@@ -118,6 +118,14 @@ pub enum PageName {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ColumnStyleProps {
     pub rule: Option<ColumnRuleSpec>,
+    /// `column-rule-color` text this sniffer cannot turn into RGBA on its
+    /// own: `var()`, `currentcolor`, `oklch()`, `color-mix()` and every
+    /// other form beyond hex, named, `rgb()` and `hsl()`. Also
+    /// `currentcolor` when a rule declares no colour (its initial value).
+    /// Resolved per element at convert time, against the element's
+    /// computed custom properties and `color`, with Stylo's own colour
+    /// parser. `None` means `rule.color` is final.
+    pub rule_color_source: Option<String>,
     pub fill: Option<ColumnFill>,
     /// `break-inside` as resolved by the fulgur-ftp sniffer. `None` means the
     /// author did not set the property — consumers should treat that as the
@@ -142,6 +150,7 @@ impl ColumnStyleProps {
     fn merge(&mut self, other: ColumnStyleProps) {
         if other.rule.is_some() {
             self.rule = other.rule;
+            self.rule_color_source = other.rule_color_source;
         }
         if other.fill.is_some() {
             self.fill = other.fill;
@@ -252,13 +261,15 @@ fn length_to_pt(value: f32, unit: &str) -> Option<f32> {
 /// `px`/`pt`/`em` exclusively in practice; folding more units here would
 /// just give inconsistent renders between the multicol rule and the rest
 /// of the border model.
-fn parse_length<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()>> {
+fn parse_length<'i>(input: &mut Parser<'i>) -> Result<f32, ParseError<()>> {
     let token = input.next()?.clone();
     match token {
         Token::Dimension { value, unit, .. } => length_to_pt(value, &unit)
-            .ok_or_else(|| input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+            .ok_or_else(|| ParseError::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)),
         Token::Number { value: 0.0, .. } => Ok(0.0),
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
@@ -275,9 +286,9 @@ fn parse_length<'i>(input: &mut Parser<'i, '_>) -> Result<f32, ParseError<'i, ()
 /// lives in a separate `cssparser-color` crate. Adding that dependency is
 /// out of scope for this targeted fix (hard-constrained to this file), so
 /// we implement the two functional forms directly on top of the tokenizer.
-fn parse_color<'i>(input: &mut Parser<'i, '_>) -> Result<[u8; 4], ParseError<'i, ()>> {
+fn parse_color<'i>(input: &mut Parser<'i>) -> Result<[u8; 4], ParseError<()>> {
     let token = input.next()?.clone();
-    let err = || input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid);
+    let err = || ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid);
     match token {
         Token::IDHash(ref s) | Token::Hash(ref s) => {
             let (r, g, b, a) = parse_hash_color(s.as_bytes()).map_err(|_| err())?;
@@ -306,7 +317,9 @@ fn parse_color<'i>(input: &mut Parser<'i, '_>) -> Result<[u8; 4], ParseError<'i,
                 "hsl" | "hsla" => input.parse_nested_block(parse_hsl_args),
                 _ => return Err(err()),
             };
-            nested.map_err(|_| input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+            nested.map_err(|_| {
+                ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)
+            })
         }
         _ => Err(err()),
     }
@@ -315,27 +328,31 @@ fn parse_color<'i>(input: &mut Parser<'i, '_>) -> Result<[u8; 4], ParseError<'i,
 /// Parse a single rgb/rgba channel as either an integer 0..255 number or a
 /// percentage. Clamps to `[0, 255]` on overflow, matching the CSS Color
 /// spec's "clamp on compute" rule.
-fn parse_rgb_channel<'i>(input: &mut Parser<'i, '_>) -> Result<u8, ParseError<'i, ()>> {
+fn parse_rgb_channel<'i>(input: &mut Parser<'i>) -> Result<u8, ParseError<()>> {
     let token = input.next()?.clone();
     match token {
         Token::Number { value, .. } => Ok(value.round().clamp(0.0, 255.0) as u8),
         Token::Percentage { unit_value, .. } => {
             Ok((unit_value * 255.0).round().clamp(0.0, 255.0) as u8)
         }
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
 /// Parse an alpha value as either a 0..1 number or a percentage. Scales to
 /// 0..255 and rounds. Clamps to `[0, 255]`.
-fn parse_alpha_value<'i>(input: &mut Parser<'i, '_>) -> Result<u8, ParseError<'i, ()>> {
+fn parse_alpha_value<'i>(input: &mut Parser<'i>) -> Result<u8, ParseError<()>> {
     let token = input.next()?.clone();
     match token {
         Token::Number { value, .. } => Ok((value * 255.0).round().clamp(0.0, 255.0) as u8),
         Token::Percentage { unit_value, .. } => {
             Ok((unit_value * 255.0).round().clamp(0.0, 255.0) as u8)
         }
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
@@ -343,7 +360,7 @@ fn parse_alpha_value<'i>(input: &mut Parser<'i, '_>) -> Result<u8, ParseError<'i
 /// only. Accepts `rgb(r, g, b)` or `rgb(r, g, b, a)` (alpha optional; the
 /// name distinction between `rgb` and `rgba` has not mattered since CSS
 /// Color 4).
-fn parse_rgb_args<'i>(input: &mut Parser<'i, '_>) -> Result<[u8; 4], ParseError<'i, ()>> {
+fn parse_rgb_args<'i>(input: &mut Parser<'i>) -> Result<[u8; 4], ParseError<()>> {
     let r = parse_rgb_channel(input)?;
     input.expect_comma()?;
     let g = parse_rgb_channel(input)?;
@@ -361,20 +378,32 @@ fn parse_rgb_args<'i>(input: &mut Parser<'i, '_>) -> Result<[u8; 4], ParseError<
 /// Parse the arguments of `hsl(...)` / `hsla(...)` — legacy comma syntax
 /// only. Hue is a number in degrees; saturation and lightness are required
 /// percentages. Converts to sRGB using the CSS Color 3 formula.
-fn parse_hsl_args<'i>(input: &mut Parser<'i, '_>) -> Result<[u8; 4], ParseError<'i, ()>> {
+fn parse_hsl_args<'i>(input: &mut Parser<'i>) -> Result<[u8; 4], ParseError<()>> {
     let hue_deg = match input.next()?.clone() {
         Token::Number { value, .. } => value,
-        _ => return Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => {
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::QualifiedRuleInvalid,
+            ));
+        }
     };
     input.expect_comma()?;
     let s = match input.next()?.clone() {
         Token::Percentage { unit_value, .. } => unit_value.clamp(0.0, 1.0),
-        _ => return Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => {
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::QualifiedRuleInvalid,
+            ));
+        }
     };
     input.expect_comma()?;
     let l = match input.next()?.clone() {
         Token::Percentage { unit_value, .. } => unit_value.clamp(0.0, 1.0),
-        _ => return Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => {
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::QualifiedRuleInvalid,
+            ));
+        }
     };
     let a = if input.try_parse(|i| i.expect_comma()).is_ok() {
         parse_alpha_value(input)?
@@ -447,16 +476,16 @@ fn parse_rule_style_ident(ident: &str) -> Option<ColumnRuleStyle> {
     }
 }
 
-fn parse_column_fill_value<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<ColumnFill, ParseError<'i, ()>> {
+fn parse_column_fill_value<'i>(input: &mut Parser<'i>) -> Result<ColumnFill, ParseError<()>> {
     let ident = input.expect_ident()?.clone();
     if ident.eq_ignore_ascii_case("auto") {
         Ok(ColumnFill::Auto)
     } else if ident.eq_ignore_ascii_case("balance") {
         Ok(ColumnFill::Balance)
     } else {
-        Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+        Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        ))
     }
 }
 
@@ -464,36 +493,36 @@ fn parse_column_fill_value<'i>(
 /// (`avoid`, `avoid-page`, `avoid-column`) as `BreakInside::Avoid`, and
 /// `auto` as `BreakInside::Auto`. Other idents (`avoid-region`,
 /// `left`, `right`, typos …) drop the declaration so siblings still apply.
-fn parse_break_inside_value<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<BreakInside, ParseError<'i, ()>> {
+fn parse_break_inside_value<'i>(input: &mut Parser<'i>) -> Result<BreakInside, ParseError<()>> {
     let ident = input.expect_ident()?.clone();
     match ident.as_ref().to_ascii_lowercase().as_str() {
         "avoid" | "avoid-page" | "avoid-column" => Ok(BreakInside::Avoid),
         "auto" => Ok(BreakInside::Auto),
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
-fn parse_break_after_value<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<BreakAfter, ParseError<'i, ()>> {
+fn parse_break_after_value<'i>(input: &mut Parser<'i>) -> Result<BreakAfter, ParseError<()>> {
     let ident = input.expect_ident()?.clone();
     match ident.as_ref().to_ascii_lowercase().as_str() {
         "always" | "page" | "left" | "right" | "recto" | "verso" => Ok(BreakAfter::Page),
         "auto" => Ok(BreakAfter::Auto),
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
-fn parse_break_before_value<'i>(
-    input: &mut Parser<'i, '_>,
-) -> Result<BreakBefore, ParseError<'i, ()>> {
+fn parse_break_before_value<'i>(input: &mut Parser<'i>) -> Result<BreakBefore, ParseError<()>> {
     let ident = input.expect_ident()?.clone();
     match ident.as_ref().to_ascii_lowercase().as_str() {
         "always" | "page" | "left" | "right" | "recto" | "verso" => Ok(BreakBefore::Page),
         "auto" => Ok(BreakBefore::Auto),
-        _ => Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid)),
+        _ => Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::QualifiedRuleInvalid,
+        )),
     }
 }
 
@@ -503,7 +532,7 @@ fn parse_break_before_value<'i>(
 /// Anything else (numbers, function calls, multiple tokens) drops the
 /// declaration silently per the project-wide "no panic on bad CSS"
 /// invariant.
-fn parse_page_value<'i>(input: &mut Parser<'i, '_>) -> Result<PageName, ParseError<'i, ()>> {
+fn parse_page_value<'i>(input: &mut Parser<'i>) -> Result<PageName, ParseError<()>> {
     let ident = input.expect_ident()?.clone();
     let s = ident.as_ref();
     if s.eq_ignore_ascii_case("auto") {
@@ -518,7 +547,9 @@ fn parse_page_value<'i>(input: &mut Parser<'i, '_>) -> Result<PageName, ParseErr
             lower.as_str(),
             "inherit" | "initial" | "unset" | "revert" | "revert-layer"
         ) {
-            Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid))
+            Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::QualifiedRuleInvalid,
+            ))
         } else {
             // Bound the retained name length: a CSS `<custom-ident>` is
             // unbounded and this string is cloned into the column style table
@@ -552,8 +583,7 @@ fn parse_page_value<'i>(input: &mut Parser<'i, '_>) -> Result<PageName, ParseErr
 /// their field. Last-declaration-wins within a block.
 pub(crate) fn parse_declaration_block(css: &str) -> ColumnStyleProps {
     let mut props = ColumnStyleProps::default();
-    let mut input = ParserInput::new(css);
-    let mut parser = Parser::new(&mut input);
+    let mut parser = Parser::new(css);
 
     let mut decl_parser = ColumnDeclParser { props: &mut props };
     // `RuleBodyParser` walks `decl; decl; decl;` and feeds each declaration
@@ -571,6 +601,20 @@ struct ColumnDeclParser<'a> {
     props: &'a mut ColumnStyleProps,
 }
 
+impl ColumnDeclParser<'_> {
+    /// The rule a longhand modifies: the one declared so far, or a new one
+    /// whose colour is `currentcolor` (the initial value).
+    fn default_rule(&mut self) -> ColumnRuleSpec {
+        match self.props.rule {
+            Some(spec) => spec,
+            None => {
+                self.props.rule_color_source = Some("currentcolor".to_string());
+                ColumnRuleSpec::default()
+            }
+        }
+    }
+}
+
 impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
     type Declaration = ();
     type Error = ();
@@ -578,38 +622,44 @@ impl<'i, 'a> DeclarationParser<'i> for ColumnDeclParser<'a> {
     fn parse_value<'t>(
         &mut self,
         name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
+        input: &mut Parser<'i>,
         _decl_start: &cssparser::ParserState,
-    ) -> Result<(), ParseError<'i, ()>> {
+    ) -> Result<(), ParseError<()>> {
         if name.eq_ignore_ascii_case("column-rule") {
-            if let Some(spec) = parse_column_rule_shorthand(input) {
+            if let Some((spec, color_source)) = parse_column_rule_shorthand(input) {
                 // A shorthand with `style: None` is equivalent to "don't
                 // draw" — we store it anyway so a later longhand can read
                 // the width/colour the author still wanted.
                 self.props.rule = Some(spec);
+                self.props.rule_color_source = color_source;
             }
         } else if name.eq_ignore_ascii_case("column-rule-width") {
             if let Ok(w) = input.parse_entirely(parse_length) {
-                let mut spec = self.props.rule.unwrap_or_default();
+                let mut spec = self.default_rule();
                 spec.width = w.as_pt();
                 self.props.rule = Some(spec);
             }
         } else if name.eq_ignore_ascii_case("column-rule-style") {
             let result = input.parse_entirely(|input| {
                 let ident = input.expect_ident()?.clone();
-                parse_rule_style_ident(&ident)
-                    .ok_or_else(|| input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                parse_rule_style_ident(&ident).ok_or_else(|| {
+                    ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)
+                })
             });
             if let Ok(style) = result {
-                let mut spec = self.props.rule.unwrap_or_default();
+                let mut spec = self.default_rule();
                 spec.style = style;
                 self.props.rule = Some(spec);
             }
         } else if name.eq_ignore_ascii_case("column-rule-color") {
-            if let Ok(color) = input.parse_entirely(parse_color) {
+            if let Ok(color) = input.try_parse(|input| input.parse_entirely(parse_color)) {
                 let mut spec = self.props.rule.unwrap_or_default();
                 spec.color = color;
                 self.props.rule = Some(spec);
+                self.props.rule_color_source = None;
+            } else if let Ok(source) = input.parse_entirely(parse_color_source) {
+                self.props.rule = Some(self.props.rule.unwrap_or_default());
+                self.props.rule_color_source = Some(source);
             }
         } else if name.eq_ignore_ascii_case("column-fill") {
             if let Ok(fill) = input.parse_entirely(parse_column_fill_value) {
@@ -676,10 +726,11 @@ impl<'i, 'a> RuleBodyItemParser<'i, (), ()> for ColumnDeclParser<'a> {
 /// — per CSS rules a malformed shorthand is "ignored entirely" and we
 /// mirror that strict behaviour. Missing components fall back to the
 /// defaults in [`ColumnRuleSpec::default`].
-fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleSpec> {
+fn parse_column_rule_shorthand(input: &mut Parser<'_>) -> Option<(ColumnRuleSpec, Option<String>)> {
     let mut width: Option<f32> = None;
     let mut style: Option<ColumnRuleStyle> = None;
     let mut color: Option<[u8; 4]> = None;
+    let mut color_source: Option<String> = None;
 
     // The shorthand accepts the three components in any order but at most
     // one of each. Loop up to three times and try each slot in turn.
@@ -701,8 +752,9 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
         if style.is_none() {
             let parsed = input.try_parse(|input| {
                 let ident = input.expect_ident()?.clone();
-                parse_rule_style_ident(&ident)
-                    .ok_or_else(|| input.new_error::<()>(BasicParseErrorKind::QualifiedRuleInvalid))
+                parse_rule_style_ident(&ident).ok_or_else(|| {
+                    ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid)
+                })
             });
             if let Ok(s) = parsed {
                 style = Some(s);
@@ -711,10 +763,14 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
         }
 
         // Try color.
-        if color.is_none() {
+        if color.is_none() && color_source.is_none() {
             let parsed = input.try_parse(parse_color);
             if let Ok(c) = parsed {
                 color = Some(c);
+                continue;
+            }
+            if let Ok(source) = input.try_parse(parse_color_source) {
+                color_source = Some(source);
                 continue;
             }
         }
@@ -735,10 +791,63 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
     if let Some(s) = style {
         spec.style = s;
     }
-    if let Some(c) = color {
-        spec.color = c;
+    match color {
+        Some(c) => spec.color = c,
+        // The initial value of `column-rule-color` is `currentcolor`.
+        None if color_source.is_none() => color_source = Some("currentcolor".to_string()),
+        None => {}
     }
-    Some(spec)
+    Some((spec, color_source))
+}
+
+/// The source text of one colour value that [`parse_color`] cannot
+/// resolve without the element: a function (`var()`, `oklch()`,
+/// `color-mix()`, ...) or a keyword (`currentcolor`). Resolved later by
+/// the convert pass.
+fn parse_color_source<'i>(input: &mut Parser<'i>) -> Result<String, ParseError<()>> {
+    let start = input.position();
+    let err = || ParseError::<()>::from_basic_kind(BasicParseErrorKind::QualifiedRuleInvalid);
+    match input.next()?.clone() {
+        Token::Function(_) => {
+            input.parse_nested_block(|nested| {
+                while nested.next().is_ok() {}
+                Ok::<(), ParseError<()>>(())
+            })?;
+        }
+        Token::Ident(ref name) if parse_rule_style_ident(name).is_none() => {}
+        _ => return Err(err()),
+    }
+    let source = input.slice_from(start).trim().to_string();
+    // A value with `var()` is valid at parse time and checked once the
+    // variables are known; anything else must already be a colour, or the
+    // declaration drops.
+    if !source.to_ascii_lowercase().contains("var(") && parse_stylo_color(&source).is_none() {
+        return Err(err());
+    }
+    Ok(source)
+}
+
+/// Parse `text` as one CSS colour with Stylo's parser: every syntax Stylo
+/// knows (`oklch()`, `color-mix()`, `currentcolor`, ...), but no `var()`.
+pub(crate) fn parse_stylo_color(text: &str) -> Option<::style::values::computed::Color> {
+    use ::style::stylesheets::{CssRuleType, Origin, UrlExtraData};
+
+    let url = UrlExtraData(::style::servo_arc::Arc::new(
+        blitz_traits::net::Url::parse("about:blank").ok()?,
+    ));
+    let context = ::style::parser::ParserContext::new(
+        Origin::Author,
+        &url,
+        Some(CssRuleType::Style),
+        ::style_traits::ParsingMode::DEFAULT,
+        ::style::context::QuirksMode::NoQuirks,
+        Default::default(),
+        None,
+        None,
+        Default::default(),
+    );
+    let mut parser = Parser::new(text);
+    ::style::values::specified::Color::parse_and_compute(&context, &mut parser, None).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -751,8 +860,7 @@ fn parse_column_rule_shorthand(input: &mut Parser<'_, '_>) -> Option<ColumnRuleS
 /// discipline the whole rule is dropped silently so authors do not get a
 /// half-applied result. The adjacent-sibling combinator (`+`) is supported.
 pub(crate) fn parse_selector_list(input: &str) -> Vec<ComplexSelector> {
-    let mut parser_input = ParserInput::new(input);
-    let mut parser = Parser::new(&mut parser_input);
+    let mut parser = Parser::new(input);
 
     let mut selectors: Vec<ComplexSelector> = Vec::new();
     let mut current = CompoundSelector::default();
@@ -762,11 +870,8 @@ pub(crate) fn parse_selector_list(input: &str) -> Vec<ComplexSelector> {
     // or EOF, otherwise we have a descendant combinator which is not supported.
     let mut just_saw_whitespace = false;
 
-    loop {
-        let tok = match parser.next_including_whitespace() {
-            Ok(t) => t.clone(),
-            Err(_) => break,
-        };
+    while let Ok(t) = parser.next_including_whitespace() {
+        let tok = t.clone();
 
         if matches!(tok, Token::WhiteSpace(_)) {
             just_saw_whitespace = !current.parts.is_empty();
@@ -861,7 +966,7 @@ fn matches_compound(sel: &CompoundSelector, node: &blitz_dom::Node) -> bool {
     }
     sel.parts.iter().all(|part| match part {
         SimpleSelector::Universal => true,
-        SimpleSelector::Type(tag) => elem.name.local.as_ref().eq_ignore_ascii_case(tag),
+        SimpleSelector::Type(tag) => (*elem.name.local).eq_ignore_ascii_case(tag),
         SimpleSelector::Class(want) => crate::blitz_adapter::get_attr(elem, "class")
             .is_some_and(|classes| classes.split_whitespace().any(|c| c == want)),
         SimpleSelector::Id(want) => {
@@ -940,8 +1045,7 @@ fn previous_element_sibling<'a>(
 /// to save memory.
 pub(crate) fn parse_stylesheet(source: &str) -> Vec<StyleRule> {
     let mut rules = Vec::new();
-    let mut input = ParserInput::new(source);
-    let mut parser = Parser::new(&mut input);
+    let mut parser = Parser::new(source);
 
     let mut sheet = SheetParser { rules: &mut rules };
     let iter = StyleSheetParser::new(&mut parser, &mut sheet);
@@ -962,13 +1066,15 @@ impl<'i, 'a> AtRuleParser<'i> for SheetParser<'a> {
 
     fn parse_prelude<'t>(
         &mut self,
-        name: CowRcStr<'i>,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        _name: CowRcStr<'i>,
+        _input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<()>> {
         // Terminate every at-rule at the prelude — `StyleSheetParser` will
         // then skip the associated block. GCPM's parser takes `@page` but
         // we are strictly after qualified rules.
-        Err(input.new_error(BasicParseErrorKind::AtRuleInvalid(name)))
+        Err(ParseError::from_basic_kind(
+            BasicParseErrorKind::AtRuleInvalid,
+        ))
     }
 }
 
@@ -979,8 +1085,8 @@ impl<'i, 'a> QualifiedRuleParser<'i> for SheetParser<'a> {
 
     fn parse_prelude<'t>(
         &mut self,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::Prelude, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::Prelude, ParseError<()>> {
         // Slice out the raw selector text and hand it to the standalone
         // selector parser. This keeps cssparser's error recovery simple:
         // on an unsupported selector we return an empty list, which the
@@ -990,7 +1096,9 @@ impl<'i, 'a> QualifiedRuleParser<'i> for SheetParser<'a> {
         let raw = input.slice_from(start);
         let selectors = parse_selector_list(raw);
         if selectors.is_empty() {
-            return Err(input.new_error(BasicParseErrorKind::QualifiedRuleInvalid));
+            return Err(ParseError::from_basic_kind(
+                BasicParseErrorKind::QualifiedRuleInvalid,
+            ));
         }
         Ok(selectors)
     }
@@ -999,8 +1107,8 @@ impl<'i, 'a> QualifiedRuleParser<'i> for SheetParser<'a> {
         &mut self,
         selectors: Self::Prelude,
         _start: &cssparser::ParserState,
-        input: &mut Parser<'i, 't>,
-    ) -> Result<Self::QualifiedRule, ParseError<'i, ()>> {
+        input: &mut Parser<'i>,
+    ) -> Result<Self::QualifiedRule, ParseError<()>> {
         let mut props = ColumnStyleProps::default();
         let mut decl_parser = ColumnDeclParser { props: &mut props };
         let iter = RuleBodyParser::new(input, &mut decl_parser);
@@ -1029,7 +1137,14 @@ pub(crate) fn build_column_style_table(
     let mut table = ColumnStyleTable::new();
     let root = doc.root_element();
     // The root element has no previous sibling.
-    walk(doc, root.id, None, stylesheet_rules, &mut table, 0);
+    walk(
+        doc,
+        crate::blitz_adapter::uid(root.id),
+        None,
+        stylesheet_rules,
+        &mut table,
+        0,
+    );
     table
 }
 
@@ -1053,13 +1168,14 @@ fn walk(
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
 
     let is_element = node.element_data().is_some();
     if is_element {
-        let previous_element_sibling = previous_element_sibling_id.and_then(|id| doc.get_node(id));
+        let previous_element_sibling =
+            previous_element_sibling_id.and_then(|id| doc.get_node(crate::blitz_adapter::bid(id)));
         let mut props = ColumnStyleProps::default();
         for rule in rules {
             if rule
@@ -1089,13 +1205,13 @@ fn walk(
     for &child_id in &node.children {
         if walk(
             doc,
-            child_id,
+            crate::blitz_adapter::uid(child_id),
             prev_child_element_id,
             rules,
             table,
             depth + 1,
         ) {
-            prev_child_element_id = Some(child_id);
+            prev_child_element_id = Some(crate::blitz_adapter::uid(child_id));
         }
     }
 
@@ -1111,6 +1227,37 @@ mod tests {
     use super::*;
 
     // -------- declaration parsing --------
+
+    #[test]
+    fn colours_the_sniffer_cannot_resolve_are_kept_as_source() {
+        let props = parse_declaration_block(
+            "column-rule: 1px solid color-mix(in oklch, var(--ink) 12%, white);",
+        );
+        assert_eq!(props.rule.expect("rule").style, ColumnRuleStyle::Solid);
+        assert_eq!(
+            props.rule_color_source.as_deref(),
+            Some("color-mix(in oklch, var(--ink) 12%, white)")
+        );
+
+        let props = parse_declaration_block("column-rule-color: var(--line);");
+        assert_eq!(props.rule_color_source.as_deref(), Some("var(--line)"));
+
+        // A resolvable colour clears an earlier source.
+        let props =
+            parse_declaration_block("column-rule-color: var(--line); column-rule-color: red;");
+        assert_eq!(props.rule_color_source, None);
+        assert_eq!(props.rule.expect("rule").color, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn a_rule_without_a_colour_uses_currentcolor() {
+        let props = parse_declaration_block("column-rule: 2px solid;");
+        assert_eq!(props.rule_color_source.as_deref(), Some("currentcolor"));
+        let props = parse_declaration_block("column-rule-style: dotted;");
+        assert_eq!(props.rule_color_source.as_deref(), Some("currentcolor"));
+        let props = parse_declaration_block("column-rule: 2px solid blue;");
+        assert_eq!(props.rule_color_source, None);
+    }
 
     #[test]
     fn parses_column_rule_longhand_triplet() {
@@ -1278,11 +1425,12 @@ mod tests {
     }
 
     #[test]
-    fn currentcolor_drops_color_longhand() {
+    fn currentcolor_is_kept_for_the_convert_pass() {
+        // `currentcolor` needs the element's `color`, so it is resolved
+        // at convert time.
         let props = parse_declaration_block("column-rule-color: currentcolor;");
-        // cssparser doesn't know `currentcolor` as a named colour; we
-        // return `None` which drops this declaration silently.
-        assert!(props.rule.is_none());
+        assert!(props.rule.is_some());
+        assert_eq!(props.rule_color_source.as_deref(), Some("currentcolor"));
     }
 
     #[test]
@@ -1401,18 +1549,18 @@ mod tests {
             if depth > 64 {
                 return None;
             }
-            let node = doc.get_node(id)?;
+            let node = doc.get_node(crate::blitz_adapter::bid(id))?;
             if pred(node) {
                 return Some(id);
             }
             for &c in &node.children {
-                if let Some(r) = rec(doc, c, depth + 1, pred) {
+                if let Some(r) = rec(doc, crate::blitz_adapter::uid(c), depth + 1, pred) {
                     return Some(r);
                 }
             }
             None
         }
-        rec(doc, root.id, 0, pred)
+        rec(doc, crate::blitz_adapter::uid(root.id), 0, pred)
     }
 
     /// Collect every node id (in document order) whose node satisfies `pred`.
@@ -1426,18 +1574,23 @@ mod tests {
             pred: F,
             out: &mut Vec<usize>,
         ) {
-            let Some(node) = doc.get_node(id) else {
+            let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
                 return;
             };
             if pred(node) {
                 out.push(id);
             }
             for &c in &node.children {
-                rec(doc, c, pred, out);
+                rec(doc, crate::blitz_adapter::uid(c), pred, out);
             }
         }
         let mut out = Vec::new();
-        rec(doc, doc.root_element().id, pred, &mut out);
+        rec(
+            doc,
+            crate::blitz_adapter::uid(doc.root_element().id),
+            pred,
+            &mut out,
+        );
         out
     }
 
@@ -1450,11 +1603,10 @@ mod tests {
               </body></html>"#,
         );
         let div_id = find_node_with(&doc, |n| {
-            n.element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "div")
+            n.element_data().is_some_and(|e| (&e.name.local) == "div")
         })
         .expect("div");
-        let div = doc.get_node(div_id).unwrap();
+        let div = doc.get_node(crate::blitz_adapter::bid(div_id)).unwrap();
 
         let t = CompoundSelector {
             parts: vec![SimpleSelector::Type("div".into())],
@@ -1487,11 +1639,10 @@ mod tests {
     fn universal_selector_matches_every_element() {
         let doc = build_doc("<html><body><span></span></body></html>");
         let span_id = find_node_with(&doc, |n| {
-            n.element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "span")
+            n.element_data().is_some_and(|e| (&e.name.local) == "span")
         })
         .expect("span");
-        let span = doc.get_node(span_id).unwrap();
+        let span = doc.get_node(crate::blitz_adapter::bid(span_id)).unwrap();
         let u = CompoundSelector {
             parts: vec![SimpleSelector::Universal],
         };
@@ -1647,8 +1798,7 @@ mod tests {
         let table = build_column_style_table(&doc, &rules);
 
         let divs = collect_in_document_order(&doc, |n| {
-            n.element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "div")
+            n.element_data().is_some_and(|e| (&e.name.local) == "div")
         });
         assert_eq!(divs.len(), N, "all {N} divs must be present in the DOM");
 
@@ -1802,8 +1952,7 @@ mod tests {
         let table = build_column_style_table(&doc, &rules);
 
         let div_id = find_node_with(&doc, |n| {
-            n.element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "div")
+            n.element_data().is_some_and(|e| (&e.name.local) == "div")
         })
         .expect("div");
         let a_id = find_node_with(&doc, |n| {
@@ -1907,8 +2056,8 @@ mod tests {
             prev_sibling: Some(div_compound),
         };
 
-        let first = doc.get_node(first_id).unwrap();
-        let second = doc.get_node(second_id).unwrap();
+        let first = doc.get_node(crate::blitz_adapter::bid(first_id)).unwrap();
+        let second = doc.get_node(crate::blitz_adapter::bid(second_id)).unwrap();
 
         // The second div has a div immediately before it → should match.
         assert!(matches_complex(&sel, second, &doc));
@@ -1939,7 +2088,7 @@ mod tests {
             prev_sibling: None,
         };
 
-        let only = doc.get_node(only_id).unwrap();
+        let only = doc.get_node(crate::blitz_adapter::bid(only_id)).unwrap();
         assert!(matches_complex(&sel, only, &doc));
     }
 
@@ -1965,7 +2114,7 @@ mod tests {
             prev_sibling: Some(div_compound),
         };
 
-        let b = doc.get_node(b_id).unwrap();
+        let b = doc.get_node(crate::blitz_adapter::bid(b_id)).unwrap();
         // Text node between #a and #b must be skipped; #a is still the
         // adjacent element sibling of #b.
         assert!(matches_complex(&sel, b, &doc));
@@ -2336,14 +2485,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_rgb_no_comma_between_channels_drops_declaration() {
-        // Space-separated `rgb(r g b)` (CSS Color 4 syntax) is not supported
-        // by this parser; missing comma triggers `input.expect_comma()? Err`.
+    fn parse_rgb_space_separated_channels_falls_back_to_stylo() {
+        // Space-separated `rgb(r g b)` (CSS Color 4) is beyond the built-in
+        // parser; Stylo validates it and the convert pass resolves it.
         let props = parse_declaration_block("column-rule-color: rgb(255 0 0);");
-        assert!(
-            props.rule.is_none(),
-            "space-separated rgb must drop the declaration"
-        );
+        assert_eq!(props.rule_color_source.as_deref(), Some("rgb(255 0 0)"));
     }
 
     #[test]

@@ -332,6 +332,29 @@ pub struct ParagraphSlicesEntry {
     pub slices: Vec<ParagraphSlice>,
 }
 
+/// A box broken across the columns of a multicol container
+/// (`box-decoration-break: slice`): the box is painted `height_pt` tall in
+/// every slice, shifted up by the slice's `offset_pt` and clipped to it.
+#[derive(Debug, Clone, Default)]
+pub struct BlockSlicesEntry {
+    /// Multicol container whose position anchors the slices.
+    pub container_node_id: NodeId,
+    /// Height of the whole box: the sum of the slices' heights.
+    pub height_pt: crate::units::Pt,
+    pub slices: Vec<BlockSlice>,
+}
+
+/// One column's part of a [`BlockSlicesEntry`].
+#[derive(Debug, Clone, Copy)]
+pub struct BlockSlice {
+    /// Top-left in PDF pt, relative to the multicol container's border-box
+    /// top-left (as [`ParagraphSlice::origin_pt`]).
+    pub origin_pt: (crate::units::Pt, crate::units::Pt),
+    pub size_pt: (crate::units::Pt, crate::units::Pt),
+    /// Height of the box in earlier slices.
+    pub offset_pt: crate::units::Pt,
+}
+
 /// One column-bound slice of a paragraph rendered inside a multicol.
 #[derive(Clone)]
 pub struct ParagraphSlice {
@@ -440,6 +463,11 @@ pub struct Drawables {
     /// one entry per non-empty column slice at the slice origin instead of
     /// the default single-rectangle path that uses `paragraphs[node_id]`.
     pub paragraph_slices: BTreeMap<NodeId, ParagraphSlicesEntry>,
+    /// Boxes broken across the columns of a multicol container, from
+    /// `multicol_layout::ColumnGroupGeometry::box_splits`. When a `NodeId`
+    /// has an entry, its background, border and shadow are painted once
+    /// per slice instead of once over its layout box.
+    pub block_slices: BTreeMap<NodeId, BlockSlicesEntry>,
     pub images: TrackedMap<ImageEntry>,
     pub svgs: TrackedMap<SvgEntry>,
     pub tables: TrackedMap<TableEntry>,
@@ -490,6 +518,7 @@ impl Default for Drawables {
             block_styles: TrackedMap::default(),
             paragraphs: TrackedMap::default(),
             paragraph_slices: BTreeMap::new(),
+            block_slices: BTreeMap::new(),
             images: TrackedMap::default(),
             svgs: TrackedMap::default(),
             tables: TrackedMap::default(),
@@ -587,6 +616,7 @@ impl Drawables {
         self.block_styles.is_empty()
             && self.paragraphs.is_empty()
             && self.paragraph_slices.is_empty()
+            && self.block_slices.is_empty()
             && self.images.is_empty()
             && self.svgs.is_empty()
             && self.tables.is_empty()

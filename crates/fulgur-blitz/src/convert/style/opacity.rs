@@ -4,6 +4,7 @@
 //! pseudo, not from extract_block_style.
 
 use crate::blitz_adapter::Node;
+use blitz_dom::CopyStyleGetters;
 
 /// Extract CSS opacity and visibility from computed styles.
 /// Returns `(opacity, visible)` with defaults `(1.0, true)`.
