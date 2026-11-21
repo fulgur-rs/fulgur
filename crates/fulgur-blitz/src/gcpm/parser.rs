@@ -4492,4 +4492,62 @@ mod tests {
         // immediately (the coverage target), and no PageSettingsRule is stored.
         assert_no_page_settings("@page { size: ; }");
     }
+
+    // ── ImportHrefScanner::parse_prelude: bare ident after @import ───────────
+
+    #[test]
+    fn extract_top_level_import_hrefs_ignores_import_bare_ident() {
+        // `@import stylesheet;` — the token after @import is a bare ident, not
+        // a quoted string, an unquoted url, or a url() function.  The match arm
+        // `_ => return Err(...)` (line 1463) fires; the import must be silently
+        // dropped, not panic, and the result is an empty list.
+        assert!(extract_top_level_import_hrefs("@import stylesheet;").is_empty());
+    }
+
+    #[test]
+    fn extract_top_level_import_hrefs_bare_ident_does_not_terminate_valid_zone() {
+        // A malformed @import (bare ident) is not a "non-import" at-rule —
+        // `self.seen_non_import` is never set — so it must NOT terminate the
+        // valid @import zone.  A well-formed @import that follows it is still
+        // collected.
+        let css = r#"@import stylesheet; @import "valid.css";"#;
+        assert_eq!(
+            extract_top_level_import_hrefs(css),
+            vec!["valid.css".to_string()],
+        );
+    }
+
+    // ── ImportHrefScanner::parse_prelude: url() happy path ───────────────────
+
+    #[test]
+    fn extract_top_level_import_hrefs_quoted_url_function() {
+        // `@import url("sheet.css")` — the url() function form with a quoted
+        // string inside hits the Token::Function("url") arm and the nested
+        // `expect_string()` call succeeds, returning the href.
+        assert_eq!(
+            extract_top_level_import_hrefs(r#"@import url("sheet.css");"#),
+            vec!["sheet.css".to_string()],
+        );
+    }
+
+    // ── parse_string_set_value: parse error breaks loop (line 896) ───────────
+
+    #[test]
+    fn test_string_set_malformed_function_stops_parsing() {
+        // `string-set: title content(text) bad(;)` — the `bad(` function's
+        // nested block fails to parse (the inner `;` is not a valid ident),
+        // causing `parse_nested_block` to return Err, which propagates through
+        // the `?` and makes `try_parse` return Err.  The `if result.is_err()`
+        // break at line 896 fires; the loop stops immediately.  Values already
+        // collected before the bad token ("content(text)" → ContentText) are
+        // kept, so the string-set mapping is recorded with just ContentText.
+        let css = "h1 { string-set: title content(text) bad(;) \"extra\"; }";
+        let ctx = parse_gcpm(css);
+        assert_eq!(ctx.string_set_mappings.len(), 1);
+        assert_eq!(
+            ctx.string_set_mappings[0].values,
+            vec![StringSetValue::ContentText],
+            "values collected before the malformed function must be preserved"
+        );
+    }
 }
