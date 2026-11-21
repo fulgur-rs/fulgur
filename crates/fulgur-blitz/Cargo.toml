@@ -30,7 +30,9 @@ flate2 = "1.1.9"
 blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015" }
 blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015", features = ["floats"] }
 blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015" }
-taffy = { git = "https://github.com/DioxusLabs/taffy", rev = "a3997d55bacd1fb6cd12fe31db0be15b20f91528" }
+# TODO(blitz-master): back to DioxusLabs/taffy once #1417 lands; must be the
+# Taffy the local Blitz uses.
+taffy = { git = "https://github.com/bahadirdogru/taffy", rev = "210a6afeae0f02424963dcbcbfce9132d445031d" }
 parley = "0.13"
 skrifa = "0.47"
 stylo = "0.24.0"
