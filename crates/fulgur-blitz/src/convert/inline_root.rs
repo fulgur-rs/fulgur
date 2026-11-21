@@ -637,6 +637,29 @@ pub(super) fn extract_paragraph(
         return None;
     }
 
+    // `align-content` (a table cell's `vertical-align: middle` or `bottom`)
+    // moves the lines down inside the content box; Blitz records the shift as
+    // `block_offset` without moving Parley's lines. Put it above the first
+    // line: line tops follow from the line heights, while baselines and
+    // inline images are offsets from the paragraph's top.
+    let block_offset = text_layout.block_offset.as_px().in_pt();
+    if block_offset > crate::units::Pt::ZERO {
+        for (index, line) in shaped_lines.iter_mut().enumerate() {
+            line.baseline += block_offset;
+            if index == 0 {
+                line.height += block_offset;
+            }
+            for item in &mut line.items {
+                match item {
+                    LineItem::Image(image) => image.computed_y += block_offset,
+                    // Relative to the line's top.
+                    LineItem::InlineBox(ibox) if index == 0 => ibox.computed_y += block_offset,
+                    _ => {}
+                }
+            }
+        }
+    }
+
     Some(ParagraphRender::new(shaped_lines).with_id(extract_block_id(node)))
 }
 

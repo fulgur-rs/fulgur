@@ -7319,3 +7319,37 @@ fn test_render_non_srgb_color_spaces_smoke() {
         .expect("render non-sRGB colour spaces");
     assert!(!pdf.is_empty());
 }
+
+/// A table cell's `vertical-align: middle` centres its lines in the row. Blitz
+/// records the shift as the text layout's `block_offset` without moving
+/// Parley's lines, so the paragraph has to carry it into the PDF.
+#[test]
+fn middle_aligned_cell_text_is_centred_in_the_row() {
+    use fulgur::inspect::inspect;
+    let html = r#"<!doctype html><html><body style="margin:0">
+      <table style="border-spacing:0"><tr>
+        <td style="padding:0"><div style="width:10px;height:200px"></div></td>
+        <td style="padding:0;vertical-align:top;font-size:12px">top</td>
+        <td style="padding:0;vertical-align:middle;font-size:12px">mid</td>
+        <td style="padding:0;vertical-align:bottom;font-size:12px">bot</td>
+      </tr></table>
+    </body></html>"#;
+    let pdf = noto_engine().render(html).expect("render must succeed");
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("valign.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+    let inspected = inspect(&path).expect("inspect pdf");
+    // `inspect` may give glyph ids rather than text: the three cells' words
+    // are told apart by their order from left to right.
+    let mut items: Vec<_> = inspected.text_items.iter().collect();
+    items.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let [top, mid, bot] = items[..] else {
+        panic!("expected three text items: {items:?}");
+    };
+    // The row is 200px (150pt) tall and a line about 16px (12pt).
+    let (top, mid, bot) = (top.y, mid.y, bot.y);
+    let half = (mid - top).abs();
+    let full = (bot - top).abs();
+    assert!((65.0..75.0).contains(&half), "middle: {top} {mid}");
+    assert!((130.0..145.0).contains(&full), "bottom: {top} {bot}");
+}
