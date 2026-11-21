@@ -154,6 +154,7 @@ pub fn render_v2(
         string_set_by_node,
         page_count,
         implicit_href_by_page,
+        drawables.root_dir_rtl,
     );
 
     // Page-independent skip sets. These reference only `drawables.*`
@@ -3762,6 +3763,10 @@ pub(crate) struct MarginBoxRenderer<'a> {
     /// `target-*(attr(href), ...)` evaluated inside `@page` margin
     /// boxes. Built once per render pass by `engine::Engine::layout_to_drawables`.
     pub implicit_href_by_page: &'a BTreeMap<usize, String>,
+    /// The opening `<html>` tag of each margin box's document. Margin boxes
+    /// take their direction from the root element, as the page context
+    /// does, so a right-to-left document gets right-to-left boxes.
+    pub html_open: &'static str,
 }
 
 impl<'a> MarginBoxRenderer<'a> {
@@ -3782,6 +3787,7 @@ impl<'a> MarginBoxRenderer<'a> {
         string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
         total_pages: usize,
         implicit_href_by_page: &'a BTreeMap<usize, String>,
+        root_dir_rtl: bool,
     ) -> Self {
         let string_set_states = if gcpm.string_set_mappings.is_empty() {
             vec![BTreeMap::new(); total_pages]
@@ -3812,6 +3818,11 @@ impl<'a> MarginBoxRenderer<'a> {
             height_cache: HashMap::new(),
             render_cache: HashMap::new(),
             implicit_href_by_page,
+            html_open: if root_dir_rtl {
+                "<html dir=\"rtl\">"
+            } else {
+                "<html>"
+            },
         }
     }
 
@@ -3949,8 +3960,8 @@ impl<'a> MarginBoxRenderer<'a> {
             );
             self.measure_cache.entry(measure_key).or_insert_with(|| {
                 let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
+                    self.html_open, self.margin_css, html
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
@@ -3984,8 +3995,8 @@ impl<'a> MarginBoxRenderer<'a> {
             );
             self.height_cache.entry(hc_key).or_insert_with(|| {
                 let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
+                    self.html_open, self.margin_css, html
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
@@ -4056,8 +4067,8 @@ impl<'a> MarginBoxRenderer<'a> {
             );
             if !self.render_cache.contains_key(&cache_key) {
                 let render_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
+                    self.html_open, self.margin_css, html
                 );
                 let mut render_doc = crate::blitz_adapter::parse_and_layout(
                     &render_html,
@@ -6042,6 +6053,30 @@ mod tests {
     }
 
     #[test]
+    fn margin_boxes_of_a_right_to_left_document_are_right_to_left() {
+        let gcpm = crate::gcpm::GcpmContext::default();
+        let store = RunningElementStore::default();
+        let geom = empty_geometry();
+        let implicit: BTreeMap<usize, String> = BTreeMap::new();
+        let new = |rtl| {
+            MarginBoxRenderer::new(
+                &gcpm,
+                &store,
+                &[],
+                false,
+                &geom,
+                &HashMap::new(),
+                1,
+                &implicit,
+                rtl,
+            )
+            .html_open
+        };
+        assert_eq!(new(true), "<html dir=\"rtl\">");
+        assert_eq!(new(false), "<html>");
+    }
+
+    #[test]
     fn margin_box_renderer_new_with_string_set_mappings_takes_else_branch() {
         // Non-empty string_set_mappings forces the else branch at
         // `collect_string_set_states(pagination_geometry, &by_node_btree)`.
@@ -6065,6 +6100,7 @@ mod tests {
             &HashMap::new(),
             1,
             &implicit,
+            false,
         );
     }
 
@@ -6091,6 +6127,7 @@ mod tests {
             &HashMap::new(),
             1,
             &implicit,
+            false,
         );
     }
 
