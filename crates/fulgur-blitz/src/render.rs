@@ -3915,15 +3915,15 @@ impl<'a> MarginBoxRenderer<'a> {
                 implicit_href,
             );
             if !content_html.is_empty() {
-                let html = if rule.declarations.is_empty() {
+                // Each box starts from its default `text-align` (css-page-3
+                // §5.3: right-hand boxes align right, centre boxes centre);
+                // the rule's own declarations come after it and win.
+                let html = format!(
+                    "<div style=\"text-align:{};{}\">{}</div>",
+                    pos.default_text_align(),
+                    escape_attr(&rule.declarations),
                     content_html
-                } else {
-                    format!(
-                        "<div style=\"{}\">{}</div>",
-                        escape_attr(&rule.declarations),
-                        content_html
-                    )
-                };
+                );
                 resolved_htmls.insert(pos, html);
             }
         }
