@@ -674,6 +674,30 @@ mod tests {
     }
 
     #[test]
+    fn test_default_margin_yields_to_page_rules() {
+        // `default_margin` fills the sides `@page` leaves unset; the sides it
+        // sets win, unlike `margin`, which overrides them.
+        let rules = vec![PageSettingsRule {
+            page_selector: None,
+            size: None,
+            margin: PartialMargin {
+                top: Some(50.0),
+                right: None,
+                bottom: None,
+                left: Some(40.0),
+            },
+        }];
+        let config = Config::builder()
+            .default_margin(Margin::uniform(28.0))
+            .build();
+        let (_, m, _) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert_eq!((m.top, m.right, m.bottom, m.left), (50.0, 28.0, 28.0, 40.0));
+        let config = Config::builder().margin(Margin::uniform(28.0)).build();
+        let (_, m, _) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert_eq!((m.top, m.right, m.bottom, m.left), (28.0, 28.0, 28.0, 28.0));
+    }
+
+    #[test]
     fn test_left_right_selectors_rtl() {
         // In RTL documents the first page is :left (first_page_is_left = true).
         // Odd pages → :left, even pages → :right.

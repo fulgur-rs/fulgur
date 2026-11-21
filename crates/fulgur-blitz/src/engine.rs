@@ -1436,6 +1436,14 @@ impl EngineBuilder {
         self
     }
 
+    /// The page margins used where the document's `@page` rules do not set
+    /// them; CSS `@page` margins still win, as in browsers. See
+    /// [`margin`](Self::margin) for margins that override `@page`.
+    pub fn default_margin(mut self, margin: Margin) -> Self {
+        self.config_builder = self.config_builder.default_margin(margin);
+        self
+    }
+
     pub fn landscape(mut self, landscape: bool) -> Self {
         self.config_builder = self.config_builder.landscape(landscape);
         self

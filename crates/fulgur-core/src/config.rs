@@ -369,6 +369,15 @@ impl ConfigBuilder {
         self
     }
 
+    /// The page margins used where the document's `@page` rules do not set
+    /// them. Unlike [`margin`](Self::margin), CSS `@page` margins still win,
+    /// as in browsers.
+    pub fn default_margin(mut self, margin: Margin) -> Self {
+        self.config.margin = margin;
+        self.config.overrides.margin = false;
+        self
+    }
+
     pub fn landscape(mut self, landscape: bool) -> Self {
         self.config.landscape = landscape;
         self.config.overrides.landscape = true;
@@ -593,6 +602,15 @@ mod tests {
         assert!(!config.overrides.page_size);
         assert!(!config.overrides.margin);
         assert!(!config.overrides.landscape);
+    }
+
+    #[test]
+    fn test_default_margin_is_not_an_override() {
+        let config = Config::builder()
+            .default_margin(Margin::uniform_mm(10.0))
+            .build();
+        assert!(!config.overrides.margin);
+        assert_eq!(config.margin, Margin::uniform_mm(10.0));
     }
 
     #[test]
