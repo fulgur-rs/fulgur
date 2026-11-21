@@ -3797,9 +3797,23 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
     let Some(text_layout) = elem.inline_layout_data.as_deref() else {
         return Vec::new();
     };
-    text_layout
-        .layout
+    let layout = &text_layout.layout;
+    let mut count = layout.len();
+    // A forced break (`<br>`, a preserved newline) at the end of the content
+    // ends the last line box without starting another. Parley still emits an
+    // empty line after it, which Blitz leaves out of the inline root's height;
+    // leave it out here too, or the paragraph is one line taller than its box.
+    if count >= 2
+        && let (Some(prev), Some(last)) = (layout.get(count - 2), layout.get(count - 1))
+        && prev.break_reason() == parley::BreakReason::Explicit
+        && last.text_range().is_empty()
+        && last.items().next().is_none()
+    {
+        count -= 1;
+    }
+    layout
         .lines()
+        .take(count)
         .map(|line| {
             let m = line.metrics();
             (m.block_min_coord, m.block_max_coord)
@@ -11040,5 +11054,28 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(pages.locate(500.0), (4, 0.0, 900.0));
         // Past the last slice stays on the last page.
         assert_eq!(pages.locate(2000.0).0, 4);
+    }
+
+    /// A `<br>` that ends a paragraph ends its last line; the empty line
+    /// Parley adds after it is not part of the paragraph (Blitz leaves it out
+    /// of the height too), or the content below moves down one line.
+    #[test]
+    fn trailing_forced_break_adds_no_line() {
+        let count = |content: &str| {
+            let doc = parse(
+                &format!(
+                    r#"<!doctype html><html><body style="margin:0"><p id="p" style="margin:0">{content}</p></body></html>"#
+                ),
+                400.0,
+            );
+            let p = find_by_id(&doc, "p").expect("p#p");
+            super::collect_inline_line_metrics(
+                doc.get_node(crate::blitz_adapter::bid(p)).expect("p node"),
+            )
+            .len()
+        };
+        assert_eq!(count("x<br>"), 1);
+        assert_eq!(count("x<br><br>"), 2);
+        assert_eq!(count("x<br>y"), 2);
     }
 }
