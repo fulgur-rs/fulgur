@@ -5660,7 +5660,9 @@ fn full_width_table_max_cell_x(with_caption: bool) -> f32 {
 }
 
 /// Max cell-text x for a two-column table of the given CSS `width`,
-/// optionally with a caption.
+/// optionally with a caption. The cells' text is 12px (9pt); the caption's
+/// (16px, 12pt) is left out: it is centred over the table, so it can lie
+/// further right than the second column's text.
 fn table_max_cell_x(width: &str, with_caption: bool) -> f32 {
     use fulgur::inspect::inspect;
     let caption = if with_caption {
@@ -5685,7 +5687,7 @@ fn table_max_cell_x(width: &str, with_caption: bool) -> f32 {
     inspected
         .text_items
         .iter()
-        .filter(|t| t.font_size <= 15.0)
+        .filter(|t| t.font_size < 10.0)
         .map(|t| t.x)
         .fold(f32::NEG_INFINITY, f32::max)
 }
