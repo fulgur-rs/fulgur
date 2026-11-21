@@ -57,9 +57,9 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
 /// (CSS 2.1 §17.6.2).
 ///
 /// Blitz lays a `border-collapse: collapse` table out as a grid with uniform
-/// gutters between the cells and around them, as wide as the first cell's
-/// border, and gives the cells no border of their own; its renderer then
-/// paints every gutter in the first cell's border. Here each cell draws its
+/// gutters between the cells, as wide as the widest cell border, and a table
+/// border around them at least that wide, and gives the cells no border of
+/// their own. Here each cell draws its
 /// own computed border and the table its own, centred on the gutter (the
 /// edge gutter for the table), so cells with different borders, or none,
 /// keep them. At the table's edge a table border at least as wide as the
@@ -98,7 +98,17 @@ pub(super) fn apply_collapsed(style: &mut BlockStyle, node: &Node, ctx: &StyleCo
     };
     let gap_x = context.style.gap.width.into_raw().value();
     let gap_y = context.style.gap.height.into_raw().value();
-    let gutters = [gap_y, gap_x, gap_y, gap_x];
+    // The gutters between cells are the grid's gaps; the gutters around them
+    // are the table's layout border, which Blitz makes at least as wide as
+    // the gaps (wider when the table's own border is).
+    let border = &context.style.border;
+    let edges = [
+        border.top.into_raw().value().max(gap_y),
+        border.right.into_raw().value().max(gap_x),
+        border.bottom.into_raw().value().max(gap_y),
+        border.left.into_raw().value().max(gap_x),
+    ];
+    let mut gutters = edges;
 
     let own = side_borders(ctx.styles, ctx.current_color);
     // A cell side on the table's edge gives way to a table border at least as
@@ -109,11 +119,17 @@ pub(super) fn apply_collapsed(style: &mut BlockStyle, node: &Node, ctx: &StyleCo
         let cell = node.final_layout_or_zero();
         let outer = table.final_layout_or_zero().size;
         let on_edge = [
-            cell.location.y <= gap_y + EPS,
-            cell.location.x + cell.size.width >= outer.width - gap_x - EPS,
-            cell.location.y + cell.size.height >= outer.height - gap_y - EPS,
-            cell.location.x <= gap_x + EPS,
+            cell.location.y <= edges[0] + EPS,
+            cell.location.x + cell.size.width >= outer.width - edges[1] - EPS,
+            cell.location.y + cell.size.height >= outer.height - edges[2] - EPS,
+            cell.location.x <= edges[3] + EPS,
         ];
+        let inner = [gap_y, gap_x, gap_y, gap_x];
+        for i in 0..4 {
+            if !on_edge[i] {
+                gutters[i] = inner[i];
+            }
+        }
         let table_current = table_styles.clone_color();
         let table_sides = side_borders(&table_styles, &table_current);
         for i in 0..4 {
