@@ -1730,18 +1730,26 @@ fn would_split_block_subtree(
             continue;
         }
         let this_top = layout.location.y;
-        let gap = (this_top - prev_bottom).max(0.0);
-        cursor += gap;
-        if cursor + h > available_h {
-            return true;
-        }
         if h > page_h_px {
             // Grandchild itself oversized → would recurse → would
             // split, regardless of `available_h` budget.
             return true;
         }
-        cursor += h;
-        prev_bottom = this_top + h;
+        // A child beside the previous one (cells of a table row, grid or
+        // flex items in one row) only takes the part of its height that
+        // reaches below the bottom reached so far; adding its whole height
+        // would count each row once per cell.
+        let gap = this_top - prev_bottom;
+        let advance = if gap >= 0.0 {
+            gap + h
+        } else {
+            (h + gap).max(0.0)
+        };
+        if cursor + advance > available_h {
+            return true;
+        }
+        cursor += advance;
+        prev_bottom = prev_bottom.max(this_top + h);
     }
     false
 }
@@ -11077,5 +11085,29 @@ h2 { string-set: chapter-title content(text); }
         assert_eq!(count("x<br>"), 1);
         assert_eq!(count("x<br><br>"), 2);
         assert_eq!(count("x<br>y"), 2);
+    }
+
+    /// The cells of a table row sit beside each other: deciding whether the
+    /// table must be split counts each row once, not once per cell.
+    #[test]
+    fn cells_of_a_row_count_once_when_deciding_to_split() {
+        let cell = "<td style='padding:0'><div style='height:20px'></div></td>";
+        let row = format!("<tr>{}</tr>", cell.repeat(6));
+        let doc = parse(
+            &format!(
+                "<!doctype html><html><body style='margin:0'>\
+                 <table id='t' style='border-spacing:0'>{}</table></body></html>",
+                row.repeat(10)
+            ),
+            400.0,
+        );
+        let table = find_by_id(&doc, "t").expect("table#t");
+        // A 200px table fits a 300px page.
+        assert!(!super::would_split_block_subtree(
+            &doc, table, 300.0, 300.0, 0
+        ));
+        assert!(super::would_split_block_subtree(
+            &doc, table, 150.0, 300.0, 0
+        ));
     }
 }
