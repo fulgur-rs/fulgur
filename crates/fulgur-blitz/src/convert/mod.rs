@@ -2295,6 +2295,44 @@ mod edge_case_tests {
         super::dom_to_drawables(&doc, &mut ctx)
     }
 
+    // --- border colors per side ---
+
+    #[test]
+    fn a_lone_bottom_border_keeps_its_color() {
+        // The other sides keep the initial `currentcolor` (red here), so the
+        // sides differ and each keeps its own color.
+        let d = build_drawables(
+            "<!DOCTYPE html><body style='color:#f00'>\
+             <div style='height:10px;border-bottom:2px solid #3346a8'></div></body>",
+        );
+        let colors: Vec<_> = d
+            .block_styles
+            .iter()
+            .filter(|(_, e)| e.style.border_widths[2].to_f32() > 0.0)
+            .map(|(_, e)| e.style.side_colors)
+            .collect();
+        assert_eq!(
+            colors,
+            vec![Some([
+                [255, 0, 0, 255],
+                [255, 0, 0, 255],
+                [0x33, 0x46, 0xa8, 255],
+                [255, 0, 0, 255]
+            ])]
+        );
+        // One color for all sides needs no per-side drawing.
+        let d = build_drawables(
+            "<!DOCTYPE html><body><div style='height:10px;border:2px solid #3346a8'></div></body>",
+        );
+        let block = d
+            .block_styles
+            .iter()
+            .find(|(_, e)| e.style.border_widths[0].to_f32() > 0.0)
+            .expect("bordered block");
+        assert_eq!(block.1.style.side_colors, None);
+        assert_eq!(block.1.style.border_color, [0x33, 0x46, 0xa8, 255]);
+    }
+
     // --- MAX_DOM_DEPTH guard in convert_node and walk_semantics ---
 
     #[test]

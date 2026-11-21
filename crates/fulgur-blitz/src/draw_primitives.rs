@@ -728,8 +728,11 @@ pub struct BlockStyle {
     pub background_color: Option<[u8; 4]>,
     /// Background image layers (first = top-most, rendered in reverse order).
     pub background_layers: Vec<BackgroundLayer>,
-    /// Border color as RGBA
+    /// Border color as RGBA: the top side's, and every side's unless
+    /// `side_colors` is set
     pub border_color: [u8; 4],
+    /// The colors of the sides (top, right, bottom, left) when they differ
+    pub side_colors: Option<[[u8; 4]; 4]>,
     /// Border widths: top, right, bottom, left
     pub border_widths: [crate::units::Pt; 4],
     /// Padding: top, right, bottom, left
@@ -1584,6 +1587,21 @@ pub(crate) fn draw_block_border(
                 ..BlockStyle::default()
             };
             draw_block_border(canvas, &own, x - ol, y - ot, w + ol + or, h + ot + ob);
+        }
+        return;
+    }
+    if let Some(colors) = style.side_colors {
+        // Sides in different colors: one side at a time, each in its own.
+        for (side, color) in colors.into_iter().enumerate() {
+            let mut widths = [crate::units::Pt::default(); 4];
+            widths[side] = style.border_widths[side];
+            let own = BlockStyle {
+                border_color: color,
+                border_widths: widths,
+                border_styles: style.border_styles,
+                ..BlockStyle::default()
+            };
+            draw_block_border(canvas, &own, x, y, w, h);
         }
         return;
     }

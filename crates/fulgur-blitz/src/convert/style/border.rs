@@ -10,9 +10,18 @@ use crate::units::F32Units;
 use blitz_dom::CopyStyleGetters;
 
 pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
-    // Border color (use top border color for all sides for simplicity)
-    let bc = ctx.styles.slow_clone_border_top_color();
-    style.border_color = absolute_to_rgba(bc.resolve_to_absolute(ctx.current_color));
+    // Border colors. A single color covers the common case; sides that
+    // differ (a lone `border-bottom` keeps the initial `currentcolor` on the
+    // others) are drawn one by one.
+    let colors = [
+        ctx.styles.slow_clone_border_top_color(),
+        ctx.styles.slow_clone_border_right_color(),
+        ctx.styles.slow_clone_border_bottom_color(),
+        ctx.styles.slow_clone_border_left_color(),
+    ]
+    .map(|c| absolute_to_rgba(c.resolve_to_absolute(ctx.current_color)));
+    style.border_color = colors[0];
+    style.side_colors = colors.iter().any(|c| *c != colors[0]).then_some(colors);
 
     // Border radii. Stylo evaluates length-percentage values in CSS px
     // space, so we feed it the CSS-px border-box basis and convert the
