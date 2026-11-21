@@ -1501,7 +1501,7 @@ fn draw_border_line(
 
     match style {
         // CSS Backgrounds L3: border-width < 3 の double は solid として描画。
-        BorderStyleValue::Double if width >= 3.0 => {
+        BorderStyleValue::Double if draws_two_lines(width) => {
             let gap = width / 3.0;
             let dx = x2 - x1;
             let dy = y2 - y1;
@@ -1564,6 +1564,16 @@ fn draw_border_line(
             }
         }
     }
+}
+
+/// The narrowest `double` border drawn as two lines: 3 CSS px, as in
+/// browsers, which is 2.25pt. Border widths here are in points; comparing
+/// them with 3 drew a 3px `double` border as one solid line.
+const DOUBLE_MIN_WIDTH_PT: f32 = 2.25 - 1e-4;
+
+/// Whether a `double` border `width` points wide is drawn as two lines.
+fn draws_two_lines(width: f32) -> bool {
+    width >= DOUBLE_MIN_WIDTH_PT
 }
 
 pub(crate) fn draw_block_border(
@@ -1651,7 +1661,7 @@ pub(crate) fn draw_block_border(
         canvas.surface.set_fill(None);
 
         // CSS Backgrounds L3: border-width < 3 の double は solid として描画。
-        if st == BorderStyleValue::Double && bt >= 3.0 {
+        if st == BorderStyleValue::Double && draws_two_lines(bt) {
             // Double = 3 equal bands (border/gap/border): thin_w = bt/3.
             // Stroke centerlines: outer at bt/6, inner at bt*5/6.
             let thin_w = bt / 3.0;
@@ -2933,6 +2943,13 @@ mod dp_unit_tests {
         with_canvas_smoke(|canvas| {
             draw_block_border(canvas, &style, 0.0, 0.0, 80.0, 80.0);
         });
+    }
+
+    #[test]
+    fn a_3px_double_border_draws_two_lines() {
+        // 3 CSS px is 2.25pt: browsers draw it as two lines, narrower as one.
+        assert!(super::draws_two_lines(3.0_f32.as_px().in_pt().to_f32()));
+        assert!(!super::draws_two_lines(2.0_f32.as_px().in_pt().to_f32()));
     }
 
     #[test]
