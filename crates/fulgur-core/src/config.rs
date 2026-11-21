@@ -154,15 +154,19 @@ impl Default for Margin {
 /// A PDF/A conformance level (ISO 19005), for long-term archiving.
 ///
 /// The letter is the conformance: `b` keeps the visual appearance, `u`
-/// also requires every glyph to map to Unicode, so text can be extracted.
+/// also requires every glyph to map to Unicode, so text can be extracted,
+/// and `a` (accessible) also requires a tagged structure, a document
+/// language and alternate text for images; it turns tagging on.
 /// PDF/A-1 does not allow transparency; PDF/A-3 also allows embedded files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PdfA {
     A1b,
     A2b,
     A2u,
+    A2a,
     A3b,
     A3u,
+    A3a,
 }
 
 impl PdfA {
@@ -172,9 +176,16 @@ impl PdfA {
             PdfA::A1b => "1b",
             PdfA::A2b => "2b",
             PdfA::A2u => "2u",
+            PdfA::A2a => "2a",
             PdfA::A3b => "3b",
             PdfA::A3u => "3u",
+            PdfA::A3a => "3a",
         }
+    }
+
+    /// Whether the level is an accessible (`a`) one, which needs tagging.
+    pub fn is_accessible(self) -> bool {
+        matches!(self, PdfA::A2a | PdfA::A3a)
     }
 }
 
@@ -193,10 +204,12 @@ impl std::str::FromStr for PdfA {
             "1b" => Ok(PdfA::A1b),
             "2b" => Ok(PdfA::A2b),
             "2u" => Ok(PdfA::A2u),
+            "2a" => Ok(PdfA::A2a),
             "3b" => Ok(PdfA::A3b),
             "3u" => Ok(PdfA::A3u),
+            "3a" => Ok(PdfA::A3a),
             _ => Err(format!(
-                "unknown PDF/A level {s:?}; expected 1b, 2b, 2u, 3b or 3u"
+                "unknown PDF/A level {s:?}; expected 1b, 2b, 2u, 2a, 3b, 3u or 3a"
             )),
         }
     }
@@ -344,9 +357,9 @@ impl Config {
     }
 
     /// Returns true if tagging should be enabled in the PDF output.
-    /// pdf_ua implies tagging.
+    /// pdf_ua and the accessible PDF/A levels (2a, 3a) imply tagging.
     pub fn effective_tagging(&self) -> bool {
-        self.enable_tagging || self.pdf_ua
+        self.enable_tagging || self.pdf_ua || self.pdf_a.is_some_and(PdfA::is_accessible)
     }
 
     /// Returns true if bookmarks should be generated.
@@ -768,6 +781,9 @@ mod tests {
             assert_eq!(text.parse::<PdfA>(), Ok(level), "{text}");
             assert_eq!(level.as_str().parse::<PdfA>(), Ok(level));
         }
+        assert_eq!("2a".parse::<PdfA>(), Ok(PdfA::A2a));
+        assert_eq!("PDF/A-3a".parse::<PdfA>(), Ok(PdfA::A3a));
+        assert!(PdfA::A2a.is_accessible() && !PdfA::A2u.is_accessible());
         assert!("1a".parse::<PdfA>().is_err());
         assert!("4".parse::<PdfA>().is_err());
     }

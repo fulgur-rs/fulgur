@@ -451,8 +451,10 @@ fn pdf_a_configuration(config: &Config) -> Configuration {
             PdfA::A1b => Validator::A1_B,
             PdfA::A2b => Validator::A2_B,
             PdfA::A2u => Validator::A2_U,
+            PdfA::A2a => Validator::A2_A,
             PdfA::A3b => Validator::A3_B,
             PdfA::A3u => Validator::A3_U,
+            PdfA::A3a => Validator::A3_A,
         }),
     }
 }
@@ -481,6 +483,14 @@ fn pdf_a_error_message(
             V::RestrictedLicense(_) => "a font's license does not allow embedding".to_string(),
             V::ImageInterpolation(_) => "an image asks for interpolation".to_string(),
             V::EmbeddedPDF(_) => "the document embeds another PDF".to_string(),
+            V::NoDocumentLanguage => "the document has no language; set <html lang>".to_string(),
+            V::MissingAltText(_) => "an image has no alt text".to_string(),
+            V::MissingAnnotationAltText(_) => "a link has no alternate text".to_string(),
+            V::MissingTagging => "the document is not tagged".to_string(),
+            V::UnicodePrivateArea(..) => {
+                "the text uses Private Use Area characters, which the a level does not allow"
+                    .to_string()
+            }
             other => format!("{other:?}"),
         };
         if !lines.contains(&line) {
@@ -6789,6 +6799,30 @@ mod tests {
         )
         .expect_err("PDF/A-1 has no transparency");
         assert!(err.to_string().contains("transparency"), "{err}");
+    }
+
+    #[test]
+    fn pdf_a_2a_tags_the_document() {
+        let pdf = crate::engine::Engine::builder()
+            .pdf_a(crate::PdfA::A2a)
+            .lang("en")
+            .creation_date("2026-11-21")
+            .build()
+            .render("<!doctype html><h1>Invoice</h1><p>Total</p>")
+            .expect("render");
+        assert!(contains(&pdf, "<pdfaid:conformance>A</pdfaid:conformance>"));
+        assert!(contains(&pdf, "/StructTreeRoot"));
+    }
+
+    #[test]
+    fn pdf_a_2a_needs_a_language() {
+        let err = render_pdf_a(
+            crate::PdfA::A2a,
+            Some("2026-11-21"),
+            "<!doctype html><p>x</p>",
+        )
+        .expect_err("2a needs a language");
+        assert!(err.to_string().contains("no language"), "{err}");
     }
 
     #[test]
