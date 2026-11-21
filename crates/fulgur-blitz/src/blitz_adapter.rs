@@ -436,12 +436,10 @@ fn parse_inner(
     net_provider: Option<Arc<dyn NetProvider>>,
     base_url: Option<String>,
 ) -> HtmlDocument {
-    let viewport = Viewport::new(
-        viewport_width as u32,
-        viewport_height_px,
-        1.0,
-        ColorScheme::Light,
-    );
+    // The page area is rarely a whole number of CSS px (A4 with 18mm margins
+    // is 657.6px wide); Chromium lays it out at its exact width.
+    let mut viewport = Viewport::new(0, 0, 1.0, ColorScheme::Light);
+    viewport.set_logical_size(viewport_width, viewport_height_px as f32);
 
     let font_ctx = if font_data.is_empty() && system_fonts {
         // No bundled fonts and system fonts allowed: Blitz's own default
@@ -659,7 +657,7 @@ fn inline_svg_source(doc: &HtmlDocument, svg_id: usize) -> String {
 /// size.
 pub fn set_viewport_size_px(doc: &mut HtmlDocument, width_px: f32, height_px: f32) {
     let mut new_viewport = doc.viewport().clone();
-    new_viewport.window_size = (width_px as u32, height_px as u32);
+    new_viewport.set_logical_size(width_px, height_px);
     doc.set_viewport(new_viewport);
 }
 

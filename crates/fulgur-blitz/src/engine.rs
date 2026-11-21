@@ -314,9 +314,8 @@ impl Engine {
         // values for every downstream consumer (Stylo viewport,
         // `relayout_position_fixed`, the pagination fragmenter, the v2
         // ConvertContext) so they all see an identical content area.
-        // `set_viewport_size_px` truncates to u32 internally for Blitz's
-        // `Viewport.window_size`; Taffy keeps the f32 sub-pixel precision
-        // it needs for its layout cache.
+        // `set_viewport_size_px` gives Blitz the exact (fractional) size, so
+        // the root is laid out at the page area width, as in Chromium.
         let resolved_content_width_px = resolved_content_width_pt.as_pt().in_px().to_f32();
         let resolved_content_height_px = resolved_content_height_pt.as_pt().in_px().to_f32();
         crate::blitz_adapter::set_viewport_size_px(
