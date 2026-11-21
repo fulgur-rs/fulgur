@@ -7367,8 +7367,8 @@ fn combining_mark_over_a_capital_is_raised() {
     );
     let glyphs: Vec<_> = d
         .paragraphs
-        .iter()
-        .flat_map(|(_, p)| p.lines.iter())
+        .values()
+        .flat_map(|p| p.lines.iter())
         .flat_map(|line| line.items.iter())
         .filter_map(|item| match item {
             fulgur::paragraph::LineItem::Text(run) => Some(run.glyphs.iter()),
