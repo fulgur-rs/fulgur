@@ -1118,16 +1118,23 @@ fn para_has_link_runs(entry: &crate::drawables::ParagraphEntry) -> bool {
 }
 
 /// Whether a paragraph is tagged run by run instead of as one sequence:
-/// when it has links (each gets its own `Link` element) or inline boxes.
-/// An inline box (an inline `<svg>` or `<img>`, an inline-block) is tagged
-/// as its own element, a `Figure` with its alt text, which krilla cannot
-/// open inside the paragraph's sequence.
+/// when it has links (each gets its own `Link` element), inline boxes, text
+/// in another language or lines not drawn in reading order. An inline box
+/// (an inline `<svg>` or `<img>`, an inline-block) is tagged as its own
+/// element, a `Figure` with its alt text, which krilla cannot open inside
+/// the paragraph's sequence. Text in another language (`<span lang="de">`)
+/// needs a sequence of its own to carry its `/Lang`. The runs of a line with
+/// right-to-left text are drawn left to right, so the structure tree takes
+/// them one by one in reading order.
 fn para_uses_run_tagging(entry: &crate::drawables::ParagraphEntry) -> bool {
     para_has_link_runs(entry)
         || entry.lines.iter().any(|line| {
-            line.items
-                .iter()
-                .any(|item| matches!(item, crate::paragraph::LineItem::InlineBox(_)))
+            crate::paragraph::reading_order(&line.items).is_some()
+                || line.items.iter().any(|item| match item {
+                    crate::paragraph::LineItem::InlineBox(_) => true,
+                    crate::paragraph::LineItem::Text(run) => run.lang.is_some(),
+                    crate::paragraph::LineItem::Image(_) => false,
+                })
         })
 }
 
@@ -1159,17 +1166,26 @@ fn run_tag_target(
 
 /// Collect the plain-text title from a paragraph's shaped lines.
 ///
-/// Returns the concatenated text of all `Text` run items across all lines.
-/// Used to populate the `/T` (Title) attribute on heading tags required by
-/// PDF/UA-1.
+/// Returns the text the paragraph's `Text` runs are drawn from. Every run of
+/// a paragraph shares its whole text, so each text is taken once, not once
+/// per run. Used to populate the `/T` (Title) attribute on heading tags
+/// required by PDF/UA-1.
 fn extract_heading_title(para: &crate::drawables::ParagraphEntry) -> String {
-    para.lines
+    let mut texts: Vec<&std::sync::Arc<str>> = Vec::new();
+    for item in para.lines.iter().flat_map(|line| line.items.iter()) {
+        if let crate::paragraph::LineItem::Text(run) = item
+            && !texts
+                .iter()
+                .any(|text| std::sync::Arc::ptr_eq(text, &run.text))
+        {
+            texts.push(&run.text);
+        }
+    }
+    // An inline box stands in the text as U+FFFC, which is no text.
+    texts
         .iter()
-        .flat_map(|line| line.items.iter())
-        .filter_map(|item| match item {
-            crate::paragraph::LineItem::Text(run) => Some(run.text.as_ref()),
-            _ => None,
-        })
+        .flat_map(|text| text.chars())
+        .filter(|&c| c != '\u{FFFC}')
         .collect()
 }
 
@@ -5069,6 +5085,9 @@ fn build_tag_group_with_links(
     if let Some(&(colspan, rowspan)) = drawables.table_cell_spans.get(&node_id) {
         set_table_cell_spans(&mut tag, colspan, rowspan);
     }
+    if let Some(lang) = drawables.element_langs.get(&node_id) {
+        tag.set_lang(Some(lang.to_string()));
+    }
     let mut group = TagGroup::new(tag);
     // Children already built at their inline box's place among the runs.
     let mut placed_children = std::collections::BTreeSet::new();
@@ -5530,6 +5549,8 @@ mod tests {
             text: std::sync::Arc::from(text),
             x_offset: crate::units::Pt::ZERO,
             link,
+            lang: None,
+            from_paragraph_text: false,
         }
     }
 
@@ -5600,6 +5621,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let line = make_shaped_line(vec![crate::paragraph::LineItem::InlineBox(item)]);
         let para = make_para(vec![line]);
@@ -5617,6 +5639,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         make_para(vec![make_shaped_line(vec![
             crate::paragraph::LineItem::InlineBox(item),
@@ -5873,6 +5896,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let line = make_shaped_line(vec![
             crate::paragraph::LineItem::Image(img),
@@ -6696,6 +6720,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let line = crate::paragraph::ShapedLine {
             height: 16.0_f32.as_pt(),
@@ -9015,6 +9040,8 @@ mod struct_tree_tests {
             text: std::sync::Arc::from(text),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         };
         crate::drawables::ParagraphEntry {
             lines: vec![crate::paragraph::ShapedLine {

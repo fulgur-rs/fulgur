@@ -310,6 +310,8 @@ pub(super) fn try_convert(
 /// append-only, one-insert-per-NodeId invariant on `TrackedMap` in
 /// convert.
 #[must_use = "returns Err(item) on failure; the handed-back item must be reused or explicitly dropped"]
+// The error is the caller's own item handed back, not a new value to box.
+#[allow(clippy::result_large_err)]
 fn inject_marker_into_first_paragraph(
     out: &mut crate::drawables::Drawables,
     mark: crate::drawables::DrawMark,
@@ -531,6 +533,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         })
     }
 
@@ -671,6 +674,8 @@ mod tests {
             text: Arc::from("• "),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         });
         assert!(inject_marker_into_first_paragraph(&mut out, mark, text_marker).is_ok());
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
@@ -771,6 +776,8 @@ mod tests {
             text: Arc::from(""),
             x_offset: x_offset.as_pt(),
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         })
     }
 
@@ -901,6 +908,8 @@ mod tests {
             text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         });
         assert!(inject_marker_into_first_paragraph(&mut out, mark, zero_glyph_marker).is_ok());
         // shift = 0 → existing InlineBox stays at x_offset=7.

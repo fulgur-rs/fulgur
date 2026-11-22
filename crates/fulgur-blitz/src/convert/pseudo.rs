@@ -405,6 +405,8 @@ mod tests {
             text: Arc::from("a"),
             x_offset: 3.0_f32.as_pt(),
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         };
         let mut lines = vec![ShapedLine {
             height: 16.0_f32.as_pt(),
@@ -432,6 +434,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let mut lines = vec![ShapedLine {
             height: 16.0_f32.as_pt(),
@@ -516,6 +519,8 @@ mod tests {
             text: Arc::from("ab"),
             x_offset: 2.0_f32.as_pt(),
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         };
         let mut lines = vec![ShapedLine {
             height: 16.0_f32.as_pt(),
@@ -547,6 +552,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let mut lines = vec![ShapedLine {
             height: 16.0_f32.as_pt(),
@@ -618,6 +624,7 @@ mod tests {
                     link: None,
                     opacity: 1.0,
                     visible: true,
+                    text_index: None,
                 }),
                 LineItem::Image(InlineImage {
                     data: Arc::new(vec![]),

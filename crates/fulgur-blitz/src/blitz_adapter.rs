@@ -1633,9 +1633,20 @@ pub(crate) fn extract_column_style_table(
     crate::column_css::build_column_style_table(doc, &rules)
 }
 
-/// The `lang` attribute of the root `<html>` element, if set and non-blank.
-/// The returned string is whitespace-trimmed.
+/// The `lang` attribute of the root `<html>` element, if it is a language
+/// tag ([`language_tag`]).
 pub fn extract_html_lang(doc: &HtmlDocument) -> Option<String> {
+    let root = doc.root_element();
+    let el = root.element_data()?;
+    if (&el.name.local) != "html" {
+        return None;
+    }
+    language_tag(el.attr(blitz_dom::LocalName::from("lang"))?)
+}
+
+/// The `lang` attribute of the root `<html>` element as written, trimmed,
+/// if set and non-blank, whether or not it is a language tag.
+pub fn extract_html_lang_attribute(doc: &HtmlDocument) -> Option<String> {
     let root = doc.root_element();
     let el = root.element_data()?;
     if (&el.name.local) != "html" {
@@ -1643,6 +1654,60 @@ pub fn extract_html_lang(doc: &HtmlDocument) -> Option<String> {
     }
     let lang = el.attr(blitz_dom::LocalName::from("lang"))?.trim();
     (!lang.is_empty()).then(|| lang.to_string())
+}
+
+/// A `lang` value as a language tag for the PDF's `/Lang`, or `None` when
+/// it is blank or not one. HTML takes any value, but PDF/UA and PDF/A ask
+/// for an RFC 3066 tag (`en-US`), and veraPDF rejects others: the common
+/// slip `en_US` becomes `en-US`, and a value that is still no tag counts
+/// as not set.
+pub(crate) fn language_tag(value: &str) -> Option<String> {
+    let tag = value.trim().replace('_', "-");
+    let mut subtags = tag.split('-');
+    let primary = subtags.next()?;
+    let valid = (1..=8).contains(&primary.len())
+        && primary.bytes().all(|b| b.is_ascii_alphabetic())
+        && subtags
+            .all(|s| (1..=8).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric()));
+    valid.then_some(tag)
+}
+
+/// Languages of nodes, as [`effective_lang`] finds them.
+pub(crate) type LangCache = std::collections::HashMap<usize, Option<std::sync::Arc<str>>>;
+
+/// The language of a node: the `lang` attribute of the node or of its
+/// nearest ancestor that has one that is a language tag
+/// ([`language_tag`]). `cache` keeps the answer for
+/// every node on the way, so each node is walked once.
+pub(crate) fn effective_lang(
+    doc: &blitz_dom::BaseDocument,
+    node_id: usize,
+    cache: &mut LangCache,
+) -> Option<std::sync::Arc<str>> {
+    let mut walked = Vec::new();
+    let mut next = Some(node_id);
+    let lang = loop {
+        let Some(id) = next else { break None };
+        if let Some(lang) = cache.get(&id) {
+            break lang.clone();
+        }
+        let Some(node) = doc.get_node(bid(id)) else {
+            break None;
+        };
+        walked.push(id);
+        let own = node
+            .element_data()
+            .and_then(|el| get_attr(el, "lang"))
+            .and_then(language_tag);
+        if let Some(lang) = own {
+            break Some(std::sync::Arc::from(lang));
+        }
+        next = node.parent.map(uid);
+    };
+    for id in walked {
+        cache.insert(id, lang.clone());
+    }
+    lang
 }
 
 /// Extract the text content of the HTML `<title>` element, if present.
@@ -2549,9 +2614,19 @@ impl DomPass for CaptionRestructurePass {
             // gate on `force_block`.
             let on_bottom = force_block && caption_side_is_bottom(doc, caption_id);
             let table_pct = table_percentage_width(doc, table_id);
+            // The caption is in the table's language: the wrapper takes the
+            // table's `lang`, so the moved caption keeps it.
+            let table_lang = doc
+                .get_node(crate::blitz_adapter::bid(table_id))
+                .and_then(|n| n.element_data())
+                .and_then(|el| get_attr(el, "lang"))
+                .map(str::to_string);
             let mut mutator = doc.mutate();
             let wrapper_id = mutator.create_element(make_qual_name("div"), vec![]);
             mutator.set_style_property(wrapper_id, "display", "block");
+            if let Some(lang) = table_lang {
+                mutator.set_attribute(wrapper_id, make_qual_name("lang"), &lang);
+            }
             if let Some(pct) = table_pct {
                 // A percentage width (`width:100%` report tables) refers to the
                 // table's containing block. Inside a `fit-content` wrapper it

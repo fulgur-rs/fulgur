@@ -67,6 +67,8 @@ struct LayoutArtifacts {
     string_set_for_render: HashMap<usize, Vec<(String, String)>>,
     html_title: Option<String>,
     html_lang: Option<String>,
+    /// `<html lang>` as written when it is not a language tag.
+    html_lang_invalid: Option<String>,
     implicit_href_map: BTreeMap<usize, String>,
     collected_anchor_map: AnchorMap,
     needs_pass_two: bool,
@@ -800,6 +802,10 @@ impl Engine {
         let drawables = crate::convert::dom_to_drawables(&doc, &mut convert_ctx);
         let html_title = crate::blitz_adapter::extract_html_title(&doc);
         let html_lang = crate::blitz_adapter::extract_html_lang(&doc);
+        let html_lang_invalid = html_lang
+            .is_none()
+            .then(|| crate::blitz_adapter::extract_html_lang_attribute(&doc))
+            .flatten();
         // Reclaim the post-convert geometry without partially moving
         // `convert_ctx`, then drop it so its `&running_store` borrow ends and
         // `running_store` can be moved into the artifacts.
@@ -813,6 +819,7 @@ impl Engine {
             string_set_for_render,
             html_title,
             html_lang,
+            html_lang_invalid,
             implicit_href_map,
             collected_anchor_map,
             needs_pass_two: needs_anchor_map_for_pass_two,
@@ -836,6 +843,7 @@ impl Engine {
             string_set_for_render,
             html_title,
             html_lang,
+            html_lang_invalid,
             implicit_href_map,
             ..
         } = artifacts;
@@ -858,6 +866,22 @@ impl Engine {
                 ..self.config.clone()
             })
         };
+        // PDF/UA and the accessible PDF/A levels need a language: say why
+        // `<html lang>` did not give one when it is set to something else.
+        let standard = match config.pdf_a {
+            Some(level @ (crate::PdfA::A2a | crate::PdfA::A3a)) => {
+                Some(format!("PDF/A-{}", level.as_str()))
+            }
+            _ => config.pdf_ua.then(|| "PDF/UA".to_string()),
+        };
+        if let (Some(standard), None, Some(value)) =
+            (standard, config.lang.as_ref(), html_lang_invalid.as_ref())
+        {
+            return Err(crate::error::Error::PdfGeneration(format!(
+                "{standard} requires a document language: <html lang=\"{value}\"> is not a \
+                 language tag; use one such as \"en\" or \"en-US\""
+            )));
+        }
         if config.pdf_ua && config.lang.is_none() {
             return Err(crate::error::Error::PdfGeneration(
                 "PDF/UA requires a document language: set Config::lang or <html lang>".into(),

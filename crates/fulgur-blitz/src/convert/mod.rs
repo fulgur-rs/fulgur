@@ -398,6 +398,41 @@ fn record_semantics_pass(doc: &HtmlDocument, out: &mut crate::drawables::Drawabl
     walk_semantics(base, body_id, 0, None, false, &mut left_out, out);
     record_anonymous_blocks(base, &left_out, out);
     record_semantic_order(base, body_id, out);
+    record_element_langs(base, crate::blitz_adapter::uid(doc.root_element().id), out);
+}
+
+/// Records the `/Lang` of each structure element whose language, its own
+/// `lang` or an ancestor's, is not that of the structure element it is in:
+/// for a top-level element, the document's `<html lang>`. Without it a
+/// `<p lang="fr">` in an English document reads as English. The synthetic
+/// `Lbl` and `LBody` of a list item have the item's language.
+fn record_element_langs(doc: &BaseDocument, root_id: usize, out: &mut crate::drawables::Drawables) {
+    let mut langs = crate::blitz_adapter::LangCache::new();
+    let document_lang = crate::blitz_adapter::effective_lang(doc, root_id, &mut langs);
+    let mut found = Vec::new();
+    for (&node_id, entry) in &out.semantics {
+        if doc.get_node(crate::blitz_adapter::bid(node_id)).is_none() {
+            continue;
+        }
+        let Some(lang) = crate::blitz_adapter::effective_lang(doc, node_id, &mut langs) else {
+            continue;
+        };
+        // The nearest structure element around it that is a node.
+        let mut parent = entry.parent;
+        let parent_lang = loop {
+            let Some(parent_id) = parent else {
+                break document_lang.clone();
+            };
+            if doc.get_node(crate::blitz_adapter::bid(parent_id)).is_some() {
+                break crate::blitz_adapter::effective_lang(doc, parent_id, &mut langs);
+            }
+            parent = out.semantics.get(&parent_id).and_then(|e| e.parent);
+        };
+        if parent_lang.as_deref() != Some(&*lang) {
+            found.push((node_id, lang));
+        }
+    }
+    out.element_langs.extend(found);
 }
 
 /// Text in an anonymous block (a run of inline content next to block
@@ -1209,7 +1244,7 @@ fn convert_multicol_paragraph_slices(
             // simplified version of the per-line shaping in
             // `inline_root::extract_paragraph` covering only `GlyphRun`s
             // — see this function's doc comment for scope notes.
-            let all_lines = shape_paragraph_glyph_runs(doc, layout_ref, &text, ctx);
+            let all_lines = shape_paragraph_glyph_runs(doc, source_node, layout_ref, &text, ctx);
             if all_lines.is_empty() {
                 continue;
             }
@@ -1346,88 +1381,42 @@ fn convert_multicol_box_slices(
 /// per-slice fragments — see `convert_multicol_paragraph_slices`.
 fn shape_paragraph_glyph_runs(
     doc: &BaseDocument,
+    source_node: &Node,
     parley_layout: &parley::Layout<blitz_dom::node::TextBrush>,
     text: &std::sync::Arc<str>,
     ctx: &mut ConvertContext<'_>,
 ) -> Vec<ShapedLine> {
     let mut shaped_lines = Vec::new();
+    let mut langs = crate::blitz_adapter::LangCache::new();
+    let paragraph_lang = crate::blitz_adapter::effective_lang(
+        doc,
+        crate::blitz_adapter::uid(source_node.id),
+        &mut langs,
+    );
+    let mut tab_lines = Vec::new();
     for line in parley_layout.lines() {
         let metrics = line.metrics();
         let mut items = Vec::new();
-        let mut prev_run_key = usize::MAX;
-        let mut run_glyph_offset = 0usize;
+        let mut cursor = inline_root::RunCursor::default();
+        let mut has_rtl = false;
         for item in line.items() {
             if let parley::PositionedLayoutItem::GlyphRun(glyph_run) = item {
-                let run = glyph_run.run();
-                let font_ref = run.font();
-                let font_index = font_ref.index;
-                let font_arc = ctx.get_or_insert_font(font_ref);
-                let font_size_parley = run.font_size();
-                let font_size = font_size_parley.as_px().in_pt();
-
-                let brush = &glyph_run.style().brush;
-                let color = get_text_color(doc, crate::blitz_adapter::uid(brush.id));
-                let decoration = get_text_decoration(doc, crate::blitz_adapter::uid(brush.id));
-                let link = ctx
-                    .link_cache
-                    .lookup(doc, crate::blitz_adapter::uid(brush.id));
-
-                let run_key = run.index();
-                if run_key != prev_run_key {
-                    prev_run_key = run_key;
-                    run_glyph_offset = 0;
-                }
-                let glyph_start = run_glyph_offset;
-
-                let mut annotated = run
-                    .visual_clusters()
-                    .flat_map(|cluster| {
-                        let r = crate::paragraph::cluster_glyph_text_range(&cluster);
-                        cluster.glyphs().map(move |g| (r.clone(), g))
-                    })
-                    .skip(glyph_start);
-
-                let mut glyphs = Vec::new();
-                for g in glyph_run.glyphs() {
-                    let (text_range, _) = annotated.next().unwrap_or_else(|| {
-                        panic!(
-                            "annotated cluster iterator exhausted before glyph_run.glyphs(); \
-                             run cluster_range={:?}, glyph_start={glyph_start}",
-                            run.cluster_range()
-                        )
-                    });
-                    run_glyph_offset += 1;
-                    glyphs.push(ShapedGlyph {
-                        id: g.id,
-                        x_advance: ShapedGlyph::normalize_by_font_size(g.advance, font_size_parley),
-                        x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
-                        // Parley's `y` grows downwards; krilla's `y_offset` is the
-                        // font's, which grows upwards (marks below the baseline).
-                        y_offset: ShapedGlyph::normalize_by_font_size(-g.y, font_size_parley),
-                        text_range,
-                    });
-                }
-
-                if !glyphs.is_empty() {
-                    let run_text = std::sync::Arc::clone(text);
-                    let run_x_offset = glyph_run.offset().as_px().in_pt();
-                    items.push(LineItem::Text(ShapedGlyphRun {
-                        font_data: font_arc,
-                        font_index,
-                        variations: crate::paragraph::run_variations(run),
-                        font_size,
-                        color,
-                        decoration,
-                        glyphs,
-                        text: run_text,
-                        x_offset: run_x_offset,
-                        link,
-                    }));
-                }
+                has_rtl |= glyph_run.run().is_rtl();
+                inline_root::push_glyph_runs(
+                    doc,
+                    &glyph_run,
+                    text,
+                    paragraph_lang.as_deref(),
+                    &mut langs,
+                    &mut cursor,
+                    ctx,
+                    &mut items,
+                );
             }
             // InlineBox items are intentionally not handled — see
             // `convert_multicol_paragraph_slices`'s scope note.
         }
+        tab_lines.push(inline_root::tab_line_metrics(metrics, has_rtl));
 
         let line_height = metrics.line_height.as_px().in_pt();
         shaped_lines.push(ShapedLine {
@@ -1436,6 +1425,11 @@ fn shape_paragraph_glyph_runs(
             items,
         });
     }
+    crate::paragraph::apply_tab_stops(
+        &mut shaped_lines,
+        &tab_lines,
+        inline_root::tab_stops(source_node),
+    );
     shaped_lines
 }
 

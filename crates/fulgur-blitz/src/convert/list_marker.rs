@@ -255,6 +255,8 @@ pub(super) fn extract_marker_lines(
                         text: std::sync::Arc::clone(&marker_text),
                         x_offset: glyph_run.offset().as_px().in_pt(),
                         link: None,
+                        lang: None,
+                        from_paragraph_text: false,
                     }));
                 }
             }
@@ -385,6 +387,8 @@ pub(super) fn shape_marker_with_skrifa(
         text,
         x_offset: crate::units::Pt::ZERO,
         link: None,
+        lang: None,
+        from_paragraph_text: false,
     })
 }
 
@@ -518,6 +522,8 @@ mod tests {
             text: Arc::from("A"),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         };
         let line = ShapedLine {
             height: 12.0.as_pt(),
@@ -693,6 +699,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         });
         let line = ShapedLine {
             height: 12.0_f32.as_pt(),
@@ -734,6 +741,8 @@ mod tests {
             text: Arc::from("•"),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         };
         let line = ShapedLine {
             height: 12.0_f32.as_pt(),
@@ -774,6 +783,8 @@ mod tests {
             text: Arc::from("A"),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
         };
         let line = ShapedLine {
             height: 12.0_f32.as_pt(),

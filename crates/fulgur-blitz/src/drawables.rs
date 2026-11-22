@@ -517,6 +517,9 @@ pub struct Drawables {
     /// column or row, parsed as browsers do (capped at 1000 columns and
     /// 65534 rows).
     pub table_cell_spans: BTreeMap<NodeId, (u32, u32)>,
+    /// The `/Lang` of each structure element whose language is not that of
+    /// the element it is in (`<p lang="fr">` in an English document).
+    pub element_langs: BTreeMap<NodeId, std::sync::Arc<str>>,
 }
 
 impl Default for Drawables {
@@ -546,6 +549,7 @@ impl Default for Drawables {
             li_lbody_ids: BTreeMap::new(),
             semantic_order: BTreeMap::new(),
             table_cell_spans: BTreeMap::new(),
+            element_langs: BTreeMap::new(),
         }
     }
 }
