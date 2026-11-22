@@ -651,7 +651,22 @@ fn draw_line_decorations(
         });
     }
 
-    for span in &spans {
+    if spans.is_empty() {
+        return;
+    }
+    // Decorations are drawn after the line's items, so on a line that ends
+    // in an inline box no run's sequence is open any more: they are
+    // decoration, an artifact. Inside an open sequence (a run's, or the
+    // paragraph's) they are drawn as part of it.
+    canvas.as_artifact(|canvas| draw_decoration_spans(canvas, &spans, baseline_y));
+}
+
+fn draw_decoration_spans(
+    canvas: &mut Canvas<'_, '_>,
+    spans: &[DecorationSpan],
+    baseline_y: crate::units::Pt,
+) {
+    for span in spans {
         let metrics =
             get_decoration_metrics(&span.font_data, span.font_index, span.font_size.to_f32());
 
@@ -765,6 +780,11 @@ impl RunRegionTracker {
         }
         self.close(canvas);
         if canvas.in_marked_content {
+            // Inside a group tagged as one sequence: the link's text is
+            // part of it, and the link gets a `Link` element there.
+            if let (Some(ptr), Some(tc)) = (new_span_ptr, canvas.tag_collector.as_mut()) {
+                tc.note_group_link(ptr);
+            }
             return;
         }
         use krilla::tagging::{ContentTag, SpanTag};
@@ -969,6 +989,18 @@ pub fn draw_shaped_lines(
                     // while the sub-dispatch also calls `start_tagged` panics.
                     if let Some(tracker) = run_region.as_mut() {
                         tracker.close(canvas);
+                        // The box's own element (a `Figure`, a `Span`) goes
+                        // here in the paragraph's reading order, between
+                        // the runs around it.
+                        if let (Some(content_id), Some(tc)) =
+                            (ib.node_id, canvas.tag_collector.as_mut())
+                        {
+                            tc.note_linked_inline_box(
+                                tracker.node_id,
+                                content_id,
+                                link_span_ptr(ib.link.as_ref()),
+                            );
+                        }
                     }
                     let saved_link_run_node_id = canvas.link_run_node_id.take();
                     if !ib.visible {
@@ -1020,6 +1052,15 @@ pub fn draw_shaped_lines(
                             off_x.as_pt(),
                             off_y.as_pt(),
                         );
+                        // A fractional opacity makes the box one group, and
+                        // marked content opened inside a group is lost: tag
+                        // the whole box as its content's, before the group.
+                        let group_tag = crate::render::start_opacity_group_tagged(
+                            canvas,
+                            content_id,
+                            ctx.drawables,
+                            ib.opacity,
+                        );
                         crate::draw_primitives::draw_with_opacity(canvas, ib.opacity, |canvas| {
                             if let Some(lc) = canvas.link_collector.as_deref_mut() {
                                 lc.push_transform(link_affine);
@@ -1044,6 +1085,7 @@ pub fn draw_shaped_lines(
                                 lc.pop_transform();
                             }
                         });
+                        crate::render::finish_group_tagged(canvas, group_tag);
                     }
 
                     // Link rect built after the opacity block ends, so link

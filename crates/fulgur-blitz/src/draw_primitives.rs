@@ -586,6 +586,48 @@ pub type TagEntry = (
 pub struct TagCollector {
     entries: Vec<TagEntry>,
     run_entries: BTreeMap<crate::drawables::NodeId, Vec<ParagraphRunItem>>,
+    /// The page each item of `run_entries` was drawn on, item for item.
+    /// A link's annotation is placed in the `Link` element whose content
+    /// is on the annotation's page.
+    run_pages: BTreeMap<crate::drawables::NodeId, Vec<usize>>,
+    /// The page being drawn.
+    current_page: usize,
+    /// The element whose whole group is being tagged as one sequence (an
+    /// opacity group), while it is open.
+    open_group: Option<crate::drawables::NodeId>,
+    /// Links drawn inside such a group: their text is part of the group's
+    /// content, and each gets a `Link` element holding its annotation under
+    /// the group's element, as PDF/UA requires for every link annotation.
+    group_links: BTreeMap<crate::drawables::NodeId, Vec<GroupLink>>,
+    /// Inline boxes drawn in paragraphs tagged run by run, by paragraph:
+    /// the box's element goes between the runs around it.
+    inline_boxes: BTreeMap<crate::drawables::NodeId, Vec<InlineBoxMark>>,
+}
+
+/// A link drawn inside a group tagged as one sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupLink {
+    /// The link's `Arc<LinkSpan>` pointer.
+    pub span_ptr: usize,
+    /// The pages the link was drawn on inside the group.
+    pub pages: std::collections::BTreeSet<usize>,
+}
+
+/// Where an inline box (an inline `<svg>` or `<img>`, an inline-block)
+/// sits among the runs of a paragraph tagged run by run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InlineBoxMark {
+    /// How many run items the paragraph had recorded when the box was
+    /// drawn: the box's element comes before the item at this index.
+    pub run_index: usize,
+    /// The box's content node.
+    pub content_id: crate::drawables::NodeId,
+    /// The link the box is in (`<a href><img alt></a>`), as its
+    /// `Arc<LinkSpan>` pointer: the box's element then goes inside a
+    /// `Link` element holding the link's annotation.
+    pub link: Option<usize>,
+    /// The page the box is drawn on.
+    pub page: usize,
 }
 
 impl TagCollector {
@@ -593,7 +635,88 @@ impl TagCollector {
         Self {
             entries: Vec::new(),
             run_entries: BTreeMap::new(),
+            run_pages: BTreeMap::new(),
+            current_page: 0,
+            open_group: None,
+            group_links: BTreeMap::new(),
+            inline_boxes: BTreeMap::new(),
         }
+    }
+
+    /// Set the page that the following content is drawn on.
+    pub fn set_current_page(&mut self, page_idx: usize) {
+        self.current_page = page_idx;
+    }
+
+    /// Start or end tagging a whole group as content of `node_id`.
+    pub fn set_open_group(&mut self, node_id: Option<crate::drawables::NodeId>) {
+        self.open_group = node_id;
+    }
+
+    /// Note a link drawn while a group is open. Returns whether it was
+    /// noted (a group is open).
+    pub fn note_group_link(&mut self, span_ptr: usize) -> bool {
+        let Some(group) = self.open_group else {
+            return false;
+        };
+        let page = self.current_page;
+        let links = self.group_links.entry(group).or_default();
+        match links.iter_mut().find(|l| l.span_ptr == span_ptr) {
+            Some(link) => {
+                link.pages.insert(page);
+            }
+            None => links.push(GroupLink {
+                span_ptr,
+                pages: std::iter::once(page).collect(),
+            }),
+        }
+        true
+    }
+
+    /// The links noted inside groups, by group element.
+    pub fn take_group_links(&mut self) -> BTreeMap<crate::drawables::NodeId, Vec<GroupLink>> {
+        std::mem::take(&mut self.group_links)
+    }
+
+    /// Note an inline box with content `content_id` drawn in `paragraph`,
+    /// a paragraph tagged run by run, after the runs recorded so far.
+    pub fn note_inline_box(
+        &mut self,
+        paragraph: crate::drawables::NodeId,
+        content_id: crate::drawables::NodeId,
+    ) {
+        self.note_linked_inline_box(paragraph, content_id, None);
+    }
+
+    /// `note_inline_box` for a box inside link `link` (its `Arc<LinkSpan>`
+    /// pointer), or in no link.
+    pub fn note_linked_inline_box(
+        &mut self,
+        paragraph: crate::drawables::NodeId,
+        content_id: crate::drawables::NodeId,
+        link: Option<usize>,
+    ) {
+        let run_index = self.run_entries.get(&paragraph).map_or(0, Vec::len);
+        let page = self.current_page;
+        self.inline_boxes
+            .entry(paragraph)
+            .or_default()
+            .push(InlineBoxMark {
+                run_index,
+                content_id,
+                link,
+                page,
+            });
+    }
+
+    /// The inline boxes noted in paragraphs, by paragraph.
+    pub fn take_inline_boxes(&mut self) -> BTreeMap<crate::drawables::NodeId, Vec<InlineBoxMark>> {
+        std::mem::take(&mut self.inline_boxes)
+    }
+
+    /// The page of each run item, by paragraph, item for item.
+    pub fn take_run_pages(&mut self) -> BTreeMap<crate::drawables::NodeId, Vec<usize>> {
+        std::mem::take(&mut self.run_pages)
     }
 
     pub fn record(
@@ -623,6 +746,10 @@ impl TagCollector {
     /// Record a per-run item under `node_id` (paragraph NodeId).
     pub fn record_run(&mut self, node_id: crate::drawables::NodeId, item: ParagraphRunItem) {
         self.run_entries.entry(node_id).or_default().push(item);
+        self.run_pages
+            .entry(node_id)
+            .or_default()
+            .push(self.current_page);
     }
 
     /// Collect every `LinkContent::span_ptr` recorded across all paragraphs.
@@ -637,6 +764,8 @@ impl TagCollector {
                 ParagraphRunItem::LinkContent { span_ptr, .. } => Some(*span_ptr),
                 ParagraphRunItem::Content(_) => None,
             })
+            .chain(self.group_links.values().flatten().map(|l| l.span_ptr))
+            .chain(self.inline_boxes.values().flatten().filter_map(|m| m.link))
             .collect()
     }
 }
@@ -665,15 +794,60 @@ pub struct Canvas<'a, 'b> {
     /// every fulgur entry point that opens a sequence must consult and set this
     /// flag: skip the open when the flag is set (defer to the outer tag as a
     /// graceful degradation), and pair a successful open with a matching reset
-    /// in the same scope. The three current entry points are
-    /// `render::try_start_tagged`, `render::draw_list_item_marker_tagged`, and
-    /// `paragraph::RunRegionTracker::transition_to`.
+    /// in the same scope. The entry points are `render::try_start_tagged`,
+    /// `render::draw_list_item_marker_tagged`,
+    /// `paragraph::RunRegionTracker::transition_to` and
+    /// [`Canvas::as_artifact`].
+    ///
+    /// The flag also spans krilla groups (opacity), which krilla's own check
+    /// does not: a sequence opened inside a group does not panic, but it is
+    /// not linked into the structure tree, so it must not be opened there
+    /// either. A group is only ever opened with the flag set (see
+    /// [`draw_with_opacity`]).
     pub in_marked_content: bool,
+}
+
+impl Canvas<'_, '_> {
+    /// Run `draw` as an artifact: content that is decoration rather than
+    /// part of the document (backgrounds, borders, shadows, rules), so a
+    /// tagged PDF marks it for assistive technology to skip. PDF/UA
+    /// requires every piece of content to be either tagged or an artifact.
+    /// Without tagging, or inside an already open marked-content sequence
+    /// (an inline background inside a tagged paragraph), `draw` runs as it
+    /// is.
+    pub fn as_artifact<R>(&mut self, draw: impl FnOnce(&mut Self) -> R) -> R {
+        if self.tag_collector.is_none() || self.in_marked_content {
+            return draw(self);
+        }
+        use krilla::tagging::{ArtifactType, ContentTag};
+        self.surface
+            .start_tagged(ContentTag::Artifact(ArtifactType::Other));
+        self.in_marked_content = true;
+        let result = draw(self);
+        self.surface.end_tagged();
+        self.in_marked_content = false;
+        result
+    }
+}
+
+/// Whether [`draw_with_opacity`] draws `opacity` as a group (a form
+/// XObject): only a fraction does. 0 draws nothing; 1, and any value krilla
+/// cannot normalise to a fraction, draws in place.
+pub fn opacity_makes_group(opacity: f32) -> bool {
+    opacity > 0.0 && opacity < 1.0
 }
 
 /// Run a draw closure wrapped in opacity guards.
 /// Skips drawing entirely if fully transparent (opacity == 0).
 /// Wraps in a Krilla transparency group if partially transparent.
+///
+/// In a tagged PDF a group must be drawn inside marked content: marked
+/// content opened inside the group is not linked into the structure tree,
+/// and the group itself is painted on the page. Callers whose group holds
+/// content open the element's sequence first
+/// (`render::start_opacity_group_tagged`);
+/// any other group is decoration (a faded background) and is drawn as an
+/// artifact here.
 ///
 /// **Does NOT check visibility.** CSS `visibility: hidden` only hides
 /// the element's own content (background, border, text) but children
@@ -687,6 +861,18 @@ pub fn draw_with_opacity(
     if opacity == 0.0 {
         return;
     }
+    if opacity_makes_group(opacity) {
+        canvas.as_artifact(|canvas| draw_in_opacity_group(canvas, opacity, f));
+    } else {
+        draw_in_opacity_group(canvas, opacity, f);
+    }
+}
+
+fn draw_in_opacity_group(
+    canvas: &mut Canvas<'_, '_>,
+    opacity: f32,
+    f: impl FnOnce(&mut Canvas<'_, '_>),
+) {
     let needs_opacity = opacity < 1.0;
     if needs_opacity {
         let nf =
@@ -1577,6 +1763,25 @@ fn draws_two_lines(width: f32) -> bool {
 }
 
 pub(crate) fn draw_block_border(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
+    // Nothing to paint: no empty artifact either.
+    let widths = match &style.collapsed_border {
+        Some(collapsed) => collapsed.widths,
+        None => style.border_widths,
+    };
+    if widths.iter().all(|w| w.to_f32() <= 0.0) {
+        return;
+    }
+    canvas.as_artifact(|canvas| draw_block_border_inner(canvas, style, x, y, w, h));
+}
+
+fn draw_block_border_inner(
     canvas: &mut Canvas<'_, '_>,
     style: &BlockStyle,
     x: f32,
@@ -3304,6 +3509,64 @@ pub(crate) mod run_tag_tests {
         assert!(wired.contains(&0x1234));
         assert!(wired.contains(&0xabcd));
         assert_eq!(wired.len(), 2);
+    }
+
+    #[test]
+    fn run_items_remember_their_page() {
+        let mut tc = TagCollector::new();
+        tc.record_run(1, ParagraphRunItem::Content(make_identifier()));
+        tc.set_current_page(2);
+        tc.record_run(1, ParagraphRunItem::Content(make_identifier()));
+        tc.record_run(5, ParagraphRunItem::Content(make_identifier()));
+        let pages = tc.take_run_pages();
+        assert_eq!(pages[&1], vec![0, 2]);
+        assert_eq!(pages[&5], vec![2]);
+    }
+
+    #[test]
+    fn an_inline_box_is_noted_after_the_runs_before_it() {
+        let mut tc = TagCollector::new();
+        tc.note_inline_box(1, 10);
+        tc.record_run(1, ParagraphRunItem::Content(make_identifier()));
+        tc.record_run(1, ParagraphRunItem::Content(make_identifier()));
+        tc.note_inline_box(1, 11);
+        let marks = tc.take_inline_boxes();
+        assert_eq!(
+            marks[&1],
+            vec![
+                InlineBoxMark {
+                    run_index: 0,
+                    content_id: 10,
+                    link: None,
+                    page: 0,
+                },
+                InlineBoxMark {
+                    run_index: 2,
+                    content_id: 11,
+                    link: None,
+                    page: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_link_remembers_every_page_it_is_drawn_on() {
+        let mut tc = TagCollector::new();
+        assert!(!tc.note_group_link(0x1234), "no group is open");
+        tc.set_open_group(Some(3));
+        assert!(tc.note_group_link(0x1234));
+        tc.set_current_page(1);
+        assert!(tc.note_group_link(0x1234));
+        assert!(tc.wired_link_span_ptrs().contains(&0x1234));
+        let links = tc.take_group_links();
+        assert_eq!(
+            links[&3],
+            vec![GroupLink {
+                span_ptr: 0x1234,
+                pages: [0, 1].into_iter().collect(),
+            }]
+        );
     }
 }
 

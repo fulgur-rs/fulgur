@@ -506,6 +506,17 @@ pub struct Drawables {
     pub li_lbl_ids: BTreeMap<NodeId, NodeId>,
     /// li NodeId → LBody 合成 NodeId（inline-root li の body タグ付け用）
     pub li_lbody_ids: BTreeMap<NodeId, NodeId>,
+    /// Reading order of the structure elements: each non-synthetic key
+    /// of `semantics` maps to its index in a pre-order walk of the boxes
+    /// under `<body>`, so anonymous blocks and `::before` / `::after`
+    /// nodes (whose ids Blitz allocates after the DOM) sort where they
+    /// are drawn. The synthetic `Lbl` / `LBody` ids are absent; they are
+    /// only siblings of each other and sort by id.
+    pub semantic_order: BTreeMap<NodeId, usize>,
+    /// `(colspan, rowspan)` of each `TD` / `TH` that spans more than one
+    /// column or row, parsed as browsers do (capped at 1000 columns and
+    /// 65534 rows).
+    pub table_cell_spans: BTreeMap<NodeId, (u32, u32)>,
 }
 
 impl Default for Drawables {
@@ -533,6 +544,8 @@ impl Default for Drawables {
             synthetic_id_counter: usize::MAX / 2,
             li_lbl_ids: BTreeMap::new(),
             li_lbody_ids: BTreeMap::new(),
+            semantic_order: BTreeMap::new(),
+            table_cell_spans: BTreeMap::new(),
         }
     }
 }

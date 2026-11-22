@@ -276,6 +276,76 @@ pub(super) fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
     }
 }
 
+/// The text alternative of a link, as tagged PDF needs it for the link
+/// annotation: `aria-label`, else the link's text, else its `title`, else
+/// the text alternatives of the images it holds (`alt` of an `<img>`,
+/// `aria-label` or `<title>` of an `<svg>`), so an image-only link is
+/// described by its image.
+fn link_text_alternative(
+    doc: &BaseDocument,
+    id: usize,
+    el: &blitz_dom::node::ElementData,
+) -> Option<String> {
+    let non_empty = |s: &str| {
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    };
+    if let Some(label) = crate::blitz_adapter::get_attr(el, "aria-label").and_then(non_empty) {
+        return Some(label);
+    }
+    if let Some(text) = non_empty(&crate::blitz_adapter::element_text(doc, id)) {
+        return Some(text);
+    }
+    if let Some(title) = crate::blitz_adapter::get_attr(el, "title").and_then(non_empty) {
+        return Some(title);
+    }
+    let mut images = Vec::new();
+    let mut stack = vec![id];
+    let mut visited = 0usize;
+    while let Some(cur) = stack.pop() {
+        visited += 1;
+        if visited > 10_000 {
+            break;
+        }
+        let Some(node) = doc.get_node(crate::blitz_adapter::bid(cur)) else {
+            continue;
+        };
+        if let Some(e) = node.element_data() {
+            let alt = match &*e.name.local {
+                "img" => crate::blitz_adapter::get_attr(e, "alt").and_then(non_empty),
+                "svg" => crate::blitz_adapter::get_attr(e, "aria-label")
+                    .and_then(non_empty)
+                    .or_else(|| {
+                        node.children.iter().find_map(|&c| {
+                            let child = doc.get_node(c)?;
+                            let is_title = child
+                                .element_data()
+                                .is_some_and(|t| &*t.name.local == "title");
+                            if is_title {
+                                non_empty(&child.text_content())
+                            } else {
+                                None
+                            }
+                        })
+                    }),
+                _ => None,
+            };
+            if let Some(alt) = alt {
+                images.push(alt);
+                continue;
+            }
+        }
+        // Children in document order: pushed reversed onto the stack.
+        stack.extend(
+            node.children
+                .iter()
+                .rev()
+                .map(|&c| crate::blitz_adapter::uid(c)),
+        );
+    }
+    (!images.is_empty()).then(|| images.join(" "))
+}
+
 /// Walk up from `start_id` to find the closest `<a href>` ancestor and
 /// build a `LinkSpan`.
 pub(super) fn resolve_enclosing_anchor(
@@ -300,8 +370,7 @@ pub(super) fn resolve_enclosing_anchor(
                 } else {
                     LinkTarget::External(Arc::new(href.to_string()))
                 };
-                let alt = crate::blitz_adapter::element_text(doc, id);
-                let alt_text = if alt.is_empty() { None } else { Some(alt) };
+                let alt_text = link_text_alternative(doc, id, el);
                 return Some((id, LinkSpan { target, alt_text }));
             }
         }
