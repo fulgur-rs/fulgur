@@ -1480,6 +1480,13 @@ impl EngineBuilder {
         self
     }
 
+    /// Start the page area at a whole CSS pixel, as Chromium does. See
+    /// `Config::snap_page_area_origin`.
+    pub fn snap_page_area_origin(mut self, snap: bool) -> Self {
+        self.config_builder = self.config_builder.snap_page_area_origin(snap);
+        self
+    }
+
     pub fn author(mut self, author: impl Into<String>) -> Self {
         self.config_builder = self.config_builder.author(author);
         self

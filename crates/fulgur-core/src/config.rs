@@ -269,6 +269,11 @@ pub struct Config {
     /// into the margins is not drawn. The root and body backgrounds and the
     /// `@page` margin boxes are not clipped. Off by default.
     pub clip_to_page_area: bool,
+    /// Move the page area to the nearest whole CSS pixel of the printed
+    /// page, keeping its exact width and height, as Chromium does when
+    /// printing: with 10 mm margins (37.8px) the content starts at 38px.
+    /// The `@page` margin boxes stay where they are. Off by default.
+    pub snap_page_area_origin: bool,
 }
 
 impl Default for Config {
@@ -294,6 +299,7 @@ impl Default for Config {
             scale: 1.0,
             shrink_to_fit: None,
             clip_to_page_area: false,
+            snap_page_area_origin: false,
         }
     }
 }
@@ -550,6 +556,12 @@ impl ConfigBuilder {
     /// See [`Config::clip_to_page_area`].
     pub fn clip_to_page_area(mut self, clip: bool) -> Self {
         self.config.clip_to_page_area = clip;
+        self
+    }
+
+    /// See [`Config::snap_page_area_origin`].
+    pub fn snap_page_area_origin(mut self, snap: bool) -> Self {
+        self.config.snap_page_area_origin = snap;
         self
     }
 

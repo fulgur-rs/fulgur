@@ -118,6 +118,7 @@ pub fn render_v2(
                     config,
                     drawables.root_dir_rtl,
                 );
+            let resolved_margin = page_area_origin(resolved_margin, config);
             // `frag.x` is html-relative (already includes body's x
             // offset from the fragmenter); only y needs `body_offset_pt`
             // applied, and only on page 0 (continuation pages are already
@@ -222,7 +223,16 @@ pub fn render_v2(
         let settings =
             krilla::page::PageSettings::from_wh(page_size.width * scale, page_size.height * scale)
                 .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
-        let content_area = resolved_content_area(page_size, resolved_margin);
+        // `resolved_margin` places the page area for the body content;
+        // the margin boxes use `box_margin`, the margins as given.
+        let box_margin = resolved_margin;
+        let box_content_width = resolved_content_area(page_size, box_margin).width;
+        let resolved_margin = page_area_origin(resolved_margin, config);
+        let content_area = crate::draw_primitives::Rect {
+            x: resolved_margin.left.as_pt(),
+            y: resolved_margin.top.as_pt(),
+            ..resolved_content_area(page_size, box_margin)
+        };
         let mut page = document.start_page_with(settings);
         if let Some(c) = bookmark_collector.as_mut() {
             c.set_current_page(page_idx);
@@ -350,14 +360,14 @@ pub fn render_v2(
                 link_run_node_id: None,
                 in_marked_content: false,
             };
-            let page_content_width = content_area.width.to_f32();
+            let page_content_width = box_content_width.to_f32();
             let any_margin_box_painted = margin_box_renderer.render_page(
                 &mut margin_canvas,
                 page_idx,
                 page_num,
                 page_count,
                 page_size,
-                resolved_margin,
+                box_margin,
                 page_content_width,
                 anchor_map,
             );
@@ -535,6 +545,27 @@ fn page_area_path(area: crate::draw_primitives::Rect) -> Option<krilla::geom::Pa
     let mut pb = krilla::geom::PathBuilder::new();
     pb.push_rect(rect);
     pb.finish()
+}
+
+/// The margins with the top and left moved to the nearest whole CSS px of
+/// the printed page when `Config::snap_page_area_origin` is on, so the page
+/// area starts there with its exact size. The margins are in layout pt,
+/// which `Config::scale` scales onto the printed page.
+fn page_area_origin(
+    margin: crate::config::Margin,
+    config: &crate::config::Config,
+) -> crate::config::Margin {
+    if !config.snap_page_area_origin {
+        return margin;
+    }
+    // 1 CSS px is 0.75pt on the printed page.
+    let px = 0.75 / config.scale;
+    let snap = |v: f32| (v / px).round() * px;
+    crate::config::Margin {
+        top: snap(margin.top),
+        left: snap(margin.left),
+        ..margin
+    }
 }
 
 fn resolved_content_area(
