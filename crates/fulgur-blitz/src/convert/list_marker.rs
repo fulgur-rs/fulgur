@@ -216,7 +216,7 @@ pub(super) fn extract_marker_lines(
                 let mut annotated = run
                     .visual_clusters()
                     .flat_map(|cluster| {
-                        let r = cluster.text_range();
+                        let r = crate::paragraph::cluster_glyph_text_range(&cluster);
                         cluster.glyphs().map(move |g| (r.clone(), g))
                     })
                     .skip(glyph_start);

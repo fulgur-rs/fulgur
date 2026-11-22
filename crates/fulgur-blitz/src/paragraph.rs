@@ -174,6 +174,27 @@ pub struct LinkSpan {
 /// Variation axis tags and values in user space (`wght` 700, `wdth` 75).
 pub type FontVariations = Vec<([u8; 4], f32)>;
 
+/// The byte range of text that a cluster's glyphs stand for.
+///
+/// Parley gives all of a ligature's glyphs to its first cluster and none to
+/// the clusters it continues over, so the first cluster's own range covers
+/// only the first letter: the `ffi` glyph of `office` would carry the text
+/// `f`, and the word would extract from the PDF as `ofce`. The range runs on
+/// over the continuation clusters, so the glyph carries the whole `ffi`.
+pub(crate) fn cluster_glyph_text_range<B: parley::Brush>(
+    cluster: &parley::Cluster<'_, B>,
+) -> std::ops::Range<usize> {
+    let mut range = cluster.text_range();
+    if cluster.is_ligature_start() {
+        let mut next = cluster.next_logical();
+        while let Some(continuation) = next.filter(|c| c.is_ligature_continuation()) {
+            range.end = range.end.max(continuation.text_range().end);
+            next = continuation.next_logical();
+        }
+    }
+    range
+}
+
 /// The variation axis values fontique chose for a parley run: when a font
 /// is variable, a requested `font-weight`, `font-stretch` or `font-style` is
 /// matched by setting its axes rather than by picking another file.
