@@ -3774,4 +3774,81 @@ mod tests {
         clear_subtree_cache_inner(&mut doc, 9_999_999, 0);
         // No panic ⇒ the absent-node guard fired correctly.
     }
+
+    #[test]
+    fn traverse_partial_tree_delegation_covers_child_accessors() {
+        let html = r#"<!doctype html><html><body><p>hello</p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+
+        let root_id = NodeId::from(tree.doc.root_element().id);
+
+        // child_count — delegates to doc; root has at least one child (body)
+        let count = tree.child_count(root_id);
+        assert!(
+            count > 0,
+            "root should have at least one child (body), got 0"
+        );
+
+        // get_child_id — must return a child distinct from the root
+        let first_child = tree.get_child_id(root_id, 0);
+        assert_ne!(usize::from(first_child), usize::from(root_id));
+
+        // child_ids — iterator must yield exactly `count` entries
+        let ids: Vec<NodeId> = tree.child_ids(root_id).collect();
+        assert_eq!(ids.len(), count, "child_ids length must match child_count");
+        assert_eq!(
+            ids[0], first_child,
+            "first child_ids entry must equal get_child_id(0)"
+        );
+    }
+
+    #[test]
+    fn cache_tree_delegation_covers_clear_store_and_get() {
+        let html = r#"<!doctype html><html><body><p>x</p></body></html>"#;
+        let mut doc = crate::blitz_adapter::parse(html, 400.0, &[]);
+        crate::blitz_adapter::resolve(&mut doc);
+
+        let column_styles = crate::column_css::ColumnStyleTable::new();
+        let root_id = NodeId::from(doc.root_element().id);
+        let mut tree = FulgurLayoutTree::new(&mut doc, &column_styles);
+
+        let known: Size<Option<f32>> = Size {
+            width: None,
+            height: None,
+        };
+        let avail: Size<AvailableSpace> = Size {
+            width: AvailableSpace::MaxContent,
+            height: AvailableSpace::MaxContent,
+        };
+
+        // cache_clear must not panic on any node
+        tree.cache_clear(root_id);
+
+        // cache_get — exercises the delegation path before any store
+        let _ = tree.cache_get(root_id, known, avail, RunMode::PerformLayout);
+
+        // cache_store — write a layout result to the cache
+        let output = taffy::LayoutOutput {
+            size: Size {
+                width: 200.0,
+                height: 100.0,
+            },
+            content_size: Size {
+                width: 200.0,
+                height: 80.0,
+            },
+            first_baselines: Point::NONE,
+            top_margin: CollapsibleMarginSet::ZERO,
+            bottom_margin: CollapsibleMarginSet::ZERO,
+            margins_can_collapse_through: false,
+        };
+        tree.cache_store(root_id, known, avail, RunMode::PerformLayout, output);
+
+        // cache_get after store — exercises the cache-hit retrieval path
+        let _ = tree.cache_get(root_id, known, avail, RunMode::PerformLayout);
+    }
 }
