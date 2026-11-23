@@ -1659,6 +1659,46 @@ fn get_text_color(doc: &BaseDocument, node_id: usize) -> [u8; 4] {
     [0, 0, 0, 255] // Default: black
 }
 
+/// The background colors of the inline elements a text run is in, outermost
+/// first: the run's node and its ancestors while they are `display: inline`
+/// (an inline root, an inline-block or a block ends the walk, since those
+/// paint their own box). Transparent backgrounds are left out.
+fn get_inline_backgrounds(doc: &BaseDocument, node_id: usize) -> Arc<[[u8; 4]]> {
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    let mut colors = Vec::new();
+    let mut node = doc.get_node(crate::blitz_adapter::bid(node_id));
+    let mut depth = 0;
+    while let Some(current) = node {
+        if depth >= crate::MAX_DOM_DEPTH {
+            break;
+        }
+        depth += 1;
+        // Text nodes carry no styles of their own: their element does.
+        if current.is_element() {
+            let Some(styles) = current.primary_styles() else {
+                break;
+            };
+            let display = styles.clone_display();
+            if display.outside() != DisplayOutside::Inline
+                || display.inside() != DisplayInside::Flow
+            {
+                break;
+            }
+            let rgba = style::absolute_to_rgba(
+                styles
+                    .slow_clone_background_color()
+                    .resolve_to_absolute(&styles.clone_color()),
+            );
+            if rgba[3] > 0 {
+                colors.push(rgba);
+            }
+        }
+        node = current.parent_node();
+    }
+    colors.reverse();
+    colors.into()
+}
+
 /// Get text-decoration properties from a DOM node's computed styles.
 fn get_text_decoration(doc: &BaseDocument, node_id: usize) -> TextDecoration {
     if let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id))

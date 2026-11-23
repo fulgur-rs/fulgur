@@ -496,6 +496,11 @@ pub struct ShapedGlyphRun {
     /// glyphs' text ranges give the run's place in reading order. A list
     /// marker put at the start of the first line has text of its own.
     pub from_paragraph_text: bool,
+    /// The background colors of the inline elements the run is in (`<span>`,
+    /// `<mark>`), outermost first, up to the inline root (whose background is
+    /// its block's). Each is drawn behind the run's glyphs over the font's
+    /// ascent and descent, as Chromium paints an inline box's content area.
+    pub inline_backgrounds: Arc<[[u8; 4]]>,
 }
 
 /// Vertical alignment for inline replaced elements (images).
@@ -832,6 +837,103 @@ fn draw_decoration_line(
         }
     }
     canvas.surface.set_stroke(None);
+}
+
+/// One inline element's background on a line: contiguous runs at the same
+/// nesting depth with the same color, over the tallest ascent and descent.
+struct BackgroundSpan {
+    depth: usize,
+    color: [u8; 4],
+    x: f32,
+    end: f32,
+    top: f32,
+    bottom: f32,
+}
+
+/// Draw the backgrounds of the inline elements on a line (`<span>`,
+/// `<mark>`) behind its glyphs, outermost first. Each covers its runs'
+/// advance and their fonts' ascent and descent, the content area Chromium
+/// paints for an inline box. Adjacent runs of one element are merged, so no
+/// seam shows between them.
+fn draw_line_backgrounds(
+    canvas: &mut Canvas<'_, '_>,
+    items: &[LineItem],
+    x: crate::units::Pt,
+    baseline_y: crate::units::Pt,
+) {
+    let mut spans: Vec<BackgroundSpan> = Vec::new();
+    for item in items {
+        let LineItem::Text(run) = item else {
+            continue;
+        };
+        if run.inline_backgrounds.is_empty() {
+            continue;
+        }
+        let font_size = run.font_size.to_f32();
+        let (ascent, descent) = skrifa::FontRef::from_index(run.font_data.as_ref(), run.font_index)
+            .map(|font| {
+                let metrics = font.metrics(
+                    skrifa::instance::Size::new(font_size),
+                    skrifa::instance::LocationRef::default(),
+                );
+                (metrics.ascent, -metrics.descent)
+            })
+            .unwrap_or((font_size * 0.8, font_size * 0.2));
+        let run_x = (x + run.x_offset).to_f32();
+        let run_end = run_x
+            + run
+                .glyphs
+                .iter()
+                .map(|g| g.x_advance * font_size)
+                .sum::<f32>();
+        let top = baseline_y.to_f32() - ascent;
+        let bottom = baseline_y.to_f32() + descent;
+        for (depth, &color) in run.inline_backgrounds.iter().enumerate() {
+            let merged = spans.iter_mut().rev().find(|span| {
+                span.depth == depth && span.color == color && (run_x - span.end).abs() < 0.5
+            });
+            match merged {
+                Some(span) => {
+                    span.end = run_end;
+                    span.top = span.top.min(top);
+                    span.bottom = span.bottom.max(bottom);
+                }
+                None => spans.push(BackgroundSpan {
+                    depth,
+                    color,
+                    x: run_x,
+                    end: run_end,
+                    top,
+                    bottom,
+                }),
+            }
+        }
+    }
+    if spans.is_empty() {
+        return;
+    }
+    spans.sort_by_key(|span| span.depth);
+    canvas.as_artifact(|canvas| {
+        for span in &spans {
+            let Some(rect) = krilla::geom::Rect::from_ltrb(span.x, span.top, span.end, span.bottom)
+            else {
+                continue;
+            };
+            let [r, g, b, a] = span.color;
+            canvas.surface.set_fill(Some(krilla::paint::Fill {
+                paint: krilla::color::rgb::Color::new(r, g, b).into(),
+                opacity: krilla::num::NormalizedF32::new(a as f32 / 255.0)
+                    .unwrap_or(krilla::num::NormalizedF32::ONE),
+                rule: Default::default(),
+            }));
+            canvas.surface.set_stroke(None);
+            let mut path = krilla::geom::PathBuilder::new();
+            path.push_rect(rect);
+            if let Some(path) = path.finish() {
+                canvas.surface.draw_path(&path);
+            }
+        }
+    });
 }
 
 /// A contiguous span of runs sharing the same decoration attributes.
@@ -1235,6 +1337,8 @@ pub fn draw_shaped_lines(
         let line_top_abs = y + line_top;
         let baseline_y = y + line.baseline;
 
+        // Inline backgrounds go beneath the line's glyphs.
+        draw_line_backgrounds(canvas, &line.items, x, baseline_y);
         if let Some(tracker) = run_region.as_mut() {
             tracker.begin_line(canvas, &line.items);
         }
@@ -2118,6 +2222,7 @@ mod tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         };
         let text = LineItem::Text(glyph_run);
         assert!(format!("{:?}", text).contains("Text"));
@@ -2163,6 +2268,7 @@ mod tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         };
         let mut line = text_line(16.0, 12.0);
         line.items.push(LineItem::Text(run));
@@ -2380,6 +2486,7 @@ mod link_span_tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         };
         assert!(run.link.is_none());
     }
@@ -3043,6 +3150,7 @@ mod draw_decoration_direct_tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         };
 
         let items = vec![

@@ -746,6 +746,7 @@ pub(super) fn push_glyph_runs(
     let node_id = crate::blitz_adapter::uid(glyph_run.style().brush.id);
     let color = get_text_color(doc, node_id);
     let decoration = get_text_decoration(doc, node_id);
+    let inline_backgrounds = get_inline_backgrounds(doc, node_id);
     let link = ctx.link_cache.lookup(doc, node_id);
     let lang = crate::blitz_adapter::effective_lang(doc, node_id, langs)
         .filter(|lang| Some(&**lang) != paragraph_lang);
@@ -833,6 +834,7 @@ pub(super) fn push_glyph_runs(
                 link: glyph_link,
                 lang: lang.clone(),
                 from_paragraph_text: true,
+                inline_backgrounds: Arc::clone(&inline_backgrounds),
             });
         }
         if let Some(run) = current.as_mut() {
@@ -945,6 +947,7 @@ mod tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         })
     }
 

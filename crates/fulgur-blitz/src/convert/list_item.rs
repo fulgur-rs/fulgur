@@ -676,6 +676,7 @@ mod tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         });
         assert!(inject_marker_into_first_paragraph(&mut out, mark, text_marker).is_ok());
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
@@ -778,6 +779,7 @@ mod tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         })
     }
 
@@ -910,6 +912,7 @@ mod tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         });
         assert!(inject_marker_into_first_paragraph(&mut out, mark, zero_glyph_marker).is_ok());
         // shift = 0 → existing InlineBox stays at x_offset=7.

@@ -5551,6 +5551,7 @@ mod tests {
             link,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         }
     }
 
@@ -9042,6 +9043,7 @@ mod struct_tree_tests {
             link: None,
             lang: None,
             from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
         };
         crate::drawables::ParagraphEntry {
             lines: vec![crate::paragraph::ShapedLine {
