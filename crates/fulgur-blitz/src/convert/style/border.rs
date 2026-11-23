@@ -65,10 +65,11 @@ pub(super) fn apply_to(style: &mut BlockStyle, ctx: &StyleContext<'_>) {
 /// The border of a table or table cell in the collapsing border model
 /// (CSS 2.1 §17.6.2).
 ///
-/// Blitz lays a `border-collapse: collapse` table out as a grid with uniform
-/// gutters between the cells, as wide as the widest cell border, and a table
-/// border around them at least that wide, and gives the cells no border of
-/// their own. Here each cell draws its
+/// Blitz lays a `border-collapse: collapse` table out as a grid with gutters
+/// between the cells: between columns uniform, as wide as the widest cell
+/// border; between rows one per line, as wide as the widest border of the
+/// cells meeting it (`TableContext::row_lines`). The table border around them
+/// is at least as wide, and the cells get no border of their own. Here each cell draws its
 /// own computed border and the table its own, centred on the gutter (the
 /// edge gutter for the table), so cells with different borders, or none,
 /// keep them. At the table's edge a table border at least as wide as the
@@ -133,7 +134,22 @@ pub(super) fn apply_collapsed(style: &mut BlockStyle, node: &Node, ctx: &StyleCo
             cell.location.y + cell.size.height >= outer.height - edges[2] - EPS,
             cell.location.x <= edges[3] + EPS,
         ];
-        let inner = [gap_y, gap_x, gap_y, gap_x];
+        // The lines above and below the cell (row tracks of their own in Blitz's
+        // grid); the gap between rows is 0.
+        let (line_above, line_below) = context
+            .cells
+            .iter()
+            .find(|c| c.node_id == node.id)
+            .and_then(|c| {
+                let top = c.row as usize;
+                let bottom = (top + c.rowspan as usize).min(context.rows.len());
+                Some((
+                    *context.row_lines.get(top)?,
+                    *context.row_lines.get(bottom)?,
+                ))
+            })
+            .unwrap_or((gap_y, gap_y));
+        let inner = [line_above, gap_x, line_below, gap_x];
         for i in 0..4 {
             if !on_edge[i] {
                 gutters[i] = inner[i];
