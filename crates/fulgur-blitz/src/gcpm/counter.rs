@@ -1273,7 +1273,8 @@ mod tests {
         assert_eq!(format_counter(1, CounterStyle::LowerRoman), "i");
         assert_eq!(format_counter(14, CounterStyle::LowerRoman), "xiv");
         assert_eq!(format_counter(3999, CounterStyle::LowerRoman), "mmmcmxcix");
-        // Out-of-range: to_roman returns None → unwrap_or_else fallback.
+        // Out-of-range: to_roman returns None → unwrap_or_else fallback at L601.
+        // (3999 above is in-range and tests the upper success boundary.)
         assert_eq!(format_counter(0, CounterStyle::LowerRoman), "0");
         assert_eq!(format_counter(4000, CounterStyle::LowerRoman), "4000");
         assert_eq!(format_counter(-1, CounterStyle::LowerRoman), "-1");
