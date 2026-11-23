@@ -1272,6 +1272,11 @@ mod tests {
     fn test_format_counter_lower_roman() {
         assert_eq!(format_counter(1, CounterStyle::LowerRoman), "i");
         assert_eq!(format_counter(14, CounterStyle::LowerRoman), "xiv");
+        assert_eq!(format_counter(3999, CounterStyle::LowerRoman), "mmmcmxcix");
+        // Out-of-range: to_roman returns None → unwrap_or_else fallback.
+        assert_eq!(format_counter(0, CounterStyle::LowerRoman), "0");
+        assert_eq!(format_counter(4000, CounterStyle::LowerRoman), "4000");
+        assert_eq!(format_counter(-1, CounterStyle::LowerRoman), "-1");
     }
 
     #[test]
@@ -1287,6 +1292,10 @@ mod tests {
     fn test_format_counter_lower_alpha() {
         assert_eq!(format_counter(1, CounterStyle::LowerAlpha), "a");
         assert_eq!(format_counter(26, CounterStyle::LowerAlpha), "z");
+        assert_eq!(format_counter(27, CounterStyle::LowerAlpha), "aa");
+        // Out-of-range: to_alpha returns None for value < 1 → unwrap_or_else fallback.
+        assert_eq!(format_counter(0, CounterStyle::LowerAlpha), "0");
+        assert_eq!(format_counter(-1, CounterStyle::LowerAlpha), "-1");
     }
 
     #[test]
