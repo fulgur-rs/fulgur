@@ -3085,17 +3085,55 @@ impl RunningElementPass {
 }
 
 impl DomPass for RunningElementPass {
-    fn apply(&self, doc: &mut HtmlDocument, _ctx: &PassContext<'_>) {
+    fn apply(&self, doc: &mut HtmlDocument, ctx: &PassContext<'_>) {
         if self.mappings.is_empty() {
             return;
         }
         let root = doc.root_element();
         let root_id = root.id;
         self.walk_tree(doc, crate::blitz_adapter::uid(root_id), 0);
+        self.hide_in_body(doc, ctx);
     }
 }
 
+/// Attribute set on every registered running element, matched by
+/// [`RUNNING_HIDE_CSS`].
+const RUNNING_ATTR: &str = "data-fulgur-running";
+
+/// Takes running elements out of the body. AssetBundle and `<link>` CSS get
+/// this from `cleaned_css` (`position: running()` becomes `display: none`),
+/// but the text of an inline `<style>` is never rewritten, so without it a
+/// running element declared there is drawn in its margin box and in the body.
+const RUNNING_HIDE_CSS: &str = "[data-fulgur-running]{display:none !important}";
+
 impl RunningElementPass {
+    /// Marks each registered element with [`RUNNING_ATTR`] and injects
+    /// [`RUNNING_HIDE_CSS`]. Runs after `walk_tree`, so the serialized HTML
+    /// kept for the margin boxes does not carry the attribute.
+    fn hide_in_body(&self, doc: &mut HtmlDocument, ctx: &PassContext<'_>) {
+        let node_ids: Vec<usize> = self.store.borrow().node_ids().collect();
+        if node_ids.is_empty() {
+            return;
+        }
+        for node_id in node_ids {
+            // Through the mutator, so the element is restyled (see CounterPass).
+            if doc
+                .get_node(crate::blitz_adapter::bid(node_id))
+                .is_some_and(|n| n.element_data().is_some())
+            {
+                doc.mutate().set_attribute(
+                    crate::blitz_adapter::bid(node_id),
+                    make_attr_name(RUNNING_ATTR),
+                    "",
+                );
+            }
+        }
+        InjectCssPass {
+            css: RUNNING_HIDE_CSS.to_string(),
+        }
+        .apply(doc, ctx);
+    }
+
     fn walk_tree(&self, doc: &HtmlDocument, node_id: usize, depth: usize) {
         if depth >= MAX_DOM_DEPTH {
             return;

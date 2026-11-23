@@ -53,6 +53,11 @@ impl RunningElementStore {
         self.node_to_instance.get(&node_id).copied()
     }
 
+    /// The DOM node ids of every registered running element, in node id order.
+    pub fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.node_to_instance.keys().copied()
+    }
+
     /// Get the serialized HTML for a given instance_id.
     pub fn get_html(&self, instance_id: usize) -> Option<&str> {
         self.instances.get(instance_id).map(|i| i.html.as_str())
