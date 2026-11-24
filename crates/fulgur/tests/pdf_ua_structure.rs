@@ -419,3 +419,39 @@ fn headings_must_not_skip_a_level() {
         None
     );
 }
+
+#[test]
+fn a_table_caption_is_a_caption_element() {
+    // `<caption>` is a Caption structure element, holding the caption's text,
+    // beside its table, rather than an anonymous paragraph.
+    let html =
+        format!("{PAGE}<table><caption>Quarterly totals</caption><tr><td>1</td></tr></table>");
+    let pdf = render_tagged(&html);
+    let doc = load(&pdf);
+    let elements = struct_elements(&doc);
+    let captions: Vec<&Dictionary> = elements
+        .iter()
+        .filter(|(_, d)| name_of(d, b"S").as_deref() == Some("Caption"))
+        .map(|(_, d)| *d)
+        .collect();
+    assert_eq!(captions.len(), 1, "one Caption element");
+    assert_eq!(kid_kinds(&doc, captions[0]), ["MC"], "it holds the text");
+    let parent_kids: Vec<Vec<String>> = elements
+        .iter()
+        .filter(|(_, d)| kid_kinds(&doc, d).contains(&"Caption".to_string()))
+        .map(|(_, d)| kid_kinds(&doc, d))
+        .collect();
+    assert_eq!(
+        parent_kids,
+        [["Caption", "Table"]],
+        "Caption before its Table"
+    );
+}
+
+#[test]
+fn a_table_with_a_caption_passes_pdf_ua() {
+    let html = format!(
+        "{PAGE}<table><caption>Quarterly totals</caption><tr><th>Q</th></tr><tr><td>1</td></tr></table>"
+    );
+    render_ua(&html).expect("PDF/UA validation");
+}

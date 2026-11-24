@@ -26,11 +26,15 @@ pub type NodeId = usize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PdfTag {
     P,
-    H { level: u8 },
+    H {
+        level: u8,
+    },
     Div,
     Span,
     Figure,
-    L { numbering: ListNumbering },
+    L {
+        numbering: ListNumbering,
+    },
     Lbl,
     LBody,
     Li,
@@ -39,8 +43,12 @@ pub enum PdfTag {
     TBody,
     TFoot,
     Tr,
-    Th { scope: TableHeaderScope },
+    Th {
+        scope: TableHeaderScope,
+    },
     Td,
+    /// A table's caption (`<caption>`), the text that describes the table.
+    Caption,
     Link,
 }
 
@@ -123,6 +131,7 @@ pub fn classify_element(local_name: &str) -> Option<PdfTag> {
             scope: TableHeaderScope::Both,
         }),
         "td" => Some(PdfTag::Td),
+        "caption" => Some(PdfTag::Caption),
         _ => None,
     }
 }

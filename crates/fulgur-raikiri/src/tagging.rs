@@ -523,6 +523,7 @@ fn krilla_tag(tag: &PdfTag, title: Option<String>, alt: Option<String>) -> TagKi
         })
         .into(),
         PdfTag::Td => Tag::<kind::TD>::TD.into(),
+        PdfTag::Caption => Tag::<kind::Caption>::Caption.into(),
         PdfTag::Link => Tag::<kind::Link>::Link.into(),
     }
 }
