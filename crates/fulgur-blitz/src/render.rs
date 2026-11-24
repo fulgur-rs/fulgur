@@ -541,7 +541,7 @@ fn validation_error_message(
             V::EmbeddedPDF(_) => "the document embeds another PDF".to_string(),
             V::NoDocumentLanguage => "the document has no language; set <html lang>".to_string(),
             V::MissingAltText(_) => {
-                "an image has no alt text; give <img> an alt, <svg> an aria-label or <title>, \
+                "an image has no alt text; give <img> an alt, <svg> an aria-label, aria-labelledby or <title>, \
                  or mark a decorative one with alt=\"\" or aria-hidden=\"true\""
                     .to_string()
             }

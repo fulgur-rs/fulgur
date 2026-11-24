@@ -455,3 +455,47 @@ fn a_table_with_a_caption_passes_pdf_ua() {
     );
     render_ua(&html).expect("PDF/UA validation");
 }
+
+/// The `/Alt` of every Figure structure element.
+fn figure_alts(doc: &Document) -> Vec<String> {
+    struct_elements(doc)
+        .into_iter()
+        .filter(|(_, d)| name_of(d, b"S").as_deref() == Some("Figure"))
+        .filter_map(|(_, d)| match d.get(b"Alt").ok()? {
+            Object::String(bytes, _) => Some(if bytes.starts_with(&[0xFE, 0xFF]) {
+                let units: Vec<u16> = bytes[2..]
+                    .chunks(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&units)
+            } else {
+                String::from_utf8_lossy(bytes).into_owned()
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_svg_labelled_by_another_element_takes_its_text() {
+    // `aria-labelledby` names the element whose text is the label; an SVG
+    // with only that has a text alternative, so PDF/UA accepts it.
+    let pdf = render_ua(&format!(
+        "{PAGE}<h1>Report</h1><p id=\"cap\">Monthly  sales</p>\
+         <svg role=\"img\" aria-labelledby=\"cap\" width=\"20\" height=\"20\">\
+         <rect width=\"20\" height=\"20\"/></svg>"
+    ))
+    .expect("PDF/UA accepts an SVG labelled by another element");
+    assert_eq!(figure_alts(&load(&pdf)), ["Monthly sales"]);
+}
+
+#[test]
+fn aria_labelledby_comes_before_aria_label_and_joins_its_ids() {
+    let pdf = render_ua(&format!(
+        "{PAGE}<h1>Report</h1><span id=\"a\">Sales</span> <span id=\"b\">2026</span>\
+         <svg role=\"img\" aria-labelledby=\"a missing b\" aria-label=\"ignored\" \
+         width=\"20\" height=\"20\"><rect width=\"20\" height=\"20\"/></svg>"
+    ))
+    .expect("PDF/UA");
+    assert_eq!(figure_alts(&load(&pdf)), ["Sales 2026"]);
+}

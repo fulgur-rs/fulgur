@@ -2189,6 +2189,34 @@ pub fn get_attr<'a>(elem: &'a blitz_dom::node::ElementData, name: &str) -> Optio
 /// Without this, `<a><div>foo</div><div>bar</div></a>` would collapse to
 /// `"foobar"` — meaningless for screen readers. Spaces are deduped by
 /// checking the accumulator's trailing char before pushing.
+/// The text of the elements an element's `aria-labelledby` names, joined by a
+/// space, when it says something. ARIA's accessible name computation takes it
+/// before `aria-label` (accname 1.2 §4.3.2, step 2B). Ids that name no element
+/// are skipped.
+pub fn aria_labelledby_text(
+    doc: &blitz_dom::BaseDocument,
+    elem: &blitz_dom::node::ElementData,
+) -> Option<String> {
+    let ids = get_attr(elem, "aria-labelledby")?;
+    let mut parts = Vec::new();
+    for id in ids.split_ascii_whitespace() {
+        let mut selector = String::from("#");
+        if cssparser::serialize_identifier(id, &mut selector).is_err() {
+            continue;
+        }
+        let Ok(Some(target)) = doc.query_selector(&selector) else {
+            continue;
+        };
+        let text = element_text(doc, uid(target));
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !text.is_empty() {
+            parts.push(text);
+        }
+    }
+    let label = parts.join(" ");
+    (!label.is_empty()).then_some(label)
+}
+
 pub fn element_text(doc: &blitz_dom::BaseDocument, node_id: usize) -> String {
     fn is_block_boundary_tag(tag: &str) -> bool {
         matches!(

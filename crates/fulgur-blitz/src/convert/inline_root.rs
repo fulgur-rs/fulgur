@@ -277,7 +277,7 @@ pub(super) fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
 }
 
 /// The text alternative of a link, as tagged PDF needs it for the link
-/// annotation: `aria-label`, else the link's text, else its `title`, else
+/// annotation: `aria-labelledby` / `aria-label`, else the link's text, else its `title`, else
 /// the text alternatives of the images it holds (`alt` of an `<img>`,
 /// `aria-label` or `<title>` of an `<svg>`), so an image-only link is
 /// described by its image.
@@ -290,7 +290,9 @@ fn link_text_alternative(
         let s = s.trim();
         (!s.is_empty()).then(|| s.to_string())
     };
-    if let Some(label) = crate::blitz_adapter::get_attr(el, "aria-label").and_then(non_empty) {
+    if let Some(label) = crate::blitz_adapter::aria_labelledby_text(doc, el)
+        .or_else(|| crate::blitz_adapter::get_attr(el, "aria-label").and_then(non_empty))
+    {
         return Some(label);
     }
     if let Some(text) = non_empty(&crate::blitz_adapter::element_text(doc, id)) {
@@ -313,8 +315,8 @@ fn link_text_alternative(
         if let Some(e) = node.element_data() {
             let alt = match &*e.name.local {
                 "img" => crate::blitz_adapter::get_attr(e, "alt").and_then(non_empty),
-                "svg" => crate::blitz_adapter::get_attr(e, "aria-label")
-                    .and_then(non_empty)
+                "svg" => crate::blitz_adapter::aria_labelledby_text(doc, e)
+                    .or_else(|| crate::blitz_adapter::get_attr(e, "aria-label").and_then(non_empty))
                     .or_else(|| {
                         node.children.iter().find_map(|&c| {
                             let child = doc.get_node(c)?;

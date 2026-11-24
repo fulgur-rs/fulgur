@@ -622,16 +622,19 @@ fn aria_role(elem: &blitz_dom::node::ElementData) -> Option<String> {
         .map(str::to_ascii_lowercase)
 }
 
+/// The element's label: the text of what `aria-labelledby` names, else
 /// `aria-label`, trimmed, when it says something.
-fn aria_label(elem: &blitz_dom::node::ElementData) -> Option<String> {
-    get_attr(elem, "aria-label")
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned)
+fn aria_label(doc: &BaseDocument, elem: &blitz_dom::node::ElementData) -> Option<String> {
+    crate::blitz_adapter::aria_labelledby_text(doc, elem).or_else(|| {
+        get_attr(elem, "aria-label")
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// The text alternative of an `<img>` (`alt`) or an inline `<svg>`
-/// (`aria-label`, else its `<title>` child).
+/// (`aria-labelledby` / `aria-label`, else its `<title>` child).
 fn svg_or_img_alt(
     doc: &BaseDocument,
     node: &blitz_dom::Node,
@@ -640,7 +643,7 @@ fn svg_or_img_alt(
     if &*elem.name.local != "svg" {
         return get_attr(elem, "alt").map(str::to_owned);
     }
-    if let Some(label) = aria_label(elem) {
+    if let Some(label) = aria_label(doc, elem) {
         return Some(label);
     }
     node.children.iter().find_map(|&child| {
@@ -729,7 +732,7 @@ fn semantic_role(
     let role = aria_role(elem);
     let presentational = matches!(role.as_deref(), Some("presentation" | "none"));
     let img_label = (role.as_deref() == Some("img"))
-        .then(|| aria_label(elem))
+        .then(|| aria_label(doc, elem))
         .flatten();
     // `visibility: hidden` / `collapse` takes an image out of the
     // accessibility tree (CSS 2 §11.2 + WAI-ARIA; matched by Chromium and
