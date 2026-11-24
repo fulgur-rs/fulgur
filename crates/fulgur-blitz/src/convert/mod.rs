@@ -1004,6 +1004,25 @@ fn convert_node_inner(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) {
+    // An `<a href>` laid out as a box of its own (block, inline-block, flex,
+    // ...) is clickable over its whole box, as in browsers, not only over its
+    // text.
+    if let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id))
+        && node
+            .element_data()
+            .is_some_and(|e| &*e.name.local == "a" && get_attr(e, "href").is_some())
+        && node.primary_styles().is_some_and(|s| {
+            use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+            let display = s.clone_display();
+            !display.is_none()
+                && !(display.outside() == DisplayOutside::Inline
+                    && display.inside() == DisplayInside::Flow)
+        })
+        && let Some(link) = ctx.link_cache.lookup(doc, node_id)
+    {
+        out.block_links.insert(node_id, link);
+    }
+
     // List-item dispatch: outside marker / display:list-item fallback / inside marker.
     if list_item::try_convert(doc, node_id, ctx, depth, out) {
         return;

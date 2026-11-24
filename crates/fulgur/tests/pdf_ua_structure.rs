@@ -549,3 +549,49 @@ fn a_block_image_link_is_in_a_link_element() {
     assert_eq!(links, [["OBJR"]]);
     assert_each_annotation_in_one_link(&pdf);
 }
+
+/// The `/Rect` height of each link annotation, in points.
+fn link_rect_heights(doc: &Document) -> Vec<f32> {
+    link_annotations(doc)
+        .iter()
+        .filter_map(|(_, d)| {
+            let Ok(Object::Array(r)) = d.get(b"Rect") else {
+                return None;
+            };
+            let n = |o: &Object| {
+                o.as_float()
+                    .ok()
+                    .or_else(|| o.as_i64().ok().map(|i| i as f32))
+            };
+            Some(n(&r[3])? - n(&r[1])?)
+        })
+        .collect()
+}
+
+#[test]
+fn a_block_link_is_clickable_over_its_whole_box() {
+    // `<a href style="display:block">` is one link area over its border box
+    // (60px of padding here), not only over its text line.
+    let html = format!(
+        "{PAGE}<h1>T</h1><a href=\"https://example.com\" \
+         style=\"display:block;padding:30px 10px;background:#eee\">Card</a>"
+    );
+    let pdf = Engine::builder().build().render(&html).expect("render");
+    let heights = link_rect_heights(&load(&pdf));
+    assert_eq!(heights.len(), 1, "{heights:?}");
+    assert!(heights[0] > 50.0, "{heights:?}");
+    render_ua(&html).expect("PDF/UA accepts a block link");
+    assert_each_annotation_in_one_link(&render_ua(&html).unwrap());
+}
+
+#[test]
+fn an_inline_block_link_is_clickable_over_its_whole_box() {
+    let html = format!(
+        "{PAGE}<h1>T</h1><p><a href=\"https://example.com\" \
+         style=\"display:inline-block;padding:30px 10px\">Button</a></p>"
+    );
+    let pdf = Engine::builder().build().render(&html).expect("render");
+    let heights = link_rect_heights(&load(&pdf));
+    assert_eq!(heights.len(), 1, "{heights:?}");
+    assert!(heights[0] > 50.0, "{heights:?}");
+}
