@@ -258,6 +258,7 @@ pub(super) fn extract_marker_lines(
                         lang: None,
                         from_paragraph_text: false,
                         inline_backgrounds: Default::default(),
+                        figure: None,
                     }));
                 }
             }
@@ -391,6 +392,7 @@ pub(super) fn shape_marker_with_skrifa(
         lang: None,
         from_paragraph_text: false,
         inline_backgrounds: Default::default(),
+        figure: None,
     })
 }
 
@@ -527,6 +529,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         let line = ShapedLine {
             height: 12.0.as_pt(),
@@ -747,6 +750,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         let line = ShapedLine {
             height: 12.0_f32.as_pt(),
@@ -790,6 +794,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         let line = ShapedLine {
             height: 12.0_f32.as_pt(),

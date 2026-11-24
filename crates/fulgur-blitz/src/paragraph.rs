@@ -501,6 +501,10 @@ pub struct ShapedGlyphRun {
     /// its block's). Each is drawn behind the run's glyphs over the font's
     /// ascent and descent, as Chromium paints an inline box's content area.
     pub inline_backgrounds: Arc<[[u8; 4]]>,
+    /// The inline element with `role="img"` the run is in (`<span role="img"
+    /// aria-label="4 of 5 stars">★★★★☆</span>`), when there is one: its text
+    /// is the content of that element's `Figure`.
+    pub figure: Option<usize>,
 }
 
 /// Vertical alignment for inline replaced elements (images).
@@ -1085,6 +1089,7 @@ pub struct InlineBoxRenderCtx<'a> {
 struct RegionKey {
     link: Option<usize>,
     lang: Option<Arc<str>>,
+    figure: Option<usize>,
 }
 
 /// The places of a line's items in reading order, when that is not the
@@ -1289,12 +1294,16 @@ impl RunRegionTracker {
             .open_identifier
             .take()
             .expect("open_identifier set whenever open_key is");
-        let item = match key.link {
-            Some(ptr) => crate::draw_primitives::ParagraphRunItem::LinkContent {
+        let item = match (key.link, key.figure) {
+            (Some(ptr), _) => crate::draw_primitives::ParagraphRunItem::LinkContent {
                 span_ptr: ptr,
                 identifier: id,
             },
-            None => crate::draw_primitives::ParagraphRunItem::Content(id),
+            (None, Some(node_id)) => crate::draw_primitives::ParagraphRunItem::FigureContent {
+                node_id,
+                identifier: id,
+            },
+            (None, None) => crate::draw_primitives::ParagraphRunItem::Content(id),
         };
         if let Some(line) = self.reordered.as_mut() {
             line.deferred.push((line.place, Deferred::Run(item)));
@@ -1354,6 +1363,7 @@ pub fn draw_shaped_lines(
                             RegionKey {
                                 link: link_span_ptr(run.link.as_ref()),
                                 lang: run.lang.clone(),
+                                figure: run.figure,
                             },
                         );
                     }
@@ -1443,6 +1453,7 @@ pub fn draw_shaped_lines(
                             RegionKey {
                                 link: link_span_ptr(img.link.as_ref()),
                                 lang: None,
+                                figure: None,
                             },
                         );
                     }
@@ -2223,6 +2234,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         let text = LineItem::Text(glyph_run);
         assert!(format!("{:?}", text).contains("Text"));
@@ -2269,6 +2281,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         let mut line = text_line(16.0, 12.0);
         line.items.push(LineItem::Text(run));
@@ -2487,6 +2500,7 @@ mod link_span_tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         assert!(run.link.is_none());
     }
@@ -3151,6 +3165,7 @@ mod draw_decoration_direct_tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
 
         let items = vec![

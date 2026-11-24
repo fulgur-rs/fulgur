@@ -408,6 +408,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         let mut lines = vec![ShapedLine {
             height: 16.0_f32.as_pt(),
@@ -523,6 +524,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         let mut lines = vec![ShapedLine {
             height: 16.0_f32.as_pt(),

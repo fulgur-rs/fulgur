@@ -1702,6 +1702,34 @@ fn get_inline_backgrounds(doc: &BaseDocument, node_id: usize) -> Arc<[[u8; 4]]> 
     colors.into()
 }
 
+/// The nearest inline element with `role="img"` around a text run (the run's
+/// node or an ancestor, while they are `display: inline`), whose `Figure`
+/// holds the run's text.
+fn get_inline_figure(doc: &BaseDocument, node_id: usize) -> Option<usize> {
+    use ::style::values::specified::box_::{DisplayInside, DisplayOutside};
+    let mut node = doc.get_node(crate::blitz_adapter::bid(node_id));
+    let mut depth = 0;
+    while let Some(current) = node {
+        if depth >= crate::MAX_DOM_DEPTH {
+            break;
+        }
+        depth += 1;
+        if let Some(elem) = current.element_data() {
+            let display = current.primary_styles()?.clone_display();
+            if display.outside() != DisplayOutside::Inline
+                || display.inside() != DisplayInside::Flow
+            {
+                return None;
+            }
+            if aria_role(elem).as_deref() == Some("img") {
+                return Some(crate::blitz_adapter::uid(current.id));
+            }
+        }
+        node = current.parent_node();
+    }
+    None
+}
+
 /// Get text-decoration properties from a DOM node's computed styles.
 fn get_text_decoration(doc: &BaseDocument, node_id: usize) -> TextDecoration {
     if let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id))

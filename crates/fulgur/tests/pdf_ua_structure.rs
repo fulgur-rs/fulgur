@@ -499,3 +499,26 @@ fn aria_labelledby_comes_before_aria_label_and_joins_its_ids() {
     .expect("PDF/UA");
     assert_eq!(figure_alts(&load(&pdf)), ["Sales 2026"]);
 }
+
+#[test]
+fn an_inline_role_img_holds_its_text_in_place() {
+    // The text of `<span role="img">` is the content of its Figure, between
+    // the paragraph's text before and after it, not an empty Figure at the
+    // end with the stars left in the paragraph.
+    let pdf = render_ua(&format!(
+        "{PAGE}<h1>Review</h1><p>Rating <span role=\"img\" aria-label=\"4 of 5 stars\">\u{2605}\u{2605}\u{2605}\u{2605}\u{2606}</span> overall</p>"
+    ))
+    .expect("PDF/UA accepts the rating");
+    let doc = load(&pdf);
+    let elements = struct_elements(&doc);
+    let kinds = |s: &str| -> Vec<Vec<String>> {
+        elements
+            .iter()
+            .filter(|(_, d)| name_of(d, b"S").as_deref() == Some(s))
+            .map(|(_, d)| kid_kinds(&doc, d))
+            .collect()
+    };
+    assert_eq!(kinds("P"), [["MC", "Figure", "MC"]]);
+    assert_eq!(kinds("Figure"), [["MC"]]);
+    assert_eq!(figure_alts(&doc), ["4 of 5 stars"]);
+}

@@ -1132,7 +1132,9 @@ fn para_uses_run_tagging(entry: &crate::drawables::ParagraphEntry) -> bool {
             crate::paragraph::reading_order(&line.items).is_some()
                 || line.items.iter().any(|item| match item {
                     crate::paragraph::LineItem::InlineBox(_) => true,
-                    crate::paragraph::LineItem::Text(run) => run.lang.is_some(),
+                    crate::paragraph::LineItem::Text(run) => {
+                        run.lang.is_some() || run.figure.is_some()
+                    }
                     crate::paragraph::LineItem::Image(_) => false,
                 })
         })
@@ -5169,6 +5171,34 @@ fn build_tag_group_with_links(
                     }
                     group.push(Node::Group(link_group));
                 }
+                ParagraphRunItem::FigureContent {
+                    node_id: figure, ..
+                } => {
+                    let figure = *figure;
+                    // The text of an inline `role="img"` element is the
+                    // content of its `Figure`, in its place in the paragraph.
+                    let mut figure_group = drawables
+                        .semantics
+                        .contains_key(&figure)
+                        .then(|| build_tag_group_with_links(figure, inputs, links));
+                    while let Some(ParagraphRunItem::FigureContent {
+                        node_id: n,
+                        identifier: id,
+                    }) = run_items.get(i)
+                        && *n == figure
+                        && marks.peek().is_none_or(|m| m.run_index > i)
+                    {
+                        match figure_group.as_mut() {
+                            Some(g) => g.push(Node::Leaf(*id)),
+                            None => group.push(Node::Leaf(*id)),
+                        }
+                        i += 1;
+                    }
+                    if let Some(figure_group) = figure_group {
+                        placed_children.insert(figure);
+                        group.push(Node::Group(figure_group));
+                    }
+                }
             }
         }
     } else if let Some(ids) = inputs.identifiers.get(&node_id) {
@@ -5552,6 +5582,7 @@ mod tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         }
     }
 
@@ -9044,6 +9075,7 @@ mod struct_tree_tests {
             lang: None,
             from_paragraph_text: false,
             inline_backgrounds: Default::default(),
+            figure: None,
         };
         crate::drawables::ParagraphEntry {
             lines: vec![crate::paragraph::ShapedLine {

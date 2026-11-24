@@ -565,6 +565,12 @@ pub enum ParagraphRunItem {
         span_ptr: usize,
         identifier: krilla::tagging::Identifier,
     },
+    /// Content of an inline element with `role="img"`, grouped into that
+    /// element's `Figure`.
+    FigureContent {
+        node_id: crate::drawables::NodeId,
+        identifier: krilla::tagging::Identifier,
+    },
 }
 
 /// One entry recorded by [`TagCollector::record`] for whole-paragraph tagging:
@@ -762,7 +768,7 @@ impl TagCollector {
             .flatten()
             .filter_map(|item| match item {
                 ParagraphRunItem::LinkContent { span_ptr, .. } => Some(*span_ptr),
-                ParagraphRunItem::Content(_) => None,
+                ParagraphRunItem::Content(_) | ParagraphRunItem::FigureContent { .. } => None,
             })
             .chain(self.group_links.values().flatten().map(|l| l.span_ptr))
             .chain(self.inline_boxes.values().flatten().filter_map(|m| m.link))
