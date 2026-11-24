@@ -53,6 +53,11 @@ impl RunningElementStore {
         self.node_to_instance.get(&node_id).copied()
     }
 
+    /// The DOM node ids of every registered running element, in node id order.
+    pub fn node_ids(&self) -> impl Iterator<Item = usize> + '_ {
+        self.node_to_instance.keys().copied()
+    }
+
     /// Get the serialized HTML for a given instance_id.
     pub fn get_html(&self, instance_id: usize) -> Option<&str> {
         self.instances.get(instance_id).map(|i| i.html.as_str())
@@ -101,7 +106,7 @@ fn write_node(
     if depth >= MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
 
@@ -114,7 +119,7 @@ fn write_node(
             }
         }
         NodeData::Element(elem) => {
-            let tag = elem.name.local.as_ref();
+            let tag = &*elem.name.local;
             let has_children = !node.children.is_empty();
 
             writer.push('<');
@@ -122,7 +127,7 @@ fn write_node(
 
             for attr in elem.attrs() {
                 writer.push(' ');
-                writer.push_str(attr.name.local.as_ref());
+                writer.push_str(&attr.name.local);
                 writer.push_str("=\"");
                 escape_attribute_value(&attr.value, writer);
                 writer.push('"');
@@ -134,7 +139,13 @@ fn write_node(
                 writer.push('>');
                 let children_are_raw_text = is_raw_text_element(elem);
                 for &child_id in &node.children {
-                    write_node(doc, child_id, writer, depth + 1, children_are_raw_text);
+                    write_node(
+                        doc,
+                        crate::blitz_adapter::uid(child_id),
+                        writer,
+                        depth + 1,
+                        children_are_raw_text,
+                    );
                 }
                 writer.push_str("</");
                 writer.push_str(tag);
@@ -176,7 +187,7 @@ fn write_node(
 fn is_raw_text_element(elem: &blitz_dom::node::ElementData) -> bool {
     elem.name.ns == blitz_dom::ns!(html)
         && matches!(
-            elem.name.local.as_ref(),
+            &*elem.name.local,
             "style" | "script" | "xmp" | "iframe" | "noembed" | "noframes" | "plaintext"
         )
 }
@@ -198,7 +209,7 @@ fn accepts_self_closing(elem: &blitz_dom::node::ElementData) -> bool {
         return true;
     }
     matches!(
-        elem.name.local.as_ref(),
+        &*elem.name.local,
         "area"
             | "base"
             | "br"
@@ -308,7 +319,8 @@ mod tests {
         let html = format!("<html><body>{body_html}</body></html>");
         let doc = crate::blitz_adapter::parse(&html, 600.0, &[]);
         let root_id = doc.root_element().id;
-        let div_id = find_first_tag(&doc, root_id, "div", 0).expect("no <div> in fixture");
+        let div_id = find_first_tag(&doc, crate::blitz_adapter::uid(root_id), "div", 0)
+            .expect("no <div> in fixture");
         serialize_node(&doc, div_id)
     }
 
@@ -321,15 +333,15 @@ mod tests {
         if depth >= crate::MAX_DOM_DEPTH {
             return None;
         }
-        let node = doc.get_node(node_id)?;
+        let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
         if let Some(elem) = node.element_data() {
-            if elem.name.local.as_ref() == tag {
+            if (&elem.name.local) == tag {
                 return Some(node_id);
             }
         }
-        node.children
-            .iter()
-            .find_map(|&child| find_first_tag(doc, child, tag, depth + 1))
+        node.children.iter().find_map(|&child| {
+            find_first_tag(doc, crate::blitz_adapter::uid(child), tag, depth + 1)
+        })
     }
 
     /// Text that reached the DOM as escaped markup — the shape produced by

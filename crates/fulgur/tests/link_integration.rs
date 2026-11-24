@@ -143,10 +143,11 @@ fn margin_box_running_element_link_keeps_pdf_annotation() {
         "margin-box anchor should emit a PDF link annotation"
     );
     assert!(text.contains("/URI"), "missing /URI action type");
+    // A running element leaves the body (#983), so only its margin-box copy is drawn and links.
     let uri_count = text.matches("https://margin-box-link.test").count();
-    assert!(
-        uri_count >= 2,
-        "expected both source running element and margin-box render to keep link annotations, got {uri_count} URI entries"
+    assert_eq!(
+        uri_count, 1,
+        "expected the margin-box render to keep its link annotation, got {uri_count} URI entries"
     );
 }
 

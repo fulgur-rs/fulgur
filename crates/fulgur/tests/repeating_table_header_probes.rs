@@ -47,15 +47,28 @@ fn fragment_triples(layout: &fulgur::LayoutOutput, node_id: usize) -> Vec<(u32, 
         .unwrap_or_default()
 }
 
-/// Blocks are looked up by `id` too — cells carry their content as blocks.
+/// Blocks are looked up by `id` too — cells carry their content as blocks,
+/// or as a paragraph when the cell's in-flow content is inline only. Since
+/// blitz-dom 0.3 an out-of-flow child (`position: absolute`) no longer turns
+/// a cell such as `<th>H<div abs></div></th>` into a block container, so the
+/// cell is registered as a paragraph; both maps are searched.
 fn block_fragments(layout: &fulgur::LayoutOutput, dom_id: &str) -> Vec<(u32, f32, f32)> {
+    let wanted = Some(dom_id);
     let node_id = layout
         .drawables
         .block_styles
         .iter()
-        .find(|(_, b)| b.id.as_deref().map(|s| s.as_str()) == Some(dom_id))
+        .find(|(_, b)| b.id.as_deref().map(|s| s.as_str()) == wanted)
         .map(|(id, _)| *id)
-        .unwrap_or_else(|| panic!("no block drawable with id={dom_id}"));
+        .or_else(|| {
+            layout
+                .drawables
+                .paragraphs
+                .iter()
+                .find(|(_, p)| p.id.as_deref().map(|s| s.as_str()) == wanted)
+                .map(|(id, _)| *id)
+        })
+        .unwrap_or_else(|| panic!("no block or paragraph drawable with id={dom_id}"));
     fragment_triples(layout, node_id)
 }
 

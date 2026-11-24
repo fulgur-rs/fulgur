@@ -1,5 +1,6 @@
 use super::*;
 use super::{list_marker, positioned, pseudo};
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::paragraph::{InlineBoxItem, ParagraphRender};
 use crate::units::F32Units;
 use std::sync::Arc;
@@ -20,13 +21,13 @@ pub(super) fn try_convert(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
     if !node.flags.is_inline_root() {
         return false;
     }
-    let (width, height) = size_in_pt(node.final_layout.size);
+    let (width, height) = size_in_pt(node.final_layout_or_zero().size);
 
     // Snapshot must be taken BEFORE `extract_paragraph` because the latter
     // recurses into inline-box children (registering their drawable
@@ -58,25 +59,25 @@ pub(super) fn try_convert(
 
     // Inline pseudo images.
     let before_inline = node
-        .before
+        .before()
         .and_then(|id| doc.get_node(id))
         .filter(|p| !pseudo::is_block_pseudo(p))
         .and_then(|p| {
             pseudo::build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
         })
         .map(|mut img| {
-            pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
+            pseudo::attach_link_to_inline_image(&mut img, doc, crate::blitz_adapter::uid(node.id));
             img
         });
     let after_inline = node
-        .after
+        .after()
         .and_then(|id| doc.get_node(id))
         .filter(|p| !pseudo::is_block_pseudo(p))
         .and_then(|p| {
             pseudo::build_inline_pseudo_image(p, content_box.width, content_box.height, ctx.assets)
         })
         .map(|mut img| {
-            pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
+            pseudo::attach_link_to_inline_image(&mut img, doc, crate::blitz_adapter::uid(node.id));
             img
         });
 
@@ -275,6 +276,78 @@ pub(super) fn recalculate_paragraph_line_boxes(lines: &mut [ShapedLine]) {
     }
 }
 
+/// The text alternative of a link, as tagged PDF needs it for the link
+/// annotation: `aria-labelledby` / `aria-label`, else the link's text, else its `title`, else
+/// the text alternatives of the images it holds (`alt` of an `<img>`,
+/// `aria-label` or `<title>` of an `<svg>`), so an image-only link is
+/// described by its image.
+fn link_text_alternative(
+    doc: &BaseDocument,
+    id: usize,
+    el: &blitz_dom::node::ElementData,
+) -> Option<String> {
+    let non_empty = |s: &str| {
+        let s = s.trim();
+        (!s.is_empty()).then(|| s.to_string())
+    };
+    if let Some(label) = crate::blitz_adapter::aria_labelledby_text(doc, el)
+        .or_else(|| crate::blitz_adapter::get_attr(el, "aria-label").and_then(non_empty))
+    {
+        return Some(label);
+    }
+    if let Some(text) = non_empty(&crate::blitz_adapter::element_text(doc, id)) {
+        return Some(text);
+    }
+    if let Some(title) = crate::blitz_adapter::get_attr(el, "title").and_then(non_empty) {
+        return Some(title);
+    }
+    let mut images = Vec::new();
+    let mut stack = vec![id];
+    let mut visited = 0usize;
+    while let Some(cur) = stack.pop() {
+        visited += 1;
+        if visited > 10_000 {
+            break;
+        }
+        let Some(node) = doc.get_node(crate::blitz_adapter::bid(cur)) else {
+            continue;
+        };
+        if let Some(e) = node.element_data() {
+            let alt = match &*e.name.local {
+                "img" => crate::blitz_adapter::get_attr(e, "alt").and_then(non_empty),
+                "svg" => crate::blitz_adapter::aria_labelledby_text(doc, e)
+                    .or_else(|| crate::blitz_adapter::get_attr(e, "aria-label").and_then(non_empty))
+                    .or_else(|| {
+                        node.children.iter().find_map(|&c| {
+                            let child = doc.get_node(c)?;
+                            let is_title = child
+                                .element_data()
+                                .is_some_and(|t| &*t.name.local == "title");
+                            if is_title {
+                                non_empty(&child.text_content())
+                            } else {
+                                None
+                            }
+                        })
+                    }),
+                _ => None,
+            };
+            if let Some(alt) = alt {
+                images.push(alt);
+                continue;
+            }
+        }
+        // Children in document order: pushed reversed onto the stack.
+        stack.extend(
+            node.children
+                .iter()
+                .rev()
+                .map(|&c| crate::blitz_adapter::uid(c)),
+        );
+    }
+    (!images.is_empty()).then(|| images.join(" "))
+}
+
 /// Walk up from `start_id` to find the closest `<a href>` ancestor and
 /// build a `LinkSpan`.
 pub(super) fn resolve_enclosing_anchor(
@@ -287,9 +360,9 @@ pub(super) fn resolve_enclosing_anchor(
         if depth >= MAX_DOM_DEPTH {
             return None;
         }
-        let node = doc.get_node(id)?;
+        let node = doc.get_node(crate::blitz_adapter::bid(id))?;
         if let NodeData::Element(el) = &node.data {
-            if el.name.local.as_ref() == "a" {
+            if (&el.name.local) == "a" {
                 let href = crate::blitz_adapter::get_attr(el, "href")?.trim();
                 if href.is_empty() {
                     return None;
@@ -299,12 +372,11 @@ pub(super) fn resolve_enclosing_anchor(
                 } else {
                     LinkTarget::External(Arc::new(href.to_string()))
                 };
-                let alt = crate::blitz_adapter::element_text(doc, id);
-                let alt_text = if alt.is_empty() { None } else { Some(alt) };
+                let alt_text = link_text_alternative(doc, id, el);
                 return Some((id, LinkSpan { target, alt_text }));
             }
         }
-        cur = node.parent;
+        cur = node.parent.map(crate::blitz_adapter::uid);
         depth += 1;
     }
     None
@@ -372,16 +444,17 @@ fn pageable_last_baseline_from_drawables(
     // 2) Otherwise walk DOM children in REVERSE. Use Blitz's
     //    `layout_children` when available so anonymous block wrappers
     //    around inline-level siblings are visited correctly.
-    let node = doc.get_node(node_id)?;
+    let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
     let layout_children_borrow = node.layout_children.borrow();
     // An explicit `Some([])` from Blitz means "no in-flow children" and is
     // authoritative — fall back to `node.children` only when Blitz has not
     // populated `layout_children` at all. Otherwise an inline-block whose
     // only descendants are absolutely-positioned would walk those out-of-flow
     // nodes here and report a bogus baseline.
-    let walk_children: &[usize] = layout_children_borrow.as_deref().unwrap_or(&node.children);
+    let walk_children: &[usize] =
+        &crate::blitz_adapter::uids(layout_children_borrow.as_deref().unwrap_or(&node.children));
     for &child_id in walk_children.iter().rev() {
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
         if let Some(inner) = pageable_last_baseline_from_drawables(doc, out, child_id, depth + 1) {
@@ -389,7 +462,7 @@ fn pageable_last_baseline_from_drawables(
             // recursively returns its inner baseline relative to its
             // own top edge; the container's own `top_inset` is folded
             // in by branch (1) above.
-            return Some(child.final_layout.location.y.as_px().in_pt() + inner);
+            return Some(child.final_layout_or_zero().location.y.as_px().in_pt() + inner);
         }
     }
     None
@@ -407,6 +480,13 @@ fn pageable_last_baseline_from_drawables(
 ///
 /// The side-effect call to `convert_node` registers the inline-box subtree
 /// into `out` so the v2 dispatcher can find it.
+/// `node` is floated.
+fn is_floated(node: &Node) -> bool {
+    use ::style::properties::longhands::float::computed_value::T as Float;
+    node.primary_styles()
+        .is_some_and(|s| !matches!(s.get_box().slow_clone_float(), Float::None))
+}
+
 fn convert_inline_box_node(
     doc: &BaseDocument,
     node_id: usize,
@@ -420,7 +500,7 @@ fn convert_inline_box_node(
     // them register here would double-paint via the inline-box dispatch.
     // Returning `None` causes `paragraph::draw_shaped_lines` to skip the
     // inline-box dispatch for this item.
-    if let Some(node) = doc.get_node(node_id) {
+    if let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) {
         if positioned::is_absolutely_positioned(node) && is_pseudo_node(doc, node) {
             return None;
         }
@@ -460,95 +540,51 @@ pub(super) fn extract_paragraph(
 
     let mut shaped_lines = Vec::new();
     let mut accumulated_line_top = crate::units::Pt::ZERO;
+    let mut langs = crate::blitz_adapter::LangCache::new();
+    let paragraph_lang =
+        crate::blitz_adapter::effective_lang(doc, crate::blitz_adapter::uid(node.id), &mut langs);
+    // What each line's tab stops depend on.
+    let mut tab_lines = Vec::new();
+    // Where each inline box sits in the text, for reading order.
+    let mut box_indices: Option<HashMap<u64, usize>> = None;
 
     for line in parley_layout.lines() {
         let metrics = line.metrics();
         let mut items = Vec::new();
-        // Track cumulative glyph offset within a Run across consecutive GlyphRuns
-        // that share the same parent Run. Reset when the Run changes.
-        let mut prev_run_key = usize::MAX;
-        let mut run_glyph_offset = 0usize;
+        let mut cursor = RunCursor::default();
+        let mut has_rtl = false;
 
         for item in line.items() {
             match item {
                 parley::PositionedLayoutItem::GlyphRun(glyph_run) => {
-                    let run = glyph_run.run();
-                    let font_ref = run.font();
-                    let font_index = font_ref.index;
-                    let font_arc = ctx.get_or_insert_font(font_ref);
-                    let font_size_parley = run.font_size();
-                    let font_size = font_size_parley.as_px().in_pt();
-
-                    let brush = &glyph_run.style().brush;
-                    let color = get_text_color(doc, brush.id);
-                    let decoration = get_text_decoration(doc, brush.id);
-                    let link = ctx.link_cache.lookup(doc, brush.id);
-
-                    // Advance or reset the per-Run offset counter.
-                    let run_key = run.cluster_range().start;
-                    if run_key != prev_run_key {
-                        prev_run_key = run_key;
-                        run_glyph_offset = 0;
-                    }
-                    let glyph_start = run_glyph_offset;
-
-                    // Build (text_range, Glyph) pairs scoped to this GlyphRun.
-                    // `glyph_run.glyphs()` = run.visual_clusters().flat_map(.glyphs())
-                    //   .skip(glyph_start).take(glyph_count).
-                    // We replicate the same window on the annotated cluster sequence
-                    // and advance the offset counter by the number of glyphs consumed.
-                    let mut annotated = run
-                        .visual_clusters()
-                        .flat_map(|cluster| {
-                            let r = cluster.text_range();
-                            cluster.glyphs().map(move |g| (r.clone(), g))
-                        })
-                        .skip(glyph_start);
-
-                    let mut glyphs = Vec::new();
-                    for g in glyph_run.glyphs() {
-                        let (text_range, _) = annotated.next().unwrap_or_else(|| {
-                            panic!(
-                                "annotated cluster iterator exhausted before glyph_run.glyphs(); \
-                                 run cluster_range={:?}, glyph_start={glyph_start}",
-                                run.cluster_range()
-                            )
-                        });
-                        run_glyph_offset += 1;
-                        glyphs.push(ShapedGlyph {
-                            id: g.id,
-                            x_advance: ShapedGlyph::normalize_by_font_size(
-                                g.advance,
-                                font_size_parley,
-                            ),
-                            x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
-                            y_offset: ShapedGlyph::normalize_by_font_size(g.y, font_size_parley),
-                            text_range,
-                        });
-                    }
-
-                    if !glyphs.is_empty() {
-                        let run_text = Arc::clone(&text);
-                        let run_x_offset = glyph_run.offset().as_px().in_pt();
-                        items.push(LineItem::Text(ShapedGlyphRun {
-                            font_data: font_arc,
-                            font_index,
-                            font_size,
-                            color,
-                            decoration,
-                            glyphs,
-                            text: run_text,
-                            x_offset: run_x_offset,
-                            link,
-                        }));
-                    }
+                    has_rtl |= glyph_run.run().is_rtl();
+                    push_glyph_runs(
+                        doc,
+                        &glyph_run,
+                        &text,
+                        paragraph_lang.as_deref(),
+                        &mut langs,
+                        &mut cursor,
+                        ctx,
+                        &mut items,
+                    );
                 }
                 parley::PositionedLayoutItem::InlineBox(positioned) => {
                     let node_id = positioned.id as usize;
-                    if let Some(box_node) = doc.get_node(node_id) {
+                    if let Some(box_node) = doc.get_node(crate::blitz_adapter::bid(node_id)) {
                         if positioned::is_absolutely_positioned(box_node)
                             && is_pseudo_node(doc, box_node)
                         {
+                            continue;
+                        }
+                        // A float or an absolutely positioned box in the
+                        // line is only a placeholder in Parley's layout;
+                        // Blitz places the box itself (its Taffy layout,
+                        // relative to this paragraph) and, for a float,
+                        // wraps the lines around it. Draw it there, as an
+                        // ordinary box, not at the placeholder.
+                        if is_floated(box_node) || positioned::is_absolutely_positioned(box_node) {
+                            convert_node(doc, node_id, ctx, depth + 1, out);
                             continue;
                         }
                     }
@@ -584,10 +620,19 @@ pub(super) fn extract_paragraph(
                     let computed_y =
                         positioned.y.as_px().in_pt() - accumulated_line_top + baseline_shift;
                     let visible = doc
-                        .get_node(node_id)
+                        .get_node(crate::blitz_adapter::bid(node_id))
                         .map(super::style::extract_opacity_visible)
                         .map(|(_, v)| v)
                         .unwrap_or(true);
+                    let text_index = box_indices
+                        .get_or_insert_with(|| {
+                            parley_layout
+                                .inline_boxes()
+                                .map(|b| (b.id, b.index))
+                                .collect()
+                        })
+                        .get(&positioned.id)
+                        .copied();
                     items.push(LineItem::InlineBox(InlineBoxItem {
                         node_id: content,
                         width: positioned.width.as_px().in_pt(),
@@ -597,11 +642,13 @@ pub(super) fn extract_paragraph(
                         link,
                         opacity: 1.0,
                         visible,
+                        text_index,
                     }));
                 }
             }
         }
 
+        tab_lines.push(tab_line_metrics(metrics, has_rtl));
         let line_height = metrics.line_height.as_px().in_pt();
         shaped_lines.push(ShapedLine {
             height: line_height,
@@ -614,8 +661,243 @@ pub(super) fn extract_paragraph(
     if shaped_lines.is_empty() {
         return None;
     }
+    crate::paragraph::apply_tab_stops(&mut shaped_lines, &tab_lines, tab_stops(node));
+
+    // `align-content` (a table cell's `vertical-align: middle` or `bottom`)
+    // moves the lines down inside the content box; Blitz records the shift as
+    // `block_offset` without moving Parley's lines. Put it above the first
+    // line: line tops follow from the line heights, while baselines and
+    // inline images are offsets from the paragraph's top.
+    let block_offset = text_layout.block_offset.as_px().in_pt();
+    if block_offset > crate::units::Pt::ZERO {
+        for (index, line) in shaped_lines.iter_mut().enumerate() {
+            line.baseline += block_offset;
+            if index == 0 {
+                line.height += block_offset;
+            }
+            for item in &mut line.items {
+                match item {
+                    LineItem::Image(image) => image.computed_y += block_offset,
+                    // Relative to the line's top.
+                    LineItem::InlineBox(ibox) if index == 0 => ibox.computed_y += block_offset,
+                    _ => {}
+                }
+            }
+        }
+    }
 
     Some(ParagraphRender::new(shaped_lines).with_id(extract_block_id(node)))
+}
+
+/// Where the next glyph run of a Parley run starts among its glyphs: a run
+/// that an inline box or a style change splits gives several glyph runs on
+/// one line.
+#[derive(Default)]
+pub(super) struct RunCursor {
+    run: Option<usize>,
+    glyph_offset: usize,
+}
+
+/// The nodes, other than its own, of the letters a ligature glyph joins
+/// (the `f` and `i` of `of<a>fi</a>ce` in one `ffi` glyph).
+fn ligature_joined_nodes(cluster: &parley::Cluster<'_, blitz_dom::node::TextBrush>) -> Vec<usize> {
+    let mut nodes = Vec::new();
+    if !cluster.is_ligature_start() {
+        return nodes;
+    }
+    let own = crate::blitz_adapter::uid(cluster.style().brush.id);
+    let mut next = cluster.next_logical();
+    while let Some(continuation) = next.filter(|c| c.is_ligature_continuation()) {
+        let node = crate::blitz_adapter::uid(continuation.style().brush.id);
+        if node != own && !nodes.contains(&node) {
+            nodes.push(node);
+        }
+        next = continuation.next_logical();
+    }
+    nodes
+}
+
+/// Converts one Parley glyph run into `ShapedGlyphRun`s and pushes them
+/// onto `items`.
+///
+/// A ligature can join letters across a link's edge (`of<a href>fice</a>`),
+/// and Parley gives its glyph to the run of its first letter. A link whose
+/// letters were all in such a glyph would then have nothing drawn under
+/// it, so no annotation and no `Link` element, and one that starts inside
+/// it would lose the glyph to the text before it. A glyph that holds a
+/// letter of a link goes to that link, in a run of its own that is drawn
+/// as before.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_glyph_runs(
+    doc: &BaseDocument,
+    glyph_run: &parley::GlyphRun<'_, blitz_dom::node::TextBrush>,
+    text: &Arc<str>,
+    paragraph_lang: Option<&str>,
+    langs: &mut crate::blitz_adapter::LangCache,
+    cursor: &mut RunCursor,
+    ctx: &mut ConvertContext<'_>,
+    items: &mut Vec<LineItem>,
+) {
+    let run = glyph_run.run();
+    let font_ref = run.font();
+    let font_index = font_ref.index;
+    let font_arc = ctx.get_or_insert_font(font_ref);
+    let font_size_parley = run.font_size();
+    let font_size = font_size_parley.as_px().in_pt();
+
+    let node_id = crate::blitz_adapter::uid(glyph_run.style().brush.id);
+    let color = get_text_color(doc, node_id);
+    let decoration = get_text_decoration(doc, node_id);
+    let inline_backgrounds = get_inline_backgrounds(doc, node_id);
+    let figure = get_inline_figure(doc, node_id);
+    let link = ctx.link_cache.lookup(doc, node_id);
+    let lang = crate::blitz_adapter::effective_lang(doc, node_id, langs)
+        .filter(|lang| Some(&**lang) != paragraph_lang);
+
+    if cursor.run != Some(run.index()) {
+        cursor.run = Some(run.index());
+        cursor.glyph_offset = 0;
+    }
+    let glyph_start = cursor.glyph_offset;
+
+    // `glyph_run.glyphs()` = run.visual_clusters().flat_map(.glyphs())
+    //   .skip(glyph_start).take(glyph_count): walk the same window over the
+    // clusters to pair each glyph with its text and the nodes it joins.
+    let mut annotated = run
+        .visual_clusters()
+        .flat_map(|cluster| {
+            let range = crate::paragraph::cluster_glyph_text_range(&cluster);
+            let joined = ligature_joined_nodes(&cluster);
+            cluster
+                .glyphs()
+                .map(move |g| (range.clone(), joined.clone(), g))
+        })
+        .skip(glyph_start);
+
+    let mut glyphs = Vec::new();
+    for g in glyph_run.glyphs() {
+        let (text_range, joined, _) = annotated.next().unwrap_or_else(|| {
+            panic!(
+                "annotated cluster iterator exhausted before glyph_run.glyphs(); \
+                 run cluster_range={:?}, glyph_start={glyph_start}",
+                run.cluster_range()
+            )
+        });
+        cursor.glyph_offset += 1;
+        let glyph_link = match &link {
+            Some(link) => Some(Arc::clone(link)),
+            None => joined
+                .iter()
+                .find_map(|&node| ctx.link_cache.lookup(doc, node)),
+        };
+        let glyph = ShapedGlyph {
+            id: g.id,
+            x_advance: ShapedGlyph::normalize_by_font_size(g.advance, font_size_parley),
+            x_offset: ShapedGlyph::normalize_by_font_size(g.x, font_size_parley),
+            // Parley's `y` grows downwards; krilla's `y_offset` is the
+            // font's, which grows upwards (marks below the baseline).
+            y_offset: ShapedGlyph::normalize_by_font_size(-g.y, font_size_parley),
+            text_range,
+        };
+        glyphs.push((glyph, glyph_link));
+    }
+
+    let same_link = |a: &Option<Arc<crate::paragraph::LinkSpan>>,
+                     b: &Option<Arc<crate::paragraph::LinkSpan>>| match (a, b) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    };
+    let variations = crate::paragraph::run_variations(run);
+    let mut x_offset = glyph_run.offset().as_px().in_pt();
+    let mut current: Option<ShapedGlyphRun> = None;
+    for (glyph, glyph_link) in glyphs {
+        if !current
+            .as_ref()
+            .is_some_and(|run| same_link(&run.link, &glyph_link))
+        {
+            if let Some(done) = current.take() {
+                x_offset += done
+                    .glyphs
+                    .iter()
+                    .map(|g| g.x_advance * font_size)
+                    .sum::<crate::units::Pt>();
+                items.push(LineItem::Text(done));
+            }
+            current = Some(ShapedGlyphRun {
+                font_data: font_arc.clone(),
+                font_index,
+                variations: variations.clone(),
+                font_size,
+                color,
+                decoration,
+                glyphs: Vec::new(),
+                text: Arc::clone(text),
+                x_offset,
+                link: glyph_link,
+                lang: lang.clone(),
+                from_paragraph_text: true,
+                inline_backgrounds: Arc::clone(&inline_backgrounds),
+                figure,
+            });
+        }
+        if let Some(run) = current.as_mut() {
+            run.glyphs.push(glyph);
+        }
+    }
+    if let Some(done) = current {
+        items.push(LineItem::Text(done));
+    }
+}
+
+/// What a line's tab stops depend on, from its Parley metrics.
+pub(super) fn tab_line_metrics(
+    metrics: &parley::LineMetrics,
+    has_rtl: bool,
+) -> crate::paragraph::TabLine {
+    crate::paragraph::TabLine {
+        left_to_right: !has_rtl,
+        end: metrics.inline_max_coord.as_px().in_pt().to_f32(),
+        hanging: metrics.hanging_advance.as_px().in_pt().to_f32(),
+    }
+}
+
+/// The tab stops of a paragraph's element.
+pub(super) fn tab_stops(node: &Node) -> crate::paragraph::TabStops {
+    use crate::paragraph::{TabSize, TabStops};
+    use ::style::computed_values::direction::T as Direction;
+    use ::style::values::computed::Length;
+    use ::style::values::generics::length::GenericLengthOrNumber;
+    use ::style::values::specified::TextAlignKeyword;
+    let Some(styles) = node.primary_styles() else {
+        return TabStops {
+            size: TabSize::Spaces(8.0),
+            spacing: 0.0,
+            start_aligned: true,
+        };
+    };
+    let text = styles.get_inherited_text();
+    let size = match text.tab_size {
+        GenericLengthOrNumber::Length(length) => TabSize::Length(length.0.px().as_px().in_pt()),
+        GenericLengthOrNumber::Number(number) => TabSize::Spaces(number.0),
+    };
+    let font_size = Length::new(styles.get_font().font_size.computed_size().px());
+    let spacing_px =
+        text.letter_spacing.0.resolve(font_size).px() + text.word_spacing.resolve(font_size).px();
+    let rtl = styles.clone_direction() == Direction::Rtl;
+    let start_aligned = match styles.clone_text_align() {
+        TextAlignKeyword::Left | TextAlignKeyword::MozLeft => true,
+        // A justified line starts at the start edge too, and one that is not
+        // stretched (the last, or any in `white-space: pre`) is start-aligned.
+        TextAlignKeyword::Start | TextAlignKeyword::Justify => !rtl,
+        TextAlignKeyword::End => rtl,
+        _ => false,
+    };
+    TabStops {
+        size,
+        spacing: spacing_px.as_px().in_pt().to_f32(),
+        start_aligned,
+    }
 }
 
 #[cfg(test)]
@@ -657,8 +939,9 @@ mod tests {
 
     fn make_text_run(font_data: Vec<u8>) -> LineItem {
         LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(font_data),
+            font_data: crate::paragraph::FontBytes::from(font_data),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -666,6 +949,10 @@ mod tests {
             text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         })
     }
 
@@ -694,6 +981,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         })
     }
 
@@ -1090,15 +1378,12 @@ mod tests {
     }
 
     fn find_first_by_tag(doc: &BaseDocument, start_id: usize, tag: &str) -> Option<usize> {
-        let node = doc.get_node(start_id)?;
-        if node
-            .element_data()
-            .is_some_and(|e| e.name.local.as_ref() == tag)
-        {
+        let node = doc.get_node(crate::blitz_adapter::bid(start_id))?;
+        if node.element_data().is_some_and(|e| (&e.name.local) == tag) {
             return Some(start_id);
         }
         for &c in &node.children {
-            if let Some(found) = find_first_by_tag(doc, c, tag) {
+            if let Some(found) = find_first_by_tag(doc, crate::blitz_adapter::uid(c), tag) {
                 return Some(found);
             }
         }
@@ -1107,7 +1392,7 @@ mod tests {
 
     fn find_tag(doc: &HtmlDocument, tag: &str) -> usize {
         let root = doc.root_element();
-        find_first_by_tag(doc.deref(), root.id, tag)
+        find_first_by_tag(doc.deref(), crate::blitz_adapter::uid(root.id), tag)
             .unwrap_or_else(|| panic!("<{tag}> not found in document"))
     }
 

@@ -171,10 +171,316 @@ pub struct LinkSpan {
 /// so `extract_paragraph` can bump-clone the same buffer per run rather than
 /// pay a String allocation each time; it is passed by reference to krilla's
 /// `draw_glyphs` and read via `as_str` in `render` — no mutation callers.
+/// Variation axis tags and values in user space (`wght` 700, `wdth` 75).
+pub type FontVariations = Vec<([u8; 4], f32)>;
+
+/// The byte range of text that a cluster's glyphs stand for.
+///
+/// Parley gives all of a ligature's glyphs to its first cluster and none to
+/// the clusters it continues over, so the first cluster's own range covers
+/// only the first letter: the `ffi` glyph of `office` would carry the text
+/// `f`, and the word would extract from the PDF as `ofce`. The range runs on
+/// over the continuation clusters, so the glyph carries the whole `ffi`.
+pub(crate) fn cluster_glyph_text_range<B: parley::Brush>(
+    cluster: &parley::Cluster<'_, B>,
+) -> std::ops::Range<usize> {
+    let mut range = cluster.text_range();
+    if cluster.is_ligature_start() {
+        let mut next = cluster.next_logical();
+        while let Some(continuation) = next.filter(|c| c.is_ligature_continuation()) {
+            range.end = range.end.max(continuation.text_range().end);
+            next = continuation.next_logical();
+        }
+    }
+    range
+}
+
+/// The `tab-size` of a paragraph: how far apart its tab stops are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum TabSize {
+    /// A number of space advances of the tab's font.
+    Spaces(f32),
+    Length(crate::units::Pt),
+}
+
+/// What a line's tab stops depend on, from Parley's line metrics.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TabLine {
+    /// The line has no right-to-left text.
+    pub left_to_right: bool,
+    /// Where the line box ends, in pt from the start of the paragraph's box:
+    /// before a float beside it, at the box's edge otherwise.
+    pub end: f32,
+    /// The width of the white space that hangs past the end (`pre-wrap`).
+    pub hanging: f32,
+}
+
+/// What sets the tab stops of a paragraph.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TabStops {
+    pub size: TabSize,
+    /// `letter-spacing` plus `word-spacing`, in pt: CSS counts them in the
+    /// space that a `tab-size` number multiplies.
+    pub spacing: f32,
+    /// Whether the lines start at the left edge of the box (`text-align`
+    /// start or left on left-to-right text): the stops are measured from
+    /// there, and a centred or right-aligned line would no longer be.
+    pub start_aligned: bool,
+}
+
+/// The space glyph of a run's font and its advance in em.
+fn space_glyph(run: &ShapedGlyphRun) -> Option<(u32, f32)> {
+    use skrifa::MetadataProvider;
+    let font = skrifa::FontRef::from_index(&run.font_data, run.font_index).ok()?;
+    let id = font.charmap().map(' ')?;
+    let location = font.axes().location(
+        run.variations
+            .iter()
+            .map(|(tag, value)| (skrifa::Tag::new(tag), *value)),
+    );
+    let advance = font
+        .glyph_metrics(skrifa::instance::Size::new(1.0), &location)
+        .advance_width(id)?;
+    Some((id.to_u32(), advance))
+}
+
+fn is_tab(text: &str, glyph: &ShapedGlyph) -> bool {
+    text.get(glyph.text_range.clone()) == Some("\t")
+}
+
+fn line_has_tab(items: &[LineItem]) -> bool {
+    items.iter().any(|item| match item {
+        LineItem::Text(run) => run.glyphs.iter().any(|g| is_tab(&run.text, g)),
+        _ => false,
+    })
+}
+
+/// Where a line's content ends, in pt from the start of the box.
+fn line_end(items: &[LineItem]) -> f32 {
+    items
+        .iter()
+        .map(|item| match item {
+            LineItem::Text(run) => {
+                run.x_offset.to_f32()
+                    + run.glyphs.iter().map(|g| g.x_advance).sum::<f32>() * run.font_size.to_f32()
+            }
+            LineItem::Image(image) => (image.x_offset + image.width).to_f32(),
+            LineItem::InlineBox(inline_box) => (inline_box.x_offset + inline_box.width).to_f32(),
+        })
+        .fold(0.0, f32::max)
+}
+
+/// Takes the tabs of a line out of its glyphs, leaving their width, and
+/// with `expand` makes each as wide as the gap to the next tab stop, moving
+/// what follows along.
+fn tab_line(items: &mut [LineItem], stops: &TabStops, expand: bool) {
+    let mut shift = 0.0_f32;
+    for item in items.iter_mut() {
+        let run = match item {
+            LineItem::Text(run) => run,
+            LineItem::Image(image) => {
+                image.x_offset += shift.as_pt();
+                continue;
+            }
+            LineItem::InlineBox(inline_box) => {
+                inline_box.x_offset += shift.as_pt();
+                continue;
+            }
+        };
+        run.x_offset += shift.as_pt();
+        if !run.glyphs.iter().any(|g| is_tab(&run.text, g)) {
+            continue;
+        }
+        let font_size = run.font_size.to_f32();
+        let space_id = space_glyph(run);
+        let space = space_id.map_or(0.25, |(_, advance)| advance) * font_size + stops.spacing;
+        let interval = match stops.size {
+            TabSize::Spaces(n) => n * space,
+            TabSize::Length(length) => length.to_f32(),
+        };
+        let mut pen = run.x_offset.to_f32();
+        // The width of the tabs before the first glyph kept, and the first
+        // of those tabs.
+        let mut lead = 0.0_f32;
+        let mut first_tab = None;
+        let mut kept: Vec<ShapedGlyph> = Vec::with_capacity(run.glyphs.len());
+        for glyph in std::mem::take(&mut run.glyphs) {
+            let advance = glyph.x_advance * font_size;
+            if !is_tab(&run.text, &glyph) {
+                pen += advance;
+                kept.push(glyph);
+                continue;
+            }
+            let width = if !expand || font_size <= 0.0 {
+                advance
+            } else if interval > 0.0 {
+                let mut stop = ((pen / interval).floor() + 1.0) * interval;
+                if stop - pen < space * 0.5 {
+                    stop += interval;
+                }
+                stop - pen
+            } else {
+                0.0
+            };
+            shift += width - advance;
+            pen += width;
+            match kept.last_mut() {
+                Some(previous) if font_size > 0.0 => previous.x_advance += width / font_size,
+                Some(_) => {}
+                None => {
+                    lead += width;
+                    first_tab.get_or_insert(glyph);
+                }
+            }
+        }
+        // Tabs before the first glyph stay in the run, so its link area and
+        // its underline cover them: the first glyph moves along by their
+        // width. A run of tabs alone keeps one space glyph for them when it
+        // has a link or a decoration to show.
+        if lead > 0.0 && font_size > 0.0 {
+            if let Some(first) = kept.first_mut() {
+                first.x_offset += lead / font_size;
+                first.x_advance += lead / font_size;
+            } else if let (Some(tab), Some((id, _))) = (first_tab, space_id)
+                && (run.link.is_some() || !run.decoration.line.is_none())
+            {
+                kept.push(ShapedGlyph {
+                    id,
+                    x_advance: lead / font_size,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                    ..tab
+                });
+            } else {
+                run.x_offset += lead.as_pt();
+            }
+        }
+        run.glyphs = kept;
+    }
+}
+
+/// Lays out the preserved tabs (`white-space: pre`, `pre-wrap`) of a
+/// paragraph. Parley shapes a tab like any other character, which most
+/// fonts draw with `.notdef`, a box that PDF/UA and PDF/A refuse, as wide
+/// as that glyph. A tab draws nothing here; it is the gap it leaves. On a
+/// left-to-right line that starts at the left of its box it reaches the
+/// next tab stop, as CSS Text 3 §4.2 asks: the stops are `tab-size` apart
+/// from the start of the box, and a gap shorter than half a space goes on
+/// to the stop after. `tab_lines` has, by line, what Parley measured.
+///
+/// Parley broke and measured the lines with each tab as wide as its glyph.
+/// Where the stops would carry a line past the end of its line box (a
+/// table cell or an inline-block sized to its text, a `pre-wrap` line
+/// broken at the edge, a float beside it), the paragraph keeps those widths
+/// rather than run into what is next to it.
+pub(crate) fn apply_tab_stops(lines: &mut [ShapedLine], tab_lines: &[TabLine], stops: TabStops) {
+    if !lines.iter().any(|line| line_has_tab(&line.items)) {
+        return;
+    }
+    let expands = |index: usize| {
+        stops.start_aligned && tab_lines.get(index).is_some_and(|line| line.left_to_right)
+    };
+    let fits = lines.iter().enumerate().all(|(index, line)| {
+        let Some(metrics) = tab_lines.get(index) else {
+            return true;
+        };
+        if !expands(index) || !line_has_tab(&line.items) {
+            return true;
+        }
+        let limit = metrics.end + 0.01;
+        let before = line_end(&line.items) - metrics.hanging;
+        let mut items = line.items.clone();
+        tab_line(&mut items, &stops, true);
+        before > limit || line_end(&items) - metrics.hanging <= limit
+    });
+    for (index, line) in lines.iter_mut().enumerate() {
+        if line_has_tab(&line.items) {
+            tab_line(&mut line.items, &stops, fits && expands(index));
+        }
+    }
+}
+
+/// The variation axis values fontique chose for a parley run: when a font
+/// is variable, a requested `font-weight`, `font-stretch` or `font-style` is
+/// matched by setting its axes rather than by picking another file.
+pub(crate) fn run_variations<B: parley::Brush>(run: &parley::Run<'_, B>) -> FontVariations {
+    run.synthesis()
+        .variation_settings()
+        .iter()
+        .map(|(tag, value)| (tag.to_be_bytes(), *value))
+        .collect()
+}
+
+/// The bytes of a font file, shared without copying. Fonts found by Parley
+/// keep the [`parley::FontData`] blob they were loaded into (a CJK collection
+/// is tens of megabytes), and `@font-face` fonts keep their `Arc<Vec<u8>>`.
+#[derive(Clone)]
+pub struct FontBytes(Arc<dyn AsRef<[u8]> + Send + Sync>);
+
+impl FontBytes {
+    /// Shares the blob Parley loaded the font into.
+    pub fn from_blob(blob: &parley::fontique::Blob<u8>) -> Self {
+        Self(blob.clone().into_raw_parts().0)
+    }
+}
+
+impl std::ops::Deref for FontBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        (*self.0).as_ref()
+    }
+}
+
+impl AsRef<[u8]> for FontBytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::fmt::Debug for FontBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "FontBytes({} bytes)", self.len())
+    }
+}
+
+impl From<Vec<u8>> for FontBytes {
+    fn from(data: Vec<u8>) -> Self {
+        Self(Arc::new(data))
+    }
+}
+
+impl From<Arc<Vec<u8>>> for FontBytes {
+    fn from(data: Arc<Vec<u8>>) -> Self {
+        Self(data)
+    }
+}
+
+impl From<FontBytes> for krilla::Data {
+    fn from(data: FontBytes) -> Self {
+        data.0.into()
+    }
+}
+
+#[cfg(test)]
+mod font_bytes_tests {
+    use super::FontBytes;
+
+    #[test]
+    fn from_blob_shares_the_font_data() {
+        let blob = parley::fontique::Blob::from(vec![1u8, 2, 3]);
+        let bytes = FontBytes::from_blob(&blob);
+        assert_eq!(&*bytes, &[1, 2, 3]);
+        assert!(std::ptr::eq(bytes.as_ptr(), blob.data().as_ptr()));
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ShapedGlyphRun {
-    pub font_data: Arc<Vec<u8>>,
+    pub font_data: FontBytes,
     pub font_index: u32,
+    /// Variation axis values (e.g. `wght` = 700) that select the instance
+    /// of a variable font. Empty for static fonts.
+    pub variations: FontVariations,
     pub font_size: crate::units::Pt,
     pub color: [u8; 4], // RGBA
     pub decoration: TextDecoration,
@@ -182,6 +488,23 @@ pub struct ShapedGlyphRun {
     pub text: Arc<str>,
     pub x_offset: crate::units::Pt,
     pub link: Option<Arc<LinkSpan>>,
+    /// The language of the run's text when it is not the paragraph's
+    /// (`<span lang="de">` in an English paragraph). A tagged PDF gives
+    /// the run a marked-content sequence of its own with that `/Lang`.
+    pub lang: Option<Arc<str>>,
+    /// Whether `text` is the paragraph's own text, laid out by Parley, so the
+    /// glyphs' text ranges give the run's place in reading order. A list
+    /// marker put at the start of the first line has text of its own.
+    pub from_paragraph_text: bool,
+    /// The background colors of the inline elements the run is in (`<span>`,
+    /// `<mark>`), outermost first, up to the inline root (whose background is
+    /// its block's). Each is drawn behind the run's glyphs over the font's
+    /// ascent and descent, as Chromium paints an inline box's content area.
+    pub inline_backgrounds: Arc<[[u8; 4]]>,
+    /// The inline element with `role="img"` the run is in (`<span role="img"
+    /// aria-label="4 of 5 stars">★★★★☆</span>`), when there is one: its text
+    /// is the content of that element's `Figure`.
+    pub figure: Option<usize>,
 }
 
 /// Vertical alignment for inline replaced elements (images).
@@ -241,6 +564,9 @@ pub struct InlineBoxItem {
     pub link: Option<Arc<LinkSpan>>,
     pub opacity: f32,
     pub visible: bool,
+    /// The index in the paragraph's text the box sits at, for reading order
+    /// (see [`reading_order`]); `None` when it is not known.
+    pub text_index: Option<usize>,
 }
 
 /// A single item in a shaped line: text glyph run, inline image, or an
@@ -517,13 +843,110 @@ fn draw_decoration_line(
     canvas.surface.set_stroke(None);
 }
 
+/// One inline element's background on a line: contiguous runs at the same
+/// nesting depth with the same color, over the tallest ascent and descent.
+struct BackgroundSpan {
+    depth: usize,
+    color: [u8; 4],
+    x: f32,
+    end: f32,
+    top: f32,
+    bottom: f32,
+}
+
+/// Draw the backgrounds of the inline elements on a line (`<span>`,
+/// `<mark>`) behind its glyphs, outermost first. Each covers its runs'
+/// advance and their fonts' ascent and descent, the content area Chromium
+/// paints for an inline box. Adjacent runs of one element are merged, so no
+/// seam shows between them.
+fn draw_line_backgrounds(
+    canvas: &mut Canvas<'_, '_>,
+    items: &[LineItem],
+    x: crate::units::Pt,
+    baseline_y: crate::units::Pt,
+) {
+    let mut spans: Vec<BackgroundSpan> = Vec::new();
+    for item in items {
+        let LineItem::Text(run) = item else {
+            continue;
+        };
+        if run.inline_backgrounds.is_empty() {
+            continue;
+        }
+        let font_size = run.font_size.to_f32();
+        let (ascent, descent) = skrifa::FontRef::from_index(run.font_data.as_ref(), run.font_index)
+            .map(|font| {
+                let metrics = font.metrics(
+                    skrifa::instance::Size::new(font_size),
+                    skrifa::instance::LocationRef::default(),
+                );
+                (metrics.ascent, -metrics.descent)
+            })
+            .unwrap_or((font_size * 0.8, font_size * 0.2));
+        let run_x = (x + run.x_offset).to_f32();
+        let run_end = run_x
+            + run
+                .glyphs
+                .iter()
+                .map(|g| g.x_advance * font_size)
+                .sum::<f32>();
+        let top = baseline_y.to_f32() - ascent;
+        let bottom = baseline_y.to_f32() + descent;
+        for (depth, &color) in run.inline_backgrounds.iter().enumerate() {
+            let merged = spans.iter_mut().rev().find(|span| {
+                span.depth == depth && span.color == color && (run_x - span.end).abs() < 0.5
+            });
+            match merged {
+                Some(span) => {
+                    span.end = run_end;
+                    span.top = span.top.min(top);
+                    span.bottom = span.bottom.max(bottom);
+                }
+                None => spans.push(BackgroundSpan {
+                    depth,
+                    color,
+                    x: run_x,
+                    end: run_end,
+                    top,
+                    bottom,
+                }),
+            }
+        }
+    }
+    if spans.is_empty() {
+        return;
+    }
+    spans.sort_by_key(|span| span.depth);
+    canvas.as_artifact(|canvas| {
+        for span in &spans {
+            let Some(rect) = krilla::geom::Rect::from_ltrb(span.x, span.top, span.end, span.bottom)
+            else {
+                continue;
+            };
+            let [r, g, b, a] = span.color;
+            canvas.surface.set_fill(Some(krilla::paint::Fill {
+                paint: krilla::color::rgb::Color::new(r, g, b).into(),
+                opacity: krilla::num::NormalizedF32::new(a as f32 / 255.0)
+                    .unwrap_or(krilla::num::NormalizedF32::ONE),
+                rule: Default::default(),
+            }));
+            canvas.surface.set_stroke(None);
+            let mut path = krilla::geom::PathBuilder::new();
+            path.push_rect(rect);
+            if let Some(path) = path.finish() {
+                canvas.surface.draw_path(&path);
+            }
+        }
+    });
+}
+
 /// A contiguous span of runs sharing the same decoration attributes.
 struct DecorationSpan {
     x: crate::units::Pt,
     width: crate::units::Pt,
     decoration: TextDecoration,
     /// Use metrics from the first run in the span
-    font_data: Arc<Vec<u8>>,
+    font_data: FontBytes,
     font_index: u32,
     font_size: crate::units::Pt,
 }
@@ -565,13 +988,28 @@ fn draw_line_decorations(
             x: run_x,
             width: run_width,
             decoration: run.decoration,
-            font_data: Arc::clone(&run.font_data),
+            font_data: run.font_data.clone(),
             font_index: run.font_index,
             font_size: run.font_size,
         });
     }
 
-    for span in &spans {
+    if spans.is_empty() {
+        return;
+    }
+    // Decorations are drawn after the line's items, so on a line that ends
+    // in an inline box no run's sequence is open any more: they are
+    // decoration, an artifact. Inside an open sequence (a run's, or the
+    // paragraph's) they are drawn as part of it.
+    canvas.as_artifact(|canvas| draw_decoration_spans(canvas, &spans, baseline_y));
+}
+
+fn draw_decoration_spans(
+    canvas: &mut Canvas<'_, '_>,
+    spans: &[DecorationSpan],
+    baseline_y: crate::units::Pt,
+) {
+    for span in spans {
         let metrics =
             get_decoration_metrics(&span.font_data, span.font_index, span.font_size.to_f32());
 
@@ -644,30 +1082,172 @@ pub struct InlineBoxRenderCtx<'a> {
     pub margin_top_pt: f32,
 }
 
+/// What a per-run tagged region is for: the link its content is under
+/// (`Arc` identity pointer, `None` for non-link content) and the language
+/// of its text when that is not the paragraph's.
+#[derive(Clone, Debug, PartialEq)]
+struct RegionKey {
+    link: Option<usize>,
+    lang: Option<Arc<str>>,
+    figure: Option<usize>,
+}
+
+/// The places of a line's items in reading order, when that is not the
+/// order they are drawn in: Parley gives a line's items in visual order,
+/// left to right, which on a line with right-to-left text reads its runs
+/// backwards (`שלוש שתיים אחת` for `אחת שתיים שלוש`). A text run's place is
+/// the first byte of its text, an inline box's the text index it sits at,
+/// before the text there. An image, a run with text of its own or a box
+/// whose index is unknown (list markers) keeps the place of the item drawn
+/// before it. `None` when
+/// the items are already in reading order.
+pub(crate) fn reading_order(items: &[LineItem]) -> Option<Vec<usize>> {
+    let mut keys = Vec::with_capacity(items.len());
+    let mut previous = (0, 0);
+    let mut in_order = true;
+    for item in items {
+        let key = match item {
+            LineItem::Text(run) if run.from_paragraph_text => run
+                .glyphs
+                .iter()
+                .map(|g| g.text_range.start)
+                .min()
+                .map(|start| (start, 1)),
+            LineItem::InlineBox(inline_box) => inline_box.text_index.map(|index| (index, 0)),
+            LineItem::Text(_) | LineItem::Image(_) => None,
+        }
+        .unwrap_or(previous);
+        in_order &= key >= previous;
+        previous = key;
+        keys.push(key);
+    }
+    if in_order {
+        return None;
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&index| keys[index]);
+    Some(order)
+}
+
+/// A record of a line in reading order that waits for the end of the line.
+enum Deferred {
+    Run(crate::draw_primitives::ParagraphRunItem),
+    InlineBox {
+        content_id: crate::drawables::NodeId,
+        link: Option<usize>,
+    },
+}
+
+/// A line whose items are drawn in another order than they are read.
+struct ReorderedLine {
+    /// The reading-order place of each item, by item index.
+    places: Vec<usize>,
+    /// The place of the item being drawn.
+    place: usize,
+    deferred: Vec<(usize, Deferred)>,
+}
+
 /// Tracks the currently-open per-run tagged region while `draw_shaped_lines`
 /// walks the line items. Each transition between link spans (or to/from
-/// non-link content) closes the previous region and opens a new one.
+/// non-link content, or to text in another language) closes the previous
+/// region and opens a new one.
+///
+/// A line whose items are not drawn in reading order (right-to-left text)
+/// gives each item a region of its own and records them, and its inline
+/// boxes, in reading order when the line ends. The content stream keeps the
+/// visual order, as Chromium writes it, so the page and text extraction by
+/// content order stay as they are; the structure tree reads the line in
+/// order.
 struct RunRegionTracker {
     /// Paragraph NodeId under which `ParagraphRunItem`s are recorded.
     node_id: crate::drawables::NodeId,
-    /// `Some(ptr)` while a region is open; `ptr` is `None` for non-link
-    /// content or `Some(arc_ptr)` for content under an `<a>` span.
-    /// `None` means no region is currently open.
-    open_span_ptr: Option<Option<usize>>,
+    /// The key of the open region; `None` when no region is open.
+    open_key: Option<RegionKey>,
     /// Identifier returned by the matching `start_tagged` call.
     open_identifier: Option<krilla::tagging::Identifier>,
+    /// Set while drawing a line that is not in reading order.
+    reordered: Option<ReorderedLine>,
 }
 
 impl RunRegionTracker {
     fn new(node_id: crate::drawables::NodeId) -> Self {
         Self {
             node_id,
-            open_span_ptr: None,
+            open_key: None,
             open_identifier: None,
+            reordered: None,
         }
     }
 
-    /// Switch to the region identified by `new_span_ptr`, opening/closing
+    /// Start a line: when its items are not in reading order, each gets a
+    /// region of its own, recorded in reading order by [`Self::end_line`].
+    fn begin_line(&mut self, canvas: &mut Canvas<'_, '_>, items: &[LineItem]) {
+        let Some(order) = reading_order(items) else {
+            return;
+        };
+        self.close(canvas);
+        let mut places = vec![0; items.len()];
+        for (place, &index) in order.iter().enumerate() {
+            places[index] = place;
+        }
+        self.reordered = Some(ReorderedLine {
+            places,
+            place: 0,
+            deferred: Vec::new(),
+        });
+    }
+
+    /// Start drawing item `index` of the line.
+    fn begin_item(&mut self, canvas: &mut Canvas<'_, '_>, index: usize) {
+        if self.reordered.is_none() {
+            return;
+        }
+        self.close(canvas);
+        if let Some(line) = self.reordered.as_mut() {
+            line.place = line.places.get(index).copied().unwrap_or(index);
+        }
+    }
+
+    /// Note an inline box drawn between the runs of the paragraph.
+    fn note_inline_box(
+        &mut self,
+        canvas: &mut Canvas<'_, '_>,
+        content_id: crate::drawables::NodeId,
+        link: Option<usize>,
+    ) {
+        if let Some(line) = self.reordered.as_mut() {
+            line.deferred
+                .push((line.place, Deferred::InlineBox { content_id, link }));
+        } else if let Some(tc) = canvas.tag_collector.as_mut() {
+            tc.note_linked_inline_box(self.node_id, content_id, link);
+        }
+    }
+
+    /// End a line: a line not in reading order closes its last region and
+    /// records its regions and inline boxes in reading order.
+    fn end_line(&mut self, canvas: &mut Canvas<'_, '_>) {
+        if self.reordered.is_none() {
+            return;
+        }
+        self.close(canvas);
+        let Some(mut line) = self.reordered.take() else {
+            return;
+        };
+        line.deferred.sort_by_key(|(place, _)| *place);
+        let Some(tc) = canvas.tag_collector.as_mut() else {
+            return;
+        };
+        for (_, record) in line.deferred {
+            match record {
+                Deferred::Run(item) => tc.record_run(self.node_id, item),
+                Deferred::InlineBox { content_id, link } => {
+                    tc.note_linked_inline_box(self.node_id, content_id, link)
+                }
+            }
+        }
+    }
+
+    /// Switch to the region identified by `new_key`, opening/closing
     /// `start_tagged` regions as needed and recording closed regions on
     /// `canvas.tag_collector`.
     ///
@@ -679,27 +1259,33 @@ impl RunRegionTracker {
     /// so any link on the run falls through to `emit_link_annotations`'s
     /// unwired-fallback path (`add_annotation`) — no `add_tagged_annotation`
     /// call with an OBJR that would fail the later tag-tree consistency check.
-    fn transition_to(&mut self, canvas: &mut Canvas<'_, '_>, new_span_ptr: Option<usize>) {
-        if self.open_span_ptr == Some(new_span_ptr) {
+    fn transition_to(&mut self, canvas: &mut Canvas<'_, '_>, new_key: RegionKey) {
+        if self.open_key.as_ref() == Some(&new_key) {
             return;
         }
         self.close(canvas);
         if canvas.in_marked_content {
+            // Inside a group tagged as one sequence: the link's text is
+            // part of it, and the link gets a `Link` element there.
+            if let (Some(ptr), Some(tc)) = (new_key.link, canvas.tag_collector.as_mut()) {
+                tc.note_group_link(ptr);
+            }
             return;
         }
         use krilla::tagging::{ContentTag, SpanTag};
-        let id = canvas
-            .surface
-            .start_tagged(ContentTag::Span(SpanTag::empty()));
+        let id = canvas.surface.start_tagged(ContentTag::Span(
+            SpanTag::empty().with_lang(new_key.lang.as_deref()),
+        ));
         canvas.in_marked_content = true;
-        self.open_span_ptr = Some(new_span_ptr);
+        self.open_key = Some(new_key);
         self.open_identifier = Some(id);
     }
 
     /// Close the currently-open region (if any) and record it as a
-    /// `ParagraphRunItem` on the tag collector.
+    /// `ParagraphRunItem` on the tag collector, or keep it for the end of a
+    /// line not in reading order.
     fn close(&mut self, canvas: &mut Canvas<'_, '_>) {
-        let Some(span_ptr) = self.open_span_ptr.take() else {
+        let Some(key) = self.open_key.take() else {
             return;
         };
         canvas.surface.end_tagged();
@@ -707,15 +1293,21 @@ impl RunRegionTracker {
         let id = self
             .open_identifier
             .take()
-            .expect("open_identifier set whenever open_span_ptr is");
-        let item = match span_ptr {
-            Some(ptr) => crate::draw_primitives::ParagraphRunItem::LinkContent {
+            .expect("open_identifier set whenever open_key is");
+        let item = match (key.link, key.figure) {
+            (Some(ptr), _) => crate::draw_primitives::ParagraphRunItem::LinkContent {
                 span_ptr: ptr,
                 identifier: id,
             },
-            None => crate::draw_primitives::ParagraphRunItem::Content(id),
+            (None, Some(node_id)) => crate::draw_primitives::ParagraphRunItem::FigureContent {
+                node_id,
+                identifier: id,
+            },
+            (None, None) => crate::draw_primitives::ParagraphRunItem::Content(id),
         };
-        if let Some(tc) = canvas.tag_collector.as_mut() {
+        if let Some(line) = self.reordered.as_mut() {
+            line.deferred.push((line.place, Deferred::Run(item)));
+        } else if let Some(tc) = canvas.tag_collector.as_mut() {
             tc.record_run(self.node_id, item);
         }
     }
@@ -754,15 +1346,37 @@ pub fn draw_shaped_lines(
         let line_top_abs = y + line_top;
         let baseline_y = y + line.baseline;
 
-        for item in &line.items {
+        // Inline backgrounds go beneath the line's glyphs.
+        draw_line_backgrounds(canvas, &line.items, x, baseline_y);
+        if let Some(tracker) = run_region.as_mut() {
+            tracker.begin_line(canvas, &line.items);
+        }
+        for (index, item) in line.items.iter().enumerate() {
+            if let Some(tracker) = run_region.as_mut() {
+                tracker.begin_item(canvas, index);
+            }
             match item {
                 LineItem::Text(run) => {
                     if let Some(tracker) = run_region.as_mut() {
-                        tracker.transition_to(canvas, link_span_ptr(run.link.as_ref()));
+                        tracker.transition_to(
+                            canvas,
+                            RegionKey {
+                                link: link_span_ptr(run.link.as_ref()),
+                                lang: run.lang.clone(),
+                                figure: run.figure,
+                            },
+                        );
                     }
                     // Create Krilla font from cached data
-                    let data: krilla::Data = Arc::clone(&run.font_data).into();
-                    let Some(font) = krilla::text::Font::new(data, run.font_index) else {
+                    let data: krilla::Data = run.font_data.clone().into();
+                    let coords: Vec<(krilla::text::Tag, f32)> = run
+                        .variations
+                        .iter()
+                        .map(|(tag, value)| (krilla::text::Tag::new(tag), *value))
+                        .collect();
+                    let Some(font) =
+                        krilla::text::Font::new_variable(data, run.font_index, &coords)
+                    else {
                         continue;
                     };
 
@@ -834,7 +1448,14 @@ pub fn draw_shaped_lines(
                 }
                 LineItem::Image(img) => {
                     if let Some(tracker) = run_region.as_mut() {
-                        tracker.transition_to(canvas, link_span_ptr(img.link.as_ref()));
+                        tracker.transition_to(
+                            canvas,
+                            RegionKey {
+                                link: link_span_ptr(img.link.as_ref()),
+                                lang: None,
+                                figure: None,
+                            },
+                        );
                     }
                     if !img.visible {
                         continue;
@@ -882,6 +1503,16 @@ pub fn draw_shaped_lines(
                     // while the sub-dispatch also calls `start_tagged` panics.
                     if let Some(tracker) = run_region.as_mut() {
                         tracker.close(canvas);
+                        // The box's own element (a `Figure`, a `Span`) goes
+                        // here in the paragraph's reading order, between
+                        // the runs around it.
+                        if let Some(content_id) = ib.node_id {
+                            tracker.note_inline_box(
+                                canvas,
+                                content_id,
+                                link_span_ptr(ib.link.as_ref()),
+                            );
+                        }
                     }
                     let saved_link_run_node_id = canvas.link_run_node_id.take();
                     if !ib.visible {
@@ -933,6 +1564,15 @@ pub fn draw_shaped_lines(
                             off_x.as_pt(),
                             off_y.as_pt(),
                         );
+                        // A fractional opacity makes the box one group, and
+                        // marked content opened inside a group is lost: tag
+                        // the whole box as its content's, before the group.
+                        let group_tag = crate::render::start_opacity_group_tagged(
+                            canvas,
+                            content_id,
+                            ctx.drawables,
+                            ib.opacity,
+                        );
                         crate::draw_primitives::draw_with_opacity(canvas, ib.opacity, |canvas| {
                             if let Some(lc) = canvas.link_collector.as_deref_mut() {
                                 lc.push_transform(link_affine);
@@ -957,6 +1597,7 @@ pub fn draw_shaped_lines(
                                 lc.pop_transform();
                             }
                         });
+                        crate::render::finish_group_tagged(canvas, group_tag);
                     }
 
                     // Link rect built after the opacity block ends, so link
@@ -979,6 +1620,9 @@ pub fn draw_shaped_lines(
 
         // Draw decorations after all glyphs so lines appear on top
         draw_line_decorations(canvas, &line.items, x, baseline_y);
+        if let Some(tracker) = run_region.as_mut() {
+            tracker.end_line(canvas);
+        }
 
         line_top += line.height;
     }
@@ -1559,6 +2203,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         });
         match item {
             LineItem::InlineBox(ib) => {
@@ -1576,8 +2221,9 @@ mod tests {
     fn line_item_debug_impl_covers_all_variants() {
         // Text variant — delegates to the ShapedGlyphRun derive.
         let glyph_run = ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -1585,6 +2231,10 @@ mod tests {
             text: Arc::from("hi"),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         };
         let text = LineItem::Text(glyph_run);
         assert!(format!("{:?}", text).contains("Text"));
@@ -1603,6 +2253,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         });
         let s = format!("{:?}", ib);
         assert!(s.contains("InlineBox"), "{}", s);
@@ -1617,8 +2268,9 @@ mod tests {
     #[test]
     fn recalculate_line_box_text_items_are_skipped() {
         let run = ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -1626,6 +2278,10 @@ mod tests {
             text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         };
         let mut line = text_line(16.0, 12.0);
         line.items.push(LineItem::Text(run));
@@ -1793,6 +2449,7 @@ mod tests {
                     link: None,
                     opacity: 1.0,
                     visible: true,
+                    text_index: None,
                 }),
             ],
         };
@@ -1830,8 +2487,9 @@ mod link_span_tests {
     #[test]
     fn shaped_glyph_run_default_has_no_link() {
         let run = ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -1839,6 +2497,10 @@ mod link_span_tests {
             text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         };
         assert!(run.link.is_none());
     }
@@ -2421,6 +3083,7 @@ mod draw_decoration_direct_tests {
             link: None,
             opacity: 1.0,
             visible,
+            text_index: None,
         }
     }
 
@@ -2483,8 +3146,9 @@ mod draw_decoration_direct_tests {
         };
 
         let make_run = |x_offset_pt: f32| ShapedGlyphRun {
-            font_data: Arc::new(Vec::new()),
+            font_data: crate::paragraph::FontBytes::from(Vec::new()),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 10.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration,
@@ -2498,6 +3162,10 @@ mod draw_decoration_direct_tests {
             text: Arc::from("a"),
             x_offset: x_offset_pt.as_pt(),
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         };
 
         let items = vec![

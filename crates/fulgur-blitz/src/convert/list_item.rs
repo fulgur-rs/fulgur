@@ -1,6 +1,8 @@
 use super::*;
 use super::{inline_root, list_marker, positioned, pseudo};
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::units::F32Units;
+use blitz_dom::CopyStyleGetters;
 
 /// Dispatcher entry for list-item nodes.
 ///
@@ -14,10 +16,10 @@ pub(super) fn try_convert(
     depth: usize,
     out: &mut crate::drawables::Drawables,
 ) -> bool {
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
-    let (width, height) = size_in_pt(node.final_layout.size);
+    let (width, height) = size_in_pt(node.final_layout_or_zero().size);
 
     // Outside marker (must run before inline-root check).
     if let Some(elem_data) = node.element_data()
@@ -79,7 +81,12 @@ pub(super) fn try_convert(
 
         let line_height = {
             use ::style::values::computed::font::LineHeight;
-            let font_size_pt = styles.clone_font_size().used_size().px().as_px().in_pt();
+            let font_size_pt = styles
+                .slow_clone_font_size()
+                .used_size()
+                .px()
+                .as_px()
+                .in_pt();
             match styles.clone_line_height() {
                 LineHeight::Normal => font_size_pt * DEFAULT_LINE_HEIGHT_RATIO,
                 LineHeight::Number(num) => font_size_pt * num.0,
@@ -131,7 +138,12 @@ pub(super) fn try_convert(
         let content_box = compute_content_box(node, &style);
 
         let (font_size_pt, line_height) = if let Some(styles) = node.primary_styles() {
-            let fs = styles.clone_font_size().used_size().px().as_px().in_pt();
+            let fs = styles
+                .slow_clone_font_size()
+                .used_size()
+                .px()
+                .as_px()
+                .in_pt();
             let lh = {
                 use ::style::values::computed::font::LineHeight;
                 match styles.clone_line_height() {
@@ -149,9 +161,11 @@ pub(super) fn try_convert(
         let color = get_text_color(doc, node_id);
 
         let layout_children_guard_inside = node.layout_children.borrow();
-        let children: &[usize] = layout_children_guard_inside
-            .as_deref()
-            .unwrap_or(&node.children);
+        let children: &[usize] = &crate::blitz_adapter::uids(
+            layout_children_guard_inside
+                .as_deref()
+                .unwrap_or(&node.children),
+        );
 
         // For the empty-li case we need the marker BEFORE walking; the
         // non-empty case computes its marker after the child walk so the
@@ -296,6 +310,8 @@ pub(super) fn try_convert(
 /// append-only, one-insert-per-NodeId invariant on `TrackedMap` in
 /// convert.
 #[must_use = "returns Err(item) on failure; the handed-back item must be reused or explicitly dropped"]
+// The error is the caller's own item handed back, not a new value to box.
+#[allow(clippy::result_large_err)]
 fn inject_marker_into_first_paragraph(
     out: &mut crate::drawables::Drawables,
     mark: crate::drawables::DrawMark,
@@ -348,7 +364,7 @@ fn build_list_item_body(
         let paragraph_opt = inline_root::extract_paragraph(doc, node, ctx, depth, out);
 
         let before_inline = node
-            .before
+            .before()
             .and_then(|id| doc.get_node(id))
             .filter(|p| !pseudo::is_block_pseudo(p))
             .and_then(|p| {
@@ -360,11 +376,15 @@ fn build_list_item_body(
                 )
             })
             .map(|mut img| {
-                pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
+                pseudo::attach_link_to_inline_image(
+                    &mut img,
+                    doc,
+                    crate::blitz_adapter::uid(node.id),
+                );
                 img
             });
         let after_inline = node
-            .after
+            .after()
             .and_then(|id| doc.get_node(id))
             .filter(|p| !pseudo::is_block_pseudo(p))
             .and_then(|p| {
@@ -376,7 +396,11 @@ fn build_list_item_body(
                 )
             })
             .map(|mut img| {
-                pseudo::attach_link_to_inline_image(&mut img, doc, node.id);
+                pseudo::attach_link_to_inline_image(
+                    &mut img,
+                    doc,
+                    crate::blitz_adapter::uid(node.id),
+                );
                 img
             });
 
@@ -391,7 +415,7 @@ fn build_list_item_body(
                 paragraph.cached_height = paragraph.lines.iter().map(|l| l.height.to_f32()).sum();
             }
             out.paragraphs.insert(
-                node.id,
+                crate::blitz_adapter::uid(node.id),
                 crate::drawables::ParagraphEntry {
                     lines: paragraph.lines,
                     opacity: 1.0,
@@ -417,7 +441,7 @@ fn build_list_item_body(
             let font_metrics = inline_root::metrics_from_line(&line);
             crate::paragraph::recalculate_line_box(&mut line, &font_metrics);
             out.paragraphs.insert(
-                node.id,
+                crate::blitz_adapter::uid(node.id),
                 crate::drawables::ParagraphEntry {
                     lines: vec![line],
                     opacity: 1.0,
@@ -430,13 +454,17 @@ fn build_list_item_body(
             // Inline root with no text and no inline pseudo images — fall
             // through to non-inline-root walk.
             let layout_children_guard_1 = node.layout_children.borrow();
-            let children: &[usize] = layout_children_guard_1.as_deref().unwrap_or(&node.children);
+            let children: &[usize] = &crate::blitz_adapter::uids(
+                layout_children_guard_1.as_deref().unwrap_or(&node.children),
+            );
             positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
             pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
         }
     } else {
         let layout_children_guard_2 = node.layout_children.borrow();
-        let children: &[usize] = layout_children_guard_2.as_deref().unwrap_or(&node.children);
+        let children: &[usize] = &crate::blitz_adapter::uids(
+            layout_children_guard_2.as_deref().unwrap_or(&node.children),
+        );
         positioned::walk_children_into_drawables(doc, children, ctx, depth, out);
         pseudo::register_pseudo_content(doc, node, ctx, depth, content_box, out);
     }
@@ -505,6 +533,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         })
     }
 
@@ -620,8 +649,9 @@ mod tests {
             .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 0.0)])]));
         // Two glyphs, each x_advance=0.5, font_size=12 → shift = 2 × 0.5 × 12 = 12.
         let text_marker = LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -644,6 +674,10 @@ mod tests {
             text: Arc::from("• "),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         });
         assert!(inject_marker_into_first_paragraph(&mut out, mark, text_marker).is_ok());
         let LineItem::InlineBox(ib) = &out.paragraphs[&5].lines[0].items[1] else {
@@ -734,8 +768,9 @@ mod tests {
 
     fn make_text_run(x_offset: f32) -> LineItem {
         LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -743,6 +778,10 @@ mod tests {
             text: Arc::from(""),
             x_offset: x_offset.as_pt(),
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         })
     }
 
@@ -863,8 +902,9 @@ mod tests {
         out.paragraphs
             .insert(5, make_para(vec![make_line(vec![inline_box(20.0, 7.0)])]));
         let zero_glyph_marker = LineItem::Text(ShapedGlyphRun {
-            font_data: Arc::new(vec![]),
+            font_data: crate::paragraph::FontBytes::from(vec![]),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: TextDecoration::default(),
@@ -872,6 +912,10 @@ mod tests {
             text: Arc::from(""),
             x_offset: crate::units::Pt::ZERO,
             link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         });
         assert!(inject_marker_into_first_paragraph(&mut out, mark, zero_glyph_marker).is_ok());
         // shift = 0 → existing InlineBox stays at x_offset=7.

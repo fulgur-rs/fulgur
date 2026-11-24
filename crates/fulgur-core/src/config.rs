@@ -151,6 +151,70 @@ impl Default for Margin {
     }
 }
 
+/// A PDF/A conformance level (ISO 19005), for long-term archiving.
+///
+/// The letter is the conformance: `b` keeps the visual appearance, `u`
+/// also requires every glyph to map to Unicode, so text can be extracted,
+/// and `a` (accessible) also requires a tagged structure, a document
+/// language and alternate text for images; it turns tagging on.
+/// PDF/A-1 does not allow transparency; PDF/A-3 also allows embedded files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdfA {
+    A1b,
+    A2b,
+    A2u,
+    A2a,
+    A3b,
+    A3u,
+    A3a,
+}
+
+impl PdfA {
+    /// The level as it is usually written: `"1b"`, `"2b"`, `"2u"`, …
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PdfA::A1b => "1b",
+            PdfA::A2b => "2b",
+            PdfA::A2u => "2u",
+            PdfA::A2a => "2a",
+            PdfA::A3b => "3b",
+            PdfA::A3u => "3u",
+            PdfA::A3a => "3a",
+        }
+    }
+
+    /// Whether the level is an accessible (`a`) one, which needs tagging.
+    pub fn is_accessible(self) -> bool {
+        matches!(self, PdfA::A2a | PdfA::A3a)
+    }
+}
+
+impl std::str::FromStr for PdfA {
+    type Err = String;
+
+    /// Parses `"2b"`, `"A-2b"`, `"pdf/a-2b"` and similar, ignoring case.
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let lower = s.to_ascii_lowercase();
+        let level = lower
+            .trim_start_matches("pdf/a")
+            .trim_start_matches("pdfa")
+            .trim_start_matches('a')
+            .trim_start_matches('-');
+        match level {
+            "1b" => Ok(PdfA::A1b),
+            "2b" => Ok(PdfA::A2b),
+            "2u" => Ok(PdfA::A2u),
+            "2a" => Ok(PdfA::A2a),
+            "3b" => Ok(PdfA::A3b),
+            "3u" => Ok(PdfA::A3u),
+            "3a" => Ok(PdfA::A3a),
+            _ => Err(format!(
+                "unknown PDF/A level {s:?}; expected 1b, 2b, 2u, 2a, 3b, 3u or 3a"
+            )),
+        }
+    }
+}
+
 /// Tracks which Config fields were explicitly set by the caller (CLI/API).
 /// When true, the field takes precedence over CSS @page declarations.
 #[derive(Debug, Clone, Copy, Default)]
@@ -181,6 +245,35 @@ pub struct Config {
     pub enable_tagging: bool,
     /// Enable PDF/UA-1 conformance (implies enable_tagging).
     pub pdf_ua: bool,
+    /// Write a PDF/A file of this level and check that the content allows
+    /// it. PDF/A needs a creation date ([`creation_date`](Self::creation_date))
+    /// and cannot be combined with `pdf_ua`.
+    pub pdf_a: Option<PdfA>,
+    /// Viewport height in CSS px for `vh` units and percentage heights on
+    /// the root. `None` uses the page content height. Pagination always
+    /// uses the page, so a tall page with a screen-sized viewport lays a
+    /// document out as one continuous screen page.
+    pub viewport_height: Option<f32>,
+    /// Content scale. The document is laid out on a page `1 / scale` times
+    /// the page size in CSS px, margins included, and each page is drawn
+    /// scaled by `scale` onto the real page: 0.8 prints everything at 80%,
+    /// with more content per page. 1 by default.
+    pub scale: f32,
+    /// Shrink content wider than the page to fit it: when the laid-out
+    /// content is wider than the page's content area, the document is laid
+    /// out again at a lower [`scale`](Self::scale), down to this minimum, as
+    /// browsers do when printing. `None` (the default) never shrinks.
+    pub shrink_to_fit: Option<f32>,
+    /// Clip the page content to the page area, the page inside its
+    /// margins, as Chromium does when printing: content that overflows
+    /// into the margins is not drawn. The root and body backgrounds and the
+    /// `@page` margin boxes are not clipped. Off by default.
+    pub clip_to_page_area: bool,
+    /// Move the page area to the nearest whole CSS pixel of the printed
+    /// page, keeping its exact width and height, as Chromium does when
+    /// printing: with 10 mm margins (37.8px) the content starts at 38px.
+    /// The `@page` margin boxes stay where they are. Off by default.
+    pub snap_page_area_origin: bool,
 }
 
 impl Default for Config {
@@ -201,6 +294,12 @@ impl Default for Config {
             bookmarks: false,
             enable_tagging: false,
             pdf_ua: false,
+            pdf_a: None,
+            viewport_height: None,
+            scale: 1.0,
+            shrink_to_fit: None,
+            clip_to_page_area: false,
+            snap_page_area_origin: false,
         }
     }
 }
@@ -217,7 +316,7 @@ impl Config {
         } else {
             self.page_size
         };
-        ps.width - self.margin.left - self.margin.right
+        (ps.width - self.margin.left - self.margin.right) / self.scale
     }
 
     /// Content area height (page height minus top and bottom margins)
@@ -227,7 +326,7 @@ impl Config {
         } else {
             self.page_size
         };
-        ps.height - self.margin.top - self.margin.bottom
+        (ps.height - self.margin.top - self.margin.bottom) / self.scale
     }
 
     /// Physical page height in PDF pt (before subtracting margins).
@@ -237,17 +336,36 @@ impl Config {
     /// `@page { margin: 0; }` together with `height: 100vh`, meaning the page
     /// content area equals the physical page height.
     pub fn page_height(&self) -> f32 {
-        if self.landscape {
+        let height = if self.landscape {
             self.page_size.landscape().height
         } else {
             self.page_size.height
-        }
+        };
+        height / self.scale
+    }
+
+    /// `size` and `margin` (in PDF pt) as the layout sees them: divided by
+    /// [`scale`](Self::scale).
+    pub fn scale_for_layout(&self, size: PageSize, margin: Margin) -> (PageSize, Margin) {
+        let s = self.scale;
+        (
+            PageSize {
+                width: size.width / s,
+                height: size.height / s,
+            },
+            Margin {
+                top: margin.top / s,
+                right: margin.right / s,
+                bottom: margin.bottom / s,
+                left: margin.left / s,
+            },
+        )
     }
 
     /// Returns true if tagging should be enabled in the PDF output.
-    /// pdf_ua implies tagging.
+    /// pdf_ua and the accessible PDF/A levels (2a, 3a) imply tagging.
     pub fn effective_tagging(&self) -> bool {
-        self.enable_tagging || self.pdf_ua
+        self.enable_tagging || self.pdf_ua || self.pdf_a.is_some_and(PdfA::is_accessible)
     }
 
     /// Returns true if bookmarks should be generated.
@@ -265,6 +383,19 @@ impl Config {
     /// viewport height.
     #[doc(hidden)]
     pub fn validate(&self) -> crate::Result<()> {
+        if !self.scale.is_finite() || self.scale <= 0.0 {
+            return Err(crate::Error::PdfGeneration(format!(
+                "invalid scale {}: must be finite and positive",
+                self.scale
+            )));
+        }
+        if let Some(min) = self.shrink_to_fit
+            && (!min.is_finite() || min <= 0.0)
+        {
+            return Err(crate::Error::PdfGeneration(format!(
+                "invalid shrink-to-fit minimum {min}: must be finite and positive"
+            )));
+        }
         let ps = if self.landscape {
             self.page_size.landscape()
         } else {
@@ -316,6 +447,15 @@ impl ConfigBuilder {
     pub fn margin(mut self, margin: Margin) -> Self {
         self.config.margin = margin;
         self.config.overrides.margin = true;
+        self
+    }
+
+    /// The page margins used where the document's `@page` rules do not set
+    /// them. Unlike [`margin`](Self::margin), CSS `@page` margins still win,
+    /// as in browsers.
+    pub fn default_margin(mut self, margin: Margin) -> Self {
+        self.config.margin = margin;
+        self.config.overrides.margin = false;
         self
     }
 
@@ -386,6 +526,42 @@ impl ConfigBuilder {
 
     pub fn pdf_ua(mut self, enabled: bool) -> Self {
         self.config.pdf_ua = enabled;
+        self
+    }
+
+    /// See [`Config::pdf_a`].
+    pub fn pdf_a(mut self, level: PdfA) -> Self {
+        self.config.pdf_a = Some(level);
+        self
+    }
+
+    /// See [`Config::viewport_height`].
+    pub fn viewport_height(mut self, height_px: f32) -> Self {
+        self.config.viewport_height = Some(height_px);
+        self
+    }
+
+    /// See [`Config::scale`].
+    pub fn scale(mut self, scale: f32) -> Self {
+        self.config.scale = scale;
+        self
+    }
+
+    /// See [`Config::shrink_to_fit`].
+    pub fn shrink_to_fit(mut self, min_scale: f32) -> Self {
+        self.config.shrink_to_fit = Some(min_scale);
+        self
+    }
+
+    /// See [`Config::clip_to_page_area`].
+    pub fn clip_to_page_area(mut self, clip: bool) -> Self {
+        self.config.clip_to_page_area = clip;
+        self
+    }
+
+    /// See [`Config::snap_page_area_origin`].
+    pub fn snap_page_area_origin(mut self, snap: bool) -> Self {
+        self.config.snap_page_area_origin = snap;
         self
     }
 
@@ -528,6 +704,15 @@ mod tests {
     }
 
     #[test]
+    fn test_default_margin_is_not_an_override() {
+        let config = Config::builder()
+            .default_margin(Margin::uniform_mm(10.0))
+            .build();
+        assert!(!config.overrides.margin);
+        assert_eq!(config.margin, Margin::uniform_mm(10.0));
+    }
+
+    #[test]
     fn test_config_builder_tracks_overrides() {
         let config = Config::builder()
             .page_size(PageSize::LETTER)
@@ -593,6 +778,33 @@ mod tests {
     fn config_builder_pdf_ua_sets_flag() {
         let config = Config::builder().pdf_ua(true).build();
         assert!(config.pdf_ua);
+    }
+
+    #[test]
+    fn pdf_a_levels_parse_in_their_usual_spellings() {
+        for (text, level) in [
+            ("2b", PdfA::A2b),
+            ("A-2B", PdfA::A2b),
+            ("pdf/a-3u", PdfA::A3u),
+            ("PDFA1b", PdfA::A1b),
+            ("2u", PdfA::A2u),
+            ("3b", PdfA::A3b),
+        ] {
+            assert_eq!(text.parse::<PdfA>(), Ok(level), "{text}");
+            assert_eq!(level.as_str().parse::<PdfA>(), Ok(level));
+        }
+        assert_eq!("2a".parse::<PdfA>(), Ok(PdfA::A2a));
+        assert_eq!("PDF/A-3a".parse::<PdfA>(), Ok(PdfA::A3a));
+        assert!(PdfA::A2a.is_accessible() && !PdfA::A2u.is_accessible());
+        assert!("1a".parse::<PdfA>().is_err());
+        assert!("4".parse::<PdfA>().is_err());
+    }
+
+    #[test]
+    fn config_builder_pdf_a_sets_the_level() {
+        assert_eq!(Config::default().pdf_a, None);
+        let config = Config::builder().pdf_a(PdfA::A3b).build();
+        assert_eq!(config.pdf_a, Some(PdfA::A3b));
     }
 
     #[test]

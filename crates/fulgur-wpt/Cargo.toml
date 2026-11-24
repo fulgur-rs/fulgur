@@ -11,11 +11,15 @@ description = "W3C web-platform-tests runner for fulgur (dev-only, not published
 ## Render through the unpublished Raikiri backend when
 ## `FULGUR_WPT_ENGINE=raikiri` is set. Off by default so the Blitz WPT jobs
 ## and the workspace CI never compile Raikiri.
-raikiri = ["dep:fulgur-raikiri", "dep:fontique"]
+# TODO(blitz-master): restore `["dep:fulgur-raikiri", "dep:fontique"]` with
+# the dependency. Kept as an empty feature so `cfg(feature = "raikiri")`
+# stays a known cfg value.
+raikiri = []
 
 [dependencies]
 fulgur = { path = "../fulgur" }
-fulgur-raikiri = { path = "../fulgur-raikiri", optional = true }
+# TODO(blitz-master): re-enable once raikiri-svg allows svgtypes ^0.16.2
+# fulgur-raikiri = { path = "../fulgur-raikiri", optional = true }
 fulgur-vrt = { path = "../fulgur-vrt" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1"

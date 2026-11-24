@@ -24,7 +24,7 @@ pub mod tagging;
 pub mod units;
 
 pub use asset::AssetBundle;
-pub use config::{Config, ConfigBuilder, Margin, PageSize};
+pub use config::{Config, ConfigBuilder, Margin, PageSize, PdfA};
 pub use error::{Error, Result};
 
 /// Upper bound on how many `/Parent` references [`inspect::resolve_page_resources`]

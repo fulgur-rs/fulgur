@@ -1,3 +1,4 @@
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::config::Config;
 use crate::draw_primitives::Canvas;
 use crate::drawables::Drawables;
@@ -35,11 +36,23 @@ pub fn render_v2(
     anchor_map: Option<&AnchorMap>,
     implicit_href_by_page: &BTreeMap<usize, String>,
 ) -> Result<Vec<u8>> {
+    if config.pdf_ua && config.pdf_a.is_some() {
+        return Err(Error::PdfGeneration(
+            "PDF/UA and PDF/A cannot be combined".into(),
+        ));
+    }
+    if config.pdf_ua
+        && let Some(problem) = heading_level_problem(drawables)
+    {
+        return Err(Error::PdfGeneration(format!(
+            "cannot write PDF/UA-1: {problem}"
+        )));
+    }
     let mut document = if config.effective_tagging() {
         let configuration = if config.pdf_ua {
             Configuration::new_with_validator(Validator::UA1)
         } else {
-            Configuration::new()
+            pdf_a_configuration(config)
         };
         krilla::Document::new_with(SerializeSettings {
             enable_tagging: true,
@@ -47,7 +60,10 @@ pub fn render_v2(
             ..serialize_settings
         })
     } else {
-        krilla::Document::new_with(serialize_settings)
+        krilla::Document::new_with(SerializeSettings {
+            configuration: pdf_a_configuration(config),
+            ..serialize_settings
+        })
     };
 
     let mut bookmark_collector = if config.effective_bookmarks() {
@@ -69,7 +85,15 @@ pub fn render_v2(
     // (shared node_id case — see `convert::replaced` /
     // `convert::inline_root`); paragraph wins so the shared-id case
     // resolves to the inline-root's anchor.
+    // The layout works on the page divided by `config.scale` (see
+    // `resolve_page_settings`); each page is drawn scaled back onto the real
+    // page, and the link and destination coordinates scaled with it.
+    let scale = config.scale;
+    let page_scale = crate::draw_primitives::Affine2D::scale(scale, scale);
     let mut dest_registry = crate::draw_primitives::DestinationRegistry::new();
+    if scale != 1.0 {
+        dest_registry.push_transform(page_scale);
+    }
     for (&node_id, geom) in geometry {
         let Some(first_frag) = geom.fragments.first() else {
             continue;
@@ -101,6 +125,7 @@ pub fn render_v2(
                     config,
                     drawables.root_dir_rtl,
                 );
+            let resolved_margin = page_area_origin(resolved_margin, config);
             // `frag.x` is html-relative (already includes body's x
             // offset from the fragmenter); only y needs `body_offset_pt`
             // applied, and only on page 0 (continuation pages are already
@@ -125,8 +150,16 @@ pub fn render_v2(
     // unclipped so `@page @bottom-*` anchors remain clickable.
     let mut body_link_collector = crate::draw_primitives::LinkCollector::new();
     let mut margin_link_collector = crate::draw_primitives::LinkCollector::new();
+    if scale != 1.0 {
+        body_link_collector.push_transform(page_scale);
+        margin_link_collector.push_transform(page_scale);
+    }
 
-    let mut link_annot_ids: BTreeMap<usize, Vec<krilla::tagging::Identifier>> = BTreeMap::new();
+    // Tagged link annotations of body links, by link: (page, identifier).
+    let mut link_annot_ids: LinkAnnotationIds = BTreeMap::new();
+    // Tagged link annotations of margin-box links. Their text is a
+    // pagination artifact, so each gets a `Link` element of its own.
+    let mut margin_link_annot_ids: Vec<Identifier> = Vec::new();
 
     // Build the GCPM margin-box renderer once. Reused across pages so
     // measure / layout / render caches survive between pages and the
@@ -141,7 +174,9 @@ pub fn render_v2(
         string_set_by_node,
         page_count,
         implicit_href_by_page,
+        drawables.root_dir_rtl,
     );
+    margin_box_renderer.tag_artifacts = config.effective_tagging();
 
     // Page-independent skip sets. These reference only `drawables.*`
     // (transforms / block_styles / tables) and never change across
@@ -197,18 +232,34 @@ pub fn render_v2(
         } else {
             resolved_size
         };
-        let settings = krilla::page::PageSettings::from_wh(page_size.width, page_size.height)
-            .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
-        let content_area = resolved_content_area(page_size, resolved_margin);
+        let settings =
+            krilla::page::PageSettings::from_wh(page_size.width * scale, page_size.height * scale)
+                .ok_or_else(|| Error::PdfGeneration("Invalid page dimensions".into()))?;
+        // `resolved_margin` places the page area for the body content;
+        // the margin boxes use `box_margin`, the margins as given.
+        let box_margin = resolved_margin;
+        let box_content_width = resolved_content_area(page_size, box_margin).width;
+        let resolved_margin = page_area_origin(resolved_margin, config);
+        let content_area = crate::draw_primitives::Rect {
+            x: resolved_margin.left.as_pt(),
+            y: resolved_margin.top.as_pt(),
+            ..resolved_content_area(page_size, box_margin)
+        };
         let mut page = document.start_page_with(settings);
         if let Some(c) = bookmark_collector.as_mut() {
             c.set_current_page(page_idx);
+        }
+        if let Some(tc) = tag_collector.as_mut() {
+            tc.set_current_page(page_idx);
         }
         body_link_collector.set_current_page(page_idx);
         margin_link_collector.set_current_page(page_idx);
         let page_has_margin_box_paint;
         {
             let mut surface = page.surface();
+            if scale != 1.0 {
+                surface.push_transform(&krilla::geom::Transform::from_scale(scale, scale));
+            }
             {
                 let mut canvas = crate::draw_primitives::Canvas {
                     surface: &mut surface,
@@ -282,6 +333,18 @@ pub fn render_v2(
                 } else {
                     resolved_margin.top
                 };
+                // Content overflowing the page area into the margins is
+                // cut off, as Chromium prints it.
+                let page_area_clip = if config.clip_to_page_area {
+                    page_area_path(content_area)
+                } else {
+                    None
+                };
+                if let Some(clip) = &page_area_clip {
+                    canvas
+                        .surface
+                        .push_clip_path(clip, &krilla::paint::FillRule::default());
+                }
                 draw_v2_page(
                     &mut canvas,
                     page_idx as u32,
@@ -294,6 +357,9 @@ pub fn render_v2(
                     &opacity_wrapped_descendants,
                     page_node_ids,
                 );
+                if page_area_clip.is_some() {
+                    canvas.surface.pop();
+                }
             }
             // Paint margin boxes after body content so page headers /
             // footers are not hidden by page-filling body backgrounds.
@@ -309,18 +375,21 @@ pub fn render_v2(
                 link_run_node_id: None,
                 in_marked_content: false,
             };
-            let page_content_width = content_area.width.to_f32();
+            let page_content_width = box_content_width.to_f32();
             let any_margin_box_painted = margin_box_renderer.render_page(
                 &mut margin_canvas,
                 page_idx,
                 page_num,
                 page_count,
                 page_size,
-                resolved_margin,
+                box_margin,
                 page_content_width,
                 anchor_map,
             );
             page_has_margin_box_paint = any_margin_box_painted;
+            if scale != 1.0 {
+                surface.pop();
+            }
         }
         // Body occurrences are clipped to the content area rect ONLY
         // when at least one `@page` margin box actually painted on
@@ -336,7 +405,14 @@ pub fn render_v2(
         // used earlier this iteration — see `resolved_content_area`.
         let raw_body_page = body_link_collector.take_page(page_idx);
         let body_per_page = if page_has_margin_box_paint {
-            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &content_area)
+            // The occurrences are already scaled to the real page.
+            let scaled_area = crate::draw_primitives::Rect {
+                x: content_area.x * scale,
+                y: content_area.y * scale,
+                width: content_area.width * scale,
+                height: content_area.height * scale,
+            };
+            crate::link::clip_body_occurrences_to_content_area(raw_body_page, &scaled_area)
         } else {
             raw_body_page
         };
@@ -353,35 +429,138 @@ pub fn render_v2(
             &dest_registry,
             wired_ptrs.as_ref(),
         ) {
-            link_annot_ids.entry(ptr).or_default().push(id);
+            link_annot_ids.entry(ptr).or_default().push((page_idx, id));
         }
-        for (ptr, id) in crate::link::emit_link_annotations(
+        // PDF/UA requires every link annotation to be in a `Link` element,
+        // margin boxes included, so a tagged document tags every margin-box
+        // link. Their pointers belong to the margin boxes' own drawables,
+        // so they are kept apart from the body's.
+        let margin_ptrs: Option<std::collections::BTreeSet<usize>> = tag_collector
+            .as_ref()
+            .map(|_| margin_per_page.iter().map(|occ| occ.span_ptr).collect());
+        for (_, id) in crate::link::emit_link_annotations(
             &mut page,
             &margin_per_page,
             &dest_registry,
-            wired_ptrs.as_ref(),
+            margin_ptrs.as_ref(),
         ) {
-            link_annot_ids.entry(ptr).or_default().push(id);
+            margin_link_annot_ids.push(id);
         }
     }
 
     if let Some(tc) = tag_collector {
         let mut tree = TagTree::new().with_lang(config.lang.clone());
         build_struct_tree(tc, drawables, &link_annot_ids, &mut tree);
+        for id in margin_link_annot_ids {
+            tree.push(Node::Group(annotation_only_link([id])));
+        }
         document.set_tag_tree(tree);
     }
 
     if let Some(c) = bookmark_collector {
-        let entries = c.into_entries();
+        let mut entries = c.into_entries();
+        for entry in &mut entries {
+            entry.y_pt *= scale;
+        }
+        // PDF/UA requires an outline. A document without headings gets
+        // one entry, named after the document, for its first page.
+        if entries.is_empty() && config.pdf_ua {
+            let title = config
+                .title
+                .clone()
+                .or_else(|| html_title.clone())
+                .filter(|t| !t.trim().is_empty());
+            if let Some(label) = title {
+                entries.push(crate::draw_primitives::BookmarkEntry {
+                    page_idx: 0,
+                    y_pt: crate::units::Pt::ZERO,
+                    level: 1,
+                    label,
+                });
+            }
+        }
         if !entries.is_empty() {
             document.set_outline(crate::outline::build_outline(&entries));
         }
     }
 
     document.set_metadata(build_metadata(config, html_title.as_deref()));
-    document
-        .finish()
-        .map_err(|e| Error::PdfGeneration(format!("{e:?}")))
+    document.finish().map_err(|e| match e {
+        krilla::error::KrillaError::Validation(errors) => {
+            let standard = match config.pdf_a {
+                Some(level) => format!("PDF/A-{}", level.as_str()),
+                None => "PDF/UA-1".to_string(),
+            };
+            Error::PdfGeneration(validation_error_message(&standard, &errors))
+        }
+        e => Error::PdfGeneration(format!("{e:?}")),
+    })
+}
+
+/// The krilla configuration for `config.pdf_a`: its validator, or the
+/// default configuration when no PDF/A level is set.
+fn pdf_a_configuration(config: &Config) -> Configuration {
+    use crate::PdfA;
+    match config.pdf_a {
+        None => Configuration::new(),
+        Some(level) => Configuration::new_with_validator(match level {
+            PdfA::A1b => Validator::A1_B,
+            PdfA::A2b => Validator::A2_B,
+            PdfA::A2u => Validator::A2_U,
+            PdfA::A2a => Validator::A2_A,
+            PdfA::A3b => Validator::A3_B,
+            PdfA::A3u => Validator::A3_U,
+            PdfA::A3a => Validator::A3_A,
+        }),
+    }
+}
+
+/// Explains why a document cannot be written as `standard` (PDF/A or
+/// PDF/UA), one line per kind of problem.
+fn validation_error_message(
+    standard: &str,
+    errors: &[krilla::configure::ValidationError],
+) -> String {
+    use krilla::configure::ValidationError as V;
+    let mut lines: Vec<String> = Vec::new();
+    for e in errors {
+        let line = match e {
+            V::MissingDocumentDate => "the document has no creation date".to_string(),
+            V::Transparency(_) => {
+                "the document uses transparency, which PDF/A-1 does not allow; use 2b or 3b"
+                    .to_string()
+            }
+            V::ContainsNotDefGlyph(_, _, text) => {
+                format!("no font has a glyph for {text:?}")
+            }
+            V::NoCodepointMapping(..) | V::InvalidCodepointMapping(..) => {
+                "some glyphs do not map to Unicode text; use the b level".to_string()
+            }
+            V::RestrictedLicense(_) => "a font's license does not allow embedding".to_string(),
+            V::ImageInterpolation(_) => "an image asks for interpolation".to_string(),
+            V::EmbeddedPDF(_) => "the document embeds another PDF".to_string(),
+            V::NoDocumentLanguage => "the document has no language; set <html lang>".to_string(),
+            V::MissingAltText(_) => {
+                "an image has no alt text; give <img> an alt, <svg> an aria-label, aria-labelledby or <title>, \
+                 or mark a decorative one with alt=\"\" or aria-hidden=\"true\""
+                    .to_string()
+            }
+            V::NoDocumentTitle => "the document has no title; set <title>".to_string(),
+            V::MissingHeadingTitle => "a heading has no text".to_string(),
+            V::MissingDocumentOutline => "the document has no outline".to_string(),
+            V::MissingAnnotationAltText(_) => "a link has no alternate text".to_string(),
+            V::MissingTagging => "the document is not tagged".to_string(),
+            V::UnicodePrivateArea(..) => {
+                "the text uses Private Use Area characters, which the a level does not allow"
+                    .to_string()
+            }
+            other => format!("{other:?}"),
+        };
+        if !lines.contains(&line) {
+            lines.push(line);
+        }
+    }
+    format!("cannot write {standard}: {}", lines.join("; "))
 }
 
 /// Phase 4 v2 per-page draw dispatcher. Walks every `(node_id,
@@ -404,6 +583,40 @@ pub fn render_v2(
 /// renderer width, and body-link annotation clip rect — so a future
 /// change to how `resolved_margin` subtracts from `page_size` shifts
 /// all three together instead of leaving one behind.
+/// The page area as a clip path; `None` when it is empty.
+fn page_area_path(area: crate::draw_primitives::Rect) -> Option<krilla::geom::Path> {
+    let rect = krilla::geom::Rect::from_xywh(
+        area.x.to_f32(),
+        area.y.to_f32(),
+        area.width.to_f32(),
+        area.height.to_f32(),
+    )?;
+    let mut pb = krilla::geom::PathBuilder::new();
+    pb.push_rect(rect);
+    pb.finish()
+}
+
+/// The margins with the top and left moved to the nearest whole CSS px of
+/// the printed page when `Config::snap_page_area_origin` is on, so the page
+/// area starts there with its exact size. The margins are in layout pt,
+/// which `Config::scale` scales onto the printed page.
+fn page_area_origin(
+    margin: crate::config::Margin,
+    config: &crate::config::Config,
+) -> crate::config::Margin {
+    if !config.snap_page_area_origin {
+        return margin;
+    }
+    // 1 CSS px is 0.75pt on the printed page.
+    let px = 0.75 / config.scale;
+    let snap = |v: f32| (v / px).round() * px;
+    crate::config::Margin {
+        top: snap(margin.top),
+        left: snap(margin.left),
+        ..margin
+    }
+}
+
 fn resolved_content_area(
     page_size: crate::config::PageSize,
     resolved_margin: crate::config::Margin,
@@ -652,6 +865,7 @@ fn draw_v2_page(
                 draw_under_clip_table(
                     canvas,
                     table,
+                    node_id,
                     geom,
                     frag,
                     x_pt,
@@ -903,6 +1117,29 @@ fn para_has_link_runs(entry: &crate::drawables::ParagraphEntry) -> bool {
     })
 }
 
+/// Whether a paragraph is tagged run by run instead of as one sequence:
+/// when it has links (each gets its own `Link` element), inline boxes, text
+/// in another language or lines not drawn in reading order. An inline box
+/// (an inline `<svg>` or `<img>`, an inline-block) is tagged as its own
+/// element, a `Figure` with its alt text, which krilla cannot open inside
+/// the paragraph's sequence. Text in another language (`<span lang="de">`)
+/// needs a sequence of its own to carry its `/Lang`. The runs of a line with
+/// right-to-left text are drawn left to right, so the structure tree takes
+/// them one by one in reading order.
+fn para_uses_run_tagging(entry: &crate::drawables::ParagraphEntry) -> bool {
+    para_has_link_runs(entry)
+        || entry.lines.iter().any(|line| {
+            crate::paragraph::reading_order(&line.items).is_some()
+                || line.items.iter().any(|item| match item {
+                    crate::paragraph::LineItem::InlineBox(_) => true,
+                    crate::paragraph::LineItem::Text(run) => {
+                        run.lang.is_some() || run.figure.is_some()
+                    }
+                    crate::paragraph::LineItem::Image(_) => false,
+                })
+        })
+}
+
 /// The struct-tree node id that per-run link tags for `node_id` should nest
 /// under, or `None` when the node has no home in the tag tree — in which case
 /// per-run tagging MUST be skipped. Otherwise `RunRegionTracker` records a
@@ -931,17 +1168,26 @@ fn run_tag_target(
 
 /// Collect the plain-text title from a paragraph's shaped lines.
 ///
-/// Returns the concatenated text of all `Text` run items across all lines.
-/// Used to populate the `/T` (Title) attribute on heading tags required by
-/// PDF/UA-1.
+/// Returns the text the paragraph's `Text` runs are drawn from. Every run of
+/// a paragraph shares its whole text, so each text is taken once, not once
+/// per run. Used to populate the `/T` (Title) attribute on heading tags
+/// required by PDF/UA-1.
 fn extract_heading_title(para: &crate::drawables::ParagraphEntry) -> String {
-    para.lines
+    let mut texts: Vec<&std::sync::Arc<str>> = Vec::new();
+    for item in para.lines.iter().flat_map(|line| line.items.iter()) {
+        if let crate::paragraph::LineItem::Text(run) = item
+            && !texts
+                .iter()
+                .any(|text| std::sync::Arc::ptr_eq(text, &run.text))
+        {
+            texts.push(&run.text);
+        }
+    }
+    // An inline box stands in the text as U+FFFC, which is no text.
+    texts
         .iter()
-        .flat_map(|line| line.items.iter())
-        .filter_map(|item| match item {
-            crate::paragraph::LineItem::Text(run) => Some(run.text.as_ref()),
-            _ => None,
-        })
+        .flat_map(|text| text.chars())
+        .filter(|&c| c != '\u{FFFC}')
         .collect()
 }
 
@@ -960,6 +1206,58 @@ fn extract_heading_title(para: &crate::drawables::ParagraphEntry) -> String {
 /// (heading whose content is per-run tagged because of an inner link) — so
 /// the same `visible` gate applies to every path that can produce a
 /// heading `/T` attribute.
+/// PDF/UA-1 (ISO 14289-1 7.4.2, checked by veraPDF) wants headings used
+/// as an outline: the first heading is `h1`, and a heading is at most one
+/// level deeper than the one before it (`h1` then `h3` skips a level).
+/// Returns what is wrong, naming the heading, or `None`.
+fn heading_level_problem(drawables: &Drawables) -> Option<String> {
+    let mut headings: Vec<(usize, u8, usize)> = drawables
+        .semantics
+        .iter()
+        .filter_map(|(&id, entry)| match entry.tag {
+            crate::tagging::PdfTag::H { level } => Some((id, level)),
+            _ => None,
+        })
+        // A heading that is not drawn is not read either.
+        .filter(|(id, _)| drawables.paragraphs.get(id).is_none_or(|p| p.visible))
+        .map(|(id, level)| {
+            let order = drawables.semantic_order.get(&id).copied().unwrap_or(id);
+            (order, level, id)
+        })
+        .collect();
+    headings.sort();
+    let text = |id: usize| {
+        drawables
+            .paragraphs
+            .get(&id)
+            .and_then(heading_title_of)
+            .map(|t| format!(" (\"{}\")", t.trim()))
+            .unwrap_or_default()
+    };
+    let mut previous: Option<u8> = None;
+    for &(_, level, id) in &headings {
+        match previous {
+            None if level != 1 => {
+                return Some(format!(
+                    "the first heading is h{level}{}; the first heading must be h1",
+                    text(id)
+                ));
+            }
+            Some(prev) if level > prev + 1 => {
+                return Some(format!(
+                    "headings skip a level: h{prev} is followed by h{level}{}; use h{} \
+                     there (and style it to look as needed)",
+                    text(id),
+                    prev + 1
+                ));
+            }
+            _ => {}
+        }
+        previous = Some(level);
+    }
+    None
+}
+
 fn heading_title_of(para: &crate::drawables::ParagraphEntry) -> Option<String> {
     if !para.visible {
         return None;
@@ -968,98 +1266,178 @@ fn heading_title_of(para: &crate::drawables::ParagraphEntry) -> Option<String> {
     (!title.is_empty()).then_some(title)
 }
 
-/// Start a Krilla tagged content sequence for a paragraph-bearing node when
-/// tagging is enabled and the node has a P / H / Span semantic entry.
+/// A marked-content sequence opened by [`try_start_tagged`] and closed by
+/// [`finish_tagged`].
+pub(crate) enum OpenTag {
+    /// Content of a structure element, recorded under `record_id` when it
+    /// closes (the synthetic `LBody` of an inline-root `<li>`, else the
+    /// node itself).
+    Tagged {
+        record_id: usize,
+        tag: crate::tagging::PdfTag,
+        id: krilla::tagging::Identifier,
+        heading_title: Option<String>,
+    },
+    /// Content of a node that has no structure element (one inside an
+    /// `aria-hidden` subtree): an artifact, recorded nowhere.
+    Artifact,
+}
+
+/// Start a Krilla marked-content sequence for everything `node_id` paints
+/// when tagging is enabled.
 ///
-/// Returns `Some((tag, id))` on success so that `finish_tagged` can close it.
-/// Returns `None` when tagging is disabled, the node has no recognised
-/// semantic entry, the node carries no paragraph content (pure containers
-/// must not call `start_tagged` — it is not nestable and would panic on a
-/// second call before `end_tagged`), OR the canvas is already inside an
-/// outer marked-content sequence (`canvas.in_marked_content == true`). The
-/// last case fires when a tagged inline-root block dispatches an inline-box
-/// whose content would itself want a P/Span/LBody tag; nested opens would
-/// panic in Krilla (`can't start marked content twice`), so the inner tag is
-/// dropped and its sub-tree renders as a graceful, untagged extension of the
-/// outer sequence. Link annotations under the skipped tag still land in the
-/// PDF via `emit_link_annotations`'s unwired-fallback path (`add_annotation`).
+/// A node with a structure element gets a span recorded under it: under
+/// the synthetic `LBody` for an inline-root `<li>`, else under the
+/// element itself, whatever its kind (a `P`, a `TD`, or the `L` of an
+/// inline-root list, `<ul><li style="display:inline">…`). A node without
+/// one is hidden from assistive technology, so its content is an artifact.
+/// PDF/UA allows nothing else: content outside marked content is neither.
+///
+/// Returns `None` when tagging is disabled OR the canvas is already inside
+/// an outer marked-content sequence (`canvas.in_marked_content == true`).
+/// The last case fires when a tagged inline-root block dispatches an
+/// inline-box whose content would itself want a tag, or inside a group
+/// tagged as one sequence (`start_group_tagged`); nested opens would panic
+/// in Krilla (`can't start marked content twice`), so the inner content
+/// becomes part of the outer sequence. Link annotations under the skipped
+/// tag still land in the PDF via `emit_link_annotations`'s unwired-fallback
+/// path (`add_annotation`), unless a group notes them.
 fn try_start_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     node_id: usize,
     drawables: &Drawables,
-) -> Option<(
-    usize, // record_id (TagCollector.record() に渡す NodeId)
-    crate::tagging::PdfTag,
-    krilla::tagging::Identifier,
-    Option<String>,
-)> {
+) -> Option<OpenTag> {
+    use krilla::tagging::{ArtifactType, ContentTag, SpanTag};
     canvas.tag_collector.as_ref()?;
     if canvas.in_marked_content {
         return None;
     }
-    let semantic = drawables.semantics.get(&node_id)?;
-    let result = match &semantic.tag {
-        crate::tagging::PdfTag::P | crate::tagging::PdfTag::Span => {
-            use krilla::tagging::{ContentTag, SpanTag};
-            let id = canvas
-                .surface
-                .start_tagged(ContentTag::Span(SpanTag::empty()));
-            Some((node_id, semantic.tag.clone(), id, None))
-        }
-        crate::tagging::PdfTag::H { .. } => {
-            let heading_title = drawables
+    let Some(semantic) = drawables.semantics.get(&node_id) else {
+        canvas
+            .surface
+            .start_tagged(ContentTag::Artifact(ArtifactType::Other));
+        canvas.in_marked_content = true;
+        return Some(OpenTag::Artifact);
+    };
+    let (record_id, tag, heading_title) = match &semantic.tag {
+        crate::tagging::PdfTag::H { .. } => (
+            node_id,
+            semantic.tag.clone(),
+            drawables
                 .paragraphs
                 .get(&node_id)
-                .and_then(heading_title_of);
-            use krilla::tagging::{ContentTag, SpanTag};
-            let id = canvas
-                .surface
-                .start_tagged(ContentTag::Span(SpanTag::empty()));
-            Some((node_id, semantic.tag.clone(), id, heading_title))
-        }
-        crate::tagging::PdfTag::Li => {
-            // inline-root li: コンテンツを lbody_id で記録（LBody 配下に収める）
-            let &lbody_id = drawables.li_lbody_ids.get(&node_id)?;
-            use krilla::tagging::{ContentTag, SpanTag};
-            let id = canvas
-                .surface
-                .start_tagged(ContentTag::Span(SpanTag::empty()));
-            Some((lbody_id, crate::tagging::PdfTag::LBody, id, None))
-        }
-        _ => None,
+                .and_then(heading_title_of),
+        ),
+        // inline-root li: コンテンツを lbody_id で記録（LBody 配下に収める）
+        crate::tagging::PdfTag::Li => match drawables.li_lbody_ids.get(&node_id) {
+            Some(&lbody_id) => (lbody_id, crate::tagging::PdfTag::LBody, None),
+            None => (node_id, semantic.tag.clone(), None),
+        },
+        _ => (node_id, semantic.tag.clone(), None),
     };
-    if result.is_some() {
-        canvas.in_marked_content = true;
-    }
-    result
+    let id = canvas
+        .surface
+        .start_tagged(ContentTag::Span(SpanTag::empty()));
+    canvas.in_marked_content = true;
+    Some(OpenTag::Tagged {
+        record_id,
+        tag,
+        id,
+        heading_title,
+    })
 }
 
-/// Close a tagged content sequence opened by `try_start_tagged` and record
-/// the resulting `Identifier` in the `TagCollector` for StructTree assembly.
+/// Open one tagged sequence for everything `node_id` paints inside a group
+/// (a fractional opacity), before the group opens. krilla draws the group
+/// as a form XObject, and marked content opened inside it is not linked
+/// into the structure tree, so the descendants cannot be tagged one by
+/// one: the whole group is content of `node_id`'s element, and the links
+/// drawn in it are noted for that element (`TagCollector::note_group_link`)
+/// as long as the caller keeps `canvas.link_run_node_id` set.
+fn start_group_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
+    drawables: &Drawables,
+) -> Option<OpenTag> {
+    let tag = try_start_tagged(canvas, node_id, drawables)?;
+    if let OpenTag::Tagged { record_id, .. } = &tag
+        && let Some(tc) = canvas.tag_collector.as_mut()
+    {
+        tc.set_open_group(Some(*record_id));
+    }
+    Some(tag)
+}
+
+/// [`start_group_tagged`] for content drawn with `opacity`: only when the
+/// opacity makes a group. Without one, the content is tagged piece by
+/// piece as usual.
+pub(crate) fn start_opacity_group_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
+    drawables: &Drawables,
+    opacity: f32,
+) -> Option<OpenTag> {
+    if !crate::draw_primitives::opacity_makes_group(opacity) {
+        return None;
+    }
+    start_group_tagged(canvas, node_id, drawables)
+}
+
+/// Close a sequence opened by [`start_group_tagged`].
+pub(crate) fn finish_group_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    tag: Option<OpenTag>,
+) {
+    if let Some(OpenTag::Tagged { .. }) = &tag
+        && let Some(tc) = canvas.tag_collector.as_mut()
+    {
+        tc.set_open_group(None);
+    }
+    finish_tagged(canvas, tag);
+}
+
+/// Paint `draw` as the content of `node_id`'s structure element (an
+/// image's `Figure`), or as an artifact when the node has none (a
+/// decorative image).
+fn paint_tagged(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    node_id: usize,
+    drawables: &Drawables,
+    draw: impl FnOnce(&mut crate::draw_primitives::Canvas<'_, '_>),
+) {
+    let tag = try_start_tagged(canvas, node_id, drawables);
+    draw(canvas);
+    finish_tagged(canvas, tag);
+}
+
+/// Close a marked-content sequence opened by `try_start_tagged` and, for
+/// tagged content, record the resulting `Identifier` in the `TagCollector`
+/// for StructTree assembly. An artifact is recorded nowhere.
 ///
-/// No-op when `tag_info` is `None` (tagging disabled or not applicable).
+/// No-op when `tag` is `None` (tagging disabled or not applicable).
 ///
 /// # Invariant
-/// `tag_info` must only hold values produced by `try_start_tagged` on the
-/// same `canvas`. `try_start_tagged` returns `None` when `tag_collector` is
-/// absent, so if `tag_info` is `Some`, `canvas.tag_collector` is guaranteed
-/// to be `Some` as well.
-fn finish_tagged(
-    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
-    tag_info: Option<(
-        usize, // record_id
-        crate::tagging::PdfTag,
-        krilla::tagging::Identifier,
-        Option<String>,
-    )>,
-) {
-    if let Some((record_id, tag, id, heading_title)) = tag_info {
-        canvas.surface.end_tagged();
-        canvas.in_marked_content = false;
+/// `tag` must only hold values produced by `try_start_tagged` on the same
+/// `canvas`. `try_start_tagged` returns `None` when `tag_collector` is
+/// absent, so if `tag` is `Some`, `canvas.tag_collector` is guaranteed to
+/// be `Some` as well.
+fn finish_tagged(canvas: &mut crate::draw_primitives::Canvas<'_, '_>, tag: Option<OpenTag>) {
+    let Some(tag) = tag else {
+        return;
+    };
+    canvas.surface.end_tagged();
+    canvas.in_marked_content = false;
+    if let OpenTag::Tagged {
+        record_id,
+        tag,
+        id,
+        heading_title,
+    } = tag
+    {
         canvas
             .tag_collector
             .as_mut()
-            .expect("tag_collector is Some when tag_info is Some")
+            .expect("tag_collector is Some when a tag is open")
             .record(record_id, tag, id, heading_title);
     }
 }
@@ -1081,6 +1459,21 @@ pub(crate) fn dispatch_fragment(
     if let Some(table) = drawables.tables.get(&node_id) {
         draw_table_v2(canvas, table, geom, x_pt, y_pt, frag);
         return;
+    }
+    // A block-level image inside a link: its box is the link's area.
+    if let Some(link) = drawables.block_links.get(&node_id) {
+        let rect = crate::draw_primitives::Rect {
+            x: x_pt.as_pt(),
+            y: y_pt.as_pt(),
+            width: frag.width.in_pt(),
+            height: frag.height.in_pt(),
+        };
+        if let Some(collector) = canvas.link_collector.as_deref_mut() {
+            collector.push_rect(link, rect);
+        }
+        if let Some(tc) = canvas.tag_collector.as_mut() {
+            tc.note_node_link(node_id, std::sync::Arc::as_ptr(link) as usize);
+        }
     }
     // True when this block / list-item / paragraph spans multiple
     // pages (the fragmenter recorded one fragment per page slice).
@@ -1143,17 +1536,20 @@ pub(crate) fn dispatch_fragment(
         if para_for_block.is_some() || img_for_block.is_some() || svg_for_block.is_some() {
             let run_tag_node_id = run_tag_target(drawables, node_id);
             let use_run_tagging = para_for_block
-                .map(|p| canvas.tag_collector.is_some() && para_has_link_runs(p))
+                .map(|p| canvas.tag_collector.is_some() && para_uses_run_tagging(p))
                 .unwrap_or(false)
                 && run_tag_node_id.is_some();
-            let tag_info = if use_run_tagging {
+            // The content is tagged after the block's background and
+            // border, which are artifacts. With a fractional opacity the
+            // block and its content are one group, and marked content
+            // inside a group is lost, so the sequence opens before it and
+            // holds the whole group; links in it are noted through
+            // `link_run_node_id`, which stays set.
+            let group_tag = start_opacity_group_tagged(canvas, node_id, drawables, block.opacity);
+            if use_run_tagging {
                 canvas.link_run_node_id = run_tag_node_id;
-                None
-            } else if para_for_block.is_some() {
-                try_start_tagged(canvas, node_id, drawables)
-            } else {
-                None
-            };
+            }
+            let tag_after_block = (!use_run_tagging && group_tag.is_none()).then_some(node_id);
             draw_block_with_inner_content(
                 canvas,
                 block,
@@ -1170,6 +1566,7 @@ pub(crate) fn dispatch_fragment(
                 geometry,
                 margin_left_pt,
                 margin_top_pt,
+                tag_after_block,
             );
             if has_paragraph_slices {
                 paint_multicol_paragraph_slices(
@@ -1182,20 +1579,37 @@ pub(crate) fn dispatch_fragment(
                     page_index,
                 );
             }
-            finish_tagged(canvas, tag_info);
+            finish_group_tagged(canvas, group_tag);
             if use_run_tagging {
                 canvas.link_run_node_id = None;
             }
             return;
         }
-        draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
+        if drawables.block_slices.contains_key(&node_id) {
+            paint_multicol_block_slices(
+                canvas,
+                block,
+                drawables,
+                geometry,
+                node_id,
+                margin_left_pt,
+                margin_top_pt,
+                page_index,
+            );
+        } else {
+            draw_block_v2(canvas, block, x_pt, y_pt, frag, is_split);
+        }
     }
     if let Some(img) = drawables.images.get(&node_id) {
-        draw_image_v2(canvas, img, x_pt, y_pt);
+        paint_tagged(canvas, node_id, drawables, |c| {
+            draw_image_v2(c, img, x_pt, y_pt)
+        });
         return;
     }
     if let Some(svg) = drawables.svgs.get(&node_id) {
-        draw_svg_v2(canvas, svg, x_pt, y_pt);
+        paint_tagged(canvas, node_id, drawables, |c| {
+            draw_svg_v2(c, svg, x_pt, y_pt)
+        });
         return;
     }
     if has_paragraph_slices {
@@ -1212,8 +1626,13 @@ pub(crate) fn dispatch_fragment(
     }
     if let Some(para) = drawables.paragraphs.get(&node_id) {
         let run_tag_node_id = run_tag_target(drawables, node_id);
-        let use_run_tagging =
-            canvas.tag_collector.is_some() && para_has_link_runs(para) && run_tag_node_id.is_some();
+        let use_run_tagging = canvas.tag_collector.is_some()
+            && para_uses_run_tagging(para)
+            && run_tag_node_id.is_some();
+        // A paragraph with a fractional opacity of its own is one group:
+        // tag it as one sequence, opened before the group (see
+        // `start_group_tagged`).
+        let group_tag = start_opacity_group_tagged(canvas, node_id, drawables, para.opacity);
         let tag_info = if use_run_tagging {
             canvas.link_run_node_id = run_tag_node_id;
             None
@@ -1234,6 +1653,7 @@ pub(crate) fn dispatch_fragment(
             margin_top_pt,
         );
         finish_tagged(canvas, tag_info);
+        finish_group_tagged(canvas, group_tag);
         if use_run_tagging {
             canvas.link_run_node_id = None;
         }
@@ -1372,11 +1792,22 @@ fn paint_multicol_paragraph_slices(
         && drawables
             .paragraphs
             .get(&source_node_id)
-            .is_some_and(para_has_link_runs)
+            .is_some_and(para_uses_run_tagging)
         && run_tag_node_id.is_some();
+    // With a fractional opacity the slices are one group, tagged as one
+    // sequence of the source paragraph opened before it (see
+    // `start_group_tagged`); its links are noted through
+    // `link_run_node_id`. Without links the slices are tagged as one
+    // sequence too, as `draw_paragraph_v2` does.
+    let group_tag = start_opacity_group_tagged(canvas, source_node_id, drawables, opacity);
     if use_run_tagging {
         canvas.link_run_node_id = run_tag_node_id;
     }
+    let tag_info = if use_run_tagging {
+        None
+    } else {
+        try_start_tagged(canvas, source_node_id, drawables)
+    };
     draw_with_opacity(canvas, opacity, |canvas| {
         for slice in &slices_entry.slices {
             let slice_top = slice.origin_pt.1.to_f32() - consumed;
@@ -1391,9 +1822,14 @@ fn paint_multicol_paragraph_slices(
                 // a slice that crosses a fragment break disappears on
                 // every page it would have crossed. Revisit once
                 // split-aware rendering of multicol slices lands.
+                // Half a point of slack: the multicol pass ends column
+                // rows exactly at page boundaries, and the px → pt
+                // conversion must not push a slice that ends there onto
+                // neither page.
+                const SLACK: f32 = 0.5;
                 let above = slice_bottom <= 0.0;
                 let below = slice_top >= cutoff;
-                let straddles = slice_top < 0.0 || slice_bottom > cutoff;
+                let straddles = slice_top < -SLACK || slice_bottom > cutoff + SLACK;
                 if above || below || straddles {
                     continue;
                 }
@@ -1403,9 +1839,97 @@ fn paint_multicol_paragraph_slices(
             crate::paragraph::draw_shaped_lines(canvas, &slice.lines, abs_x, abs_y, None);
         }
     });
+    finish_tagged(canvas, tag_info);
+    finish_group_tagged(canvas, group_tag);
     if use_run_tagging {
         canvas.link_run_node_id = None;
     }
+}
+
+/// Paint a box that `multicol_layout` broke across columns
+/// (`box-decoration-break: slice`): in every slice, the whole box
+/// (`entry.height_pt` tall) is painted from `slice.offset_pt` above the
+/// slice's top and clipped to the slice, so borders, radii and
+/// backgrounds continue from one column to the next.
+///
+/// Slices are anchored at the multicol container's fragment on this page,
+/// as in [`paint_multicol_paragraph_slices`]. When the container itself
+/// breaks across pages, each slice is clipped to the part of the
+/// container on this page.
+#[allow(clippy::too_many_arguments)]
+fn paint_multicol_block_slices(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    block: &crate::drawables::BlockEntry,
+    drawables: &Drawables,
+    geometry: &crate::pagination_layout::PaginationGeometryTable,
+    node_id: usize,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    use crate::draw_primitives::draw_with_opacity;
+    let Some(entry) = drawables.block_slices.get(&node_id) else {
+        return;
+    };
+    if !block.visible {
+        return;
+    }
+    let Some(container_geom) = geometry.get(&entry.container_node_id) else {
+        return;
+    };
+    let Some(target_pos) = container_geom
+        .fragments
+        .iter()
+        .position(|f| f.page_index == page_index)
+    else {
+        return;
+    };
+    let target_frag = &container_geom.fragments[target_pos];
+    let partition = container_geom.is_split();
+    let consumed: f32 = container_geom.fragments[..target_pos]
+        .iter()
+        .map(|f| f.height)
+        .sum::<crate::units::Px>()
+        .in_pt()
+        .to_f32();
+    let cutoff = target_frag.height.in_pt().to_f32();
+    let container_x = margin_left_pt + target_frag.x.in_pt().to_f32();
+    let container_y = margin_top_pt + target_frag.y.in_pt().to_f32();
+    let height = entry.height_pt.to_f32();
+
+    draw_with_opacity(canvas, block.opacity, |canvas| {
+        for slice in &entry.slices {
+            let (w, h) = (slice.size_pt.0.to_f32(), slice.size_pt.1.to_f32());
+            let mut top = slice.origin_pt.1.to_f32() - consumed;
+            let mut bottom = top + h;
+            if partition {
+                top = top.max(0.0);
+                bottom = bottom.min(cutoff);
+            }
+            if bottom <= top || w <= 0.0 {
+                continue;
+            }
+            let x = container_x + slice.origin_pt.0.to_f32();
+            let box_y =
+                container_y + slice.origin_pt.1.to_f32() - consumed - slice.offset_pt.to_f32();
+            let Some(clip) = krilla::geom::Rect::from_xywh(x, container_y + top, w, bottom - top)
+                .and_then(|rect| {
+                    let mut pb = krilla::geom::PathBuilder::new();
+                    pb.push_rect(rect);
+                    pb.finish()
+                })
+            else {
+                continue;
+            };
+            canvas
+                .surface
+                .push_clip_path(&clip, &krilla::paint::FillRule::default());
+            crate::background::draw_box_shadows(canvas, &block.style, x, box_y, w, height);
+            crate::background::draw_background(canvas, &block.style, x, box_y, w, height);
+            crate::draw_primitives::draw_block_border(canvas, &block.style, x, box_y, w, height);
+            canvas.surface.pop();
+        }
+    });
 }
 
 /// Collect the inline-box subtrees that paragraphs drawn *inside a scope*
@@ -1666,6 +2190,7 @@ fn draw_under_transform(
                 draw_under_clip_table(
                     canvas,
                     desc_table,
+                    desc_id,
                     desc_geom,
                     desc_frag,
                     desc_x,
@@ -1850,6 +2375,10 @@ fn draw_under_clip(
     let list_item = drawables.list_items.get(&node_id);
     let opacity = list_item.map_or(block.opacity, |li| li.opacity);
 
+    // With a fractional opacity everything below is one group: tag it as
+    // content of this element, opened before the group (see
+    // `start_group_tagged`).
+    let group_tag = start_opacity_group_tagged(canvas, node_id, drawables, opacity);
     draw_with_opacity(canvas, opacity, |canvas| {
         // List-item marker paints first, OUTSIDE the clip — the
         // marker is emitted before the body's bg / border / shadow.
@@ -1918,7 +2447,7 @@ fn draw_under_clip(
         if let Some(p) = para_for_block {
             let run_tag_node_id = run_tag_target(drawables, node_id);
             let use_run_tagging = canvas.tag_collector.is_some()
-                && para_has_link_runs(p)
+                && para_uses_run_tagging(p)
                 && run_tag_node_id.is_some();
             let tag_info = if use_run_tagging {
                 canvas.link_run_node_id = run_tag_node_id;
@@ -1945,10 +2474,14 @@ fn draw_under_clip(
             }
         }
         if let Some(i) = img_for_block {
-            draw_image_inner_paint(canvas, i, inner_x, inner_y);
+            paint_tagged(canvas, node_id, drawables, |c| {
+                draw_image_inner_paint(c, i, inner_x, inner_y)
+            });
         }
         if let Some(s) = svg_for_block {
-            draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+            paint_tagged(canvas, node_id, drawables, |c| {
+                draw_svg_inner_paint(c, s, inner_x, inner_y)
+            });
         }
 
         // Strict descendants — each at its own fragment's coords.
@@ -2090,6 +2623,7 @@ fn draw_under_clip(
                     draw_under_clip_table(
                         canvas,
                         desc_table,
+                        desc_id,
                         desc_geom,
                         desc_frag,
                         desc_x,
@@ -2144,6 +2678,7 @@ fn draw_under_clip(
             canvas.surface.pop();
         }
     });
+    finish_group_tagged(canvas, group_tag);
 }
 
 /// Wrap the block's `dispatch_fragment` + every strict descendant in a
@@ -2186,6 +2721,11 @@ fn draw_under_opacity(
 ) {
     use crate::draw_primitives::draw_with_opacity;
 
+    // krilla draws a fractional opacity as a group (a form XObject), and
+    // marked content opened inside the group is not linked into the
+    // structure tree: the text of every descendant was lost. Tag the
+    // whole group as content of this element instead, before it opens.
+    let group_tag = start_opacity_group_tagged(canvas, node_id, drawables, block.opacity);
     draw_with_opacity(canvas, block.opacity, |canvas| {
         // Block's own paint + shared-node_id inner content. We can
         // re-use `dispatch_fragment` because it already handles the
@@ -2292,7 +2832,7 @@ fn draw_under_opacity(
             if let Some(p) = para_for_block {
                 let run_tag_node_id = run_tag_target(drawables, node_id);
                 let use_run_tagging = canvas.tag_collector.is_some()
-                    && para_has_link_runs(p)
+                    && para_uses_run_tagging(p)
                     && run_tag_node_id.is_some();
                 let tag_info = if use_run_tagging {
                     canvas.link_run_node_id = run_tag_node_id;
@@ -2319,10 +2859,14 @@ fn draw_under_opacity(
                 }
             }
             if let Some(i) = img_for_block {
-                draw_image_inner_paint(canvas, i, inner_x, inner_y);
+                paint_tagged(canvas, node_id, drawables, |c| {
+                    draw_image_inner_paint(c, i, inner_x, inner_y)
+                });
             }
             if let Some(s) = svg_for_block {
-                draw_svg_inner_paint(canvas, s, inner_x, inner_y);
+                paint_tagged(canvas, node_id, drawables, |c| {
+                    draw_svg_inner_paint(c, s, inner_x, inner_y)
+                });
             }
         }
 
@@ -2433,6 +2977,7 @@ fn draw_under_opacity(
                     draw_under_clip_table(
                         canvas,
                         desc_table,
+                        desc_id,
                         desc_geom,
                         desc_frag,
                         desc_x,
@@ -2480,6 +3025,7 @@ fn draw_under_opacity(
             }
         }
     });
+    finish_group_tagged(canvas, group_tag);
 }
 
 /// Paint multicol column-rule lines on `page_index` for one
@@ -2487,6 +3033,35 @@ fn draw_under_opacity(
 /// container's per-page heights so each page only emits the rule
 /// segments that fit on it.
 fn paint_multicol_rule_for_page(
+    canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
+    entry: &crate::drawables::MulticolRuleEntry,
+    container_geom: &crate::pagination_layout::PaginationGeometry,
+    margin_left_pt: f32,
+    margin_top_pt: f32,
+    page_index: u32,
+) {
+    // Nothing to paint on this page: no empty artifact either.
+    if build_multicol_stroke(&entry.rule).is_none()
+        || !container_geom
+            .fragments
+            .iter()
+            .any(|f| f.page_index == page_index)
+    {
+        return;
+    }
+    canvas.as_artifact(|canvas| {
+        paint_multicol_rule_for_page_inner(
+            canvas,
+            entry,
+            container_geom,
+            margin_left_pt,
+            margin_top_pt,
+            page_index,
+        )
+    });
+}
+
+fn paint_multicol_rule_for_page_inner(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     entry: &crate::drawables::MulticolRuleEntry,
     container_geom: &crate::pagination_layout::PaginationGeometry,
@@ -2643,10 +3218,13 @@ fn draw_image_inner_paint(
     else {
         return;
     };
-    let transform = krilla::geom::Transform::from_translate(x, y);
-    canvas.surface.push_transform(&transform);
-    canvas.surface.draw_image(image, size);
-    canvas.surface.pop();
+    // Inside a `Figure` this is its content; otherwise a decorative image.
+    canvas.as_artifact(|canvas| {
+        let transform = krilla::geom::Transform::from_translate(x, y);
+        canvas.surface.push_transform(&transform);
+        canvas.surface.draw_image(image, size);
+        canvas.surface.pop();
+    });
 }
 
 fn decode_image_for_v2(entry: &crate::drawables::ImageEntry) -> Option<krilla::image::Image> {
@@ -2691,12 +3269,15 @@ fn draw_svg_inner_paint(
     else {
         return;
     };
-    let transform = krilla::geom::Transform::from_translate(x, y);
-    canvas.surface.push_transform(&transform);
-    let _ = canvas
-        .surface
-        .draw_svg(&entry.tree, size, SvgSettings::default());
-    canvas.surface.pop();
+    // Inside a `Figure` this is its content; otherwise a decorative SVG.
+    canvas.as_artifact(|canvas| {
+        let transform = krilla::geom::Transform::from_translate(x, y);
+        canvas.surface.push_transform(&transform);
+        let _ = canvas
+            .surface
+            .draw_svg(&entry.tree, size, SvgSettings::default());
+        canvas.surface.pop();
+    });
 }
 
 /// Block draw: emits background / border / box-shadow for the
@@ -2934,6 +3515,7 @@ fn paint_table_outer_frame(
 fn draw_under_clip_table(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     table: &crate::drawables::TableEntry,
+    node_id: usize,
     geom: &crate::pagination_layout::PaginationGeometry,
     frag: &crate::pagination_layout::Fragment,
     x_pt: f32,
@@ -2957,6 +3539,10 @@ fn draw_under_clip_table(
 
     let (total_width, total_height) = table_box_size(table, geom, frag);
 
+    // With a fractional opacity the frame and every cell are one group:
+    // tag it as content of the table, opened before the group (see
+    // `start_group_tagged`).
+    let group_tag = start_opacity_group_tagged(canvas, node_id, drawables, table.opacity);
     draw_with_opacity(canvas, table.opacity, |canvas| {
         // bg / border / shadow OUTSIDE the clip, mirroring
         // `draw_under_clip` for blocks (`pageable.rs:1796-1827`).
@@ -3085,6 +3671,7 @@ fn draw_under_clip_table(
                     draw_under_clip_table(
                         canvas,
                         desc_table,
+                        desc_id,
                         desc_geom,
                         desc_frag,
                         desc_x,
@@ -3136,6 +3723,7 @@ fn draw_under_clip_table(
             canvas.surface.pop();
         }
     });
+    finish_group_tagged(canvas, group_tag);
 }
 
 /// Block + inner content combined draw. Wraps bg/border **and** the
@@ -3168,6 +3756,9 @@ fn draw_block_with_inner_content(
     geometry: &crate::pagination_layout::PaginationGeometryTable,
     margin_left_pt: f32,
     margin_top_pt: f32,
+    // Tag the inner content as this node's, opened after the block's own
+    // paint (background, border: artifacts).
+    tag_after_block: Option<usize>,
 ) {
     use crate::draw_primitives::draw_with_opacity;
 
@@ -3185,6 +3776,7 @@ fn draw_block_with_inner_content(
 
     draw_with_opacity(canvas, block.opacity, |canvas| {
         draw_block_inner_paint(canvas, block, x, y, frag, is_split);
+        let tag_info = tag_after_block.and_then(|n| try_start_tagged(canvas, n, drawables));
         if let Some(p) = paragraph {
             draw_paragraph_inner_paint(
                 canvas,
@@ -3206,6 +3798,7 @@ fn draw_block_with_inner_content(
         if let Some(s) = svg {
             draw_svg_inner_paint(canvas, s, inner_x, inner_y);
         }
+        finish_tagged(canvas, tag_info);
     });
 }
 
@@ -3250,6 +3843,11 @@ fn draw_list_item_with_block(
     let inner_x = x + inset.0;
     let inner_y = y + inset.1;
 
+    // With a fractional opacity the marker and the body are one group:
+    // tag it as the item's content (its `LBody`), opened before the group
+    // (see `start_group_tagged`). Links in it are noted through
+    // `link_run_node_id`, set below as usual.
+    let group_tag = start_opacity_group_tagged(canvas, node_id, drawables, list_item.opacity);
     draw_with_opacity(canvas, list_item.opacity, |canvas| {
         if list_item.visible {
             draw_list_item_marker_tagged(canvas, list_item, node_id, drawables, x, y);
@@ -3260,7 +3858,7 @@ fn draw_list_item_with_block(
         if let Some(p) = paragraph {
             let run_tag_node_id = run_tag_target(drawables, node_id);
             let use_run_tagging = canvas.tag_collector.is_some()
-                && para_has_link_runs(p)
+                && para_uses_run_tagging(p)
                 && run_tag_node_id.is_some();
             let tag_info = if use_run_tagging {
                 canvas.link_run_node_id = run_tag_node_id;
@@ -3287,6 +3885,7 @@ fn draw_list_item_with_block(
             }
         }
     });
+    finish_group_tagged(canvas, group_tag);
 }
 
 /// List-item marker paint without opacity wrapper or visibility gate
@@ -3320,6 +3919,16 @@ fn draw_list_item_marker(
     }
 }
 
+/// Whether `draw_list_item_marker` paints anything for `entry`.
+fn list_item_marker_paints(entry: &crate::drawables::ListItemEntry) -> bool {
+    use crate::drawables::ListItemMarker;
+    match &entry.marker {
+        ListItemMarker::Text { lines, .. } => !lines.is_empty(),
+        ListItemMarker::Image { .. } => true,
+        ListItemMarker::None => false,
+    }
+}
+
 /// List-item marker を描画し、タグ付きモードでは Lbl 構造要素でラップする。
 ///
 /// When `canvas.in_marked_content` is already set (a nested tagged marker
@@ -3328,6 +3937,9 @@ fn draw_list_item_marker(
 /// Krilla's non-nestable `start_tagged` does not panic. The marker glyphs
 /// / image still paint; only the structural Lbl association is dropped for
 /// the nested case (graceful degradation).
+///
+/// A marker with no `Lbl` to hold it (a `display: list-item` element that
+/// is not an `<li>`) is decoration, drawn as an artifact.
 fn draw_list_item_marker_tagged(
     canvas: &mut crate::draw_primitives::Canvas<'_, '_>,
     li: &crate::drawables::ListItemEntry,
@@ -3351,7 +3963,11 @@ fn draw_list_item_marker_tagged(
         id
     });
 
-    draw_list_item_marker(canvas, li, x, y);
+    if marker_tag_id.is_some() {
+        draw_list_item_marker(canvas, li, x, y);
+    } else if list_item_marker_paints(li) {
+        canvas.as_artifact(|canvas| draw_list_item_marker(canvas, li, x, y));
+    }
 
     if let (Some(lid), Some(id)) = (lbl_id, marker_tag_id) {
         canvas.surface.end_tagged();
@@ -3628,6 +4244,13 @@ pub(crate) struct MarginBoxRenderer<'a> {
     /// `target-*(attr(href), ...)` evaluated inside `@page` margin
     /// boxes. Built once per render pass by `engine::Engine::layout_to_drawables`.
     pub implicit_href_by_page: &'a BTreeMap<usize, String>,
+    /// The opening `<html>` tag of each margin box's document. Margin boxes
+    /// take their direction from the root element, as the page context
+    /// does, so a right-to-left document gets right-to-left boxes.
+    pub html_open: &'static str,
+    /// Mark each margin box as a header, footer or other pagination
+    /// artifact: set when the document is tagged.
+    pub tag_artifacts: bool,
 }
 
 impl<'a> MarginBoxRenderer<'a> {
@@ -3648,6 +4271,7 @@ impl<'a> MarginBoxRenderer<'a> {
         string_set_by_node: &HashMap<usize, Vec<(String, String)>>,
         total_pages: usize,
         implicit_href_by_page: &'a BTreeMap<usize, String>,
+        root_dir_rtl: bool,
     ) -> Self {
         let string_set_states = if gcpm.string_set_mappings.is_empty() {
             vec![BTreeMap::new(); total_pages]
@@ -3678,6 +4302,12 @@ impl<'a> MarginBoxRenderer<'a> {
             height_cache: HashMap::new(),
             render_cache: HashMap::new(),
             implicit_href_by_page,
+            html_open: if root_dir_rtl {
+                "<html dir=\"rtl\">"
+            } else {
+                "<html>"
+            },
+            tag_artifacts: false,
         }
     }
 
@@ -3781,15 +4411,15 @@ impl<'a> MarginBoxRenderer<'a> {
                 implicit_href,
             );
             if !content_html.is_empty() {
-                let html = if rule.declarations.is_empty() {
+                // Each box starts from its default `text-align` (css-page-3
+                // §5.3: right-hand boxes align right, centre boxes centre);
+                // the rule's own declarations come after it and win.
+                let html = format!(
+                    "<div style=\"text-align:{};{}\">{}</div>",
+                    pos.default_text_align(),
+                    escape_attr(&rule.declarations),
                     content_html
-                } else {
-                    format!(
-                        "<div style=\"{}\">{}</div>",
-                        escape_attr(&rule.declarations),
-                        content_html
-                    )
-                };
+                );
                 resolved_htmls.insert(pos, html);
             }
         }
@@ -3815,8 +4445,8 @@ impl<'a> MarginBoxRenderer<'a> {
             );
             self.measure_cache.entry(measure_key).or_insert_with(|| {
                 let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div style=\"display:inline-block\">{}</div></body></html>",
+                    self.html_open, self.margin_css, html
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
@@ -3850,8 +4480,8 @@ impl<'a> MarginBoxRenderer<'a> {
             );
             self.height_cache.entry(hc_key).or_insert_with(|| {
                 let measure_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\"><div>{}</div></body></html>",
+                    self.html_open, self.margin_css, html
                 );
                 let measure_doc = crate::blitz_adapter::parse_and_layout(
                     &measure_html,
@@ -3915,15 +4545,25 @@ impl<'a> MarginBoxRenderer<'a> {
                 .copied()
                 .unwrap_or_else(|| pos.bounding_rect(page_size, resolved_margin));
 
+            // The vertical position is part of the key: boxes with the same
+            // content and size can sit at different heights.
             let cache_key = (
-                html.clone(),
+                format!("{}|{html}", pos.default_justify_content()),
                 width_key(rect.width.to_f32()),
                 width_key(rect.height.to_f32()),
             );
             if !self.render_cache.contains_key(&cache_key) {
+                // The body fills the box, and the content sits at the box's
+                // default vertical position (middle for the top and bottom
+                // edges).
                 let render_html = format!(
-                    "<html><head><style>{}</style></head><body style=\"margin:0;padding:0;\">{}</body></html>",
-                    self.margin_css, html
+                    "{}<head><style>{}</style></head><body style=\"margin:0;padding:0;\
+                     height:100vh;display:flex;flex-direction:column;\
+                     justify-content:{};\">{}</body></html>",
+                    self.html_open,
+                    self.margin_css,
+                    pos.default_justify_content(),
+                    html
                 );
                 let mut render_doc = crate::blitz_adapter::parse_and_layout(
                     &render_html,
@@ -3959,6 +4599,27 @@ impl<'a> MarginBoxRenderer<'a> {
             }
 
             if let Some((drawables, geometry)) = self.render_cache.get(&cache_key) {
+                // In a tagged PDF the margin boxes are pagination artifacts
+                // (running headers, footers, page numbers), as PDF/UA
+                // requires for content that is not part of the document.
+                let artifact = self.tag_artifacts.then(|| {
+                    use krilla::tagging::{ArtifactType, ContentTag};
+                    let kind = match pos {
+                        MarginBoxPosition::TopLeftCorner
+                        | MarginBoxPosition::TopLeft
+                        | MarginBoxPosition::TopCenter
+                        | MarginBoxPosition::TopRight
+                        | MarginBoxPosition::TopRightCorner => ArtifactType::Header,
+                        MarginBoxPosition::BottomLeftCorner
+                        | MarginBoxPosition::BottomLeft
+                        | MarginBoxPosition::BottomCenter
+                        | MarginBoxPosition::BottomRight
+                        | MarginBoxPosition::BottomRightCorner => ArtifactType::Footer,
+                        _ => ArtifactType::Other,
+                    };
+                    canvas.surface.start_tagged(ContentTag::Artifact(kind));
+                    canvas.in_marked_content = true;
+                });
                 if let Some(root_id) = drawables.root_id {
                     if let Some(root_block) = drawables.block_styles.get(&root_id) {
                         paint_root_block_v2(
@@ -3994,6 +4655,10 @@ impl<'a> MarginBoxRenderer<'a> {
                     &owd,
                     &page_nodes,
                 );
+                if artifact.is_some() {
+                    canvas.surface.end_tagged();
+                    canvas.in_marked_content = false;
+                }
             }
         }
         // Body-link clip gate: `true` iff at least one effective margin
@@ -4025,17 +4690,17 @@ fn get_body_child_dimension(doc: &blitz_html::HtmlDocument, use_width: bool) -> 
             for &child_id in &root_node.children {
                 if let Some(child) = base_doc.get_node(child_id) {
                     if let blitz_dom::NodeData::Element(elem) = &child.data {
-                        if elem.name.local.as_ref() == "body" {
+                        if (&elem.name.local) == "body" {
                             for &body_child_id in &child.children {
                                 if let Some(body_child) = base_doc.get_node(body_child_id) {
-                                    let size = &body_child.final_layout.size;
+                                    let size = &body_child.final_layout_or_zero().size;
                                     let v = if use_width { size.width } else { size.height };
                                     if v > 0.0 {
                                         break 'outer v;
                                     }
                                 }
                             }
-                            let size = &child.final_layout.size;
+                            let size = &child.final_layout_or_zero().size;
                             break 'outer if use_width { size.width } else { size.height };
                         }
                     }
@@ -4061,6 +4726,11 @@ fn strip_display_none(css: &str) -> String {
     css.replace("display: none", "").replace("display:none", "")
 }
 
+/// Tagged link annotations of body links, by `Arc<LinkSpan>` pointer: the
+/// page each was added on, and its identifier. A link drawn on several
+/// pages has one annotation per page.
+type LinkAnnotationIds = BTreeMap<usize, Vec<(usize, Identifier)>>;
+
 /// Build a hierarchical [`TagTree`] from [`TagCollector`] entries and
 /// the `semantics` map in [`Drawables`].
 ///
@@ -4069,16 +4739,22 @@ fn strip_display_none(css: &str) -> String {
 /// [`crate::tagging::SemanticEntry::parent`] to nest groups, so that
 /// `<section><h1>…</h1></section>` produces a Div group containing an
 /// Hn group rather than two sibling groups.
+///
+/// Every annotation in `link_annot_ids` ends up in exactly one `Link`
+/// element (see [`LinkPlacement`]).
 fn build_struct_tree(
-    tc: crate::draw_primitives::TagCollector,
+    mut tc: crate::draw_primitives::TagCollector,
     drawables: &Drawables,
-    link_annot_ids: &BTreeMap<usize, Vec<Identifier>>,
+    link_annot_ids: &LinkAnnotationIds,
     tree: &mut TagTree,
 ) {
     let mut identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
     let mut heading_titles: BTreeMap<crate::drawables::NodeId, String> = BTreeMap::new();
     // `into_parts` returns `entries` and `run_entries` together so neither
     // field needs to be borrowed before the other is moved.
+    let group_links = tc.take_group_links();
+    let inline_boxes = tc.take_inline_boxes();
+    let run_pages = tc.take_run_pages();
     let (tc_entries, run_entries) = tc.into_parts();
     for (node_id, _tag, id, heading_title) in tc_entries {
         identifiers.entry(node_id).or_default().push(id);
@@ -4116,27 +4792,279 @@ fn build_struct_tree(
         }
     }
 
-    let roots: Vec<crate::drawables::NodeId> = drawables
+    let mut roots: Vec<crate::drawables::NodeId> = drawables
         .semantics
         .iter()
         .filter(|(_, e)| e.parent.is_none())
         .map(|(&id, _)| id)
         .collect();
+    // Document order: node ids, except for anonymous blocks, which sort at
+    // the first node they wrap. The sort is stable, so equal keys keep
+    // their id order.
+    let order =
+        |id: &crate::drawables::NodeId| drawables.semantic_order.get(id).copied().unwrap_or(*id);
+    if !drawables.semantic_order.is_empty() {
+        roots.sort_by_key(order);
+        for children in children_map.values_mut() {
+            children.sort_by_key(order);
+        }
+    }
 
+    // PDF/UA requires every heading to have a title. A heading whose own
+    // paragraph has no text (its text is in a flex item, or beside a block
+    // child) takes it from the elements inside it.
+    for (&node_id, entry) in &drawables.semantics {
+        if matches!(entry.tag, crate::tagging::PdfTag::H { .. })
+            && !heading_titles.contains_key(&node_id)
+            && let Some(title) = heading_title_from_content(node_id, drawables, &children_map)
+        {
+            heading_titles.insert(node_id, title);
+        }
+    }
+
+    let inputs = TreeInputs {
+        drawables,
+        identifiers: &identifiers,
+        heading_titles: &heading_titles,
+        children_map: &children_map,
+        run_entries: &run_entries,
+        run_pages: &run_pages,
+        group_links: &group_links,
+        inline_boxes: &inline_boxes,
+    };
+    let mut links = LinkPlacement::new(&inputs, link_annot_ids);
     for root_id in roots {
-        let group = build_tag_group(
-            root_id,
-            drawables,
-            &identifiers,
-            &heading_titles,
-            &children_map,
-            &run_entries,
-            link_annot_ids,
-        );
+        let group = build_tag_group_with_links(root_id, &inputs, &mut links);
+        if group.children.is_empty() && can_be_left_out(&drawables.semantics[&root_id]) {
+            continue;
+        }
         tree.push(Node::Group(group));
+    }
+    // A tagged annotation must appear in the tree. One whose link ended up
+    // with no `Link` element gets one of its own.
+    for ids in links.into_unplaced() {
+        tree.push(Node::Group(annotation_only_link(ids)));
     }
 }
 
+/// The title of a heading taken from its content: the text of the
+/// paragraphs inside it, in document order, else the alt text of the
+/// first image inside it that has one.
+fn heading_title_from_content(
+    node_id: crate::drawables::NodeId,
+    drawables: &Drawables,
+    children_map: &BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
+) -> Option<String> {
+    let mut texts: Vec<String> = Vec::new();
+    let mut alt: Option<&str> = None;
+    // Depth first, children in document order.
+    let mut stack = vec![node_id];
+    while let Some(id) = stack.pop() {
+        if let Some(text) = drawables.paragraphs.get(&id).and_then(heading_title_of) {
+            let text = text.trim();
+            if !text.is_empty() {
+                texts.push(text.to_string());
+            }
+        }
+        if alt.is_none()
+            && let Some(entry) = drawables.semantics.get(&id)
+            && matches!(entry.tag, crate::tagging::PdfTag::Figure)
+        {
+            alt = entry
+                .alt_text
+                .as_deref()
+                .map(str::trim)
+                .filter(|a| !a.is_empty());
+        }
+        if let Some(children) = children_map.get(&id) {
+            stack.extend(children.iter().rev());
+        }
+    }
+    if texts.is_empty() {
+        alt.map(str::to_string)
+    } else {
+        Some(texts.join(" "))
+    }
+}
+
+/// What `build_struct_tree` gathered, shared by every element it builds.
+struct TreeInputs<'a> {
+    drawables: &'a Drawables,
+    identifiers: &'a BTreeMap<crate::drawables::NodeId, Vec<Identifier>>,
+    heading_titles: &'a BTreeMap<crate::drawables::NodeId, String>,
+    children_map: &'a BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
+    run_entries:
+        &'a BTreeMap<crate::drawables::NodeId, Vec<crate::draw_primitives::ParagraphRunItem>>,
+    /// The page of each run item, item for item.
+    run_pages: &'a BTreeMap<crate::drawables::NodeId, Vec<usize>>,
+    /// Links drawn inside an element tagged as one group (see
+    /// `TagCollector::note_group_link`); each becomes a `Link` element
+    /// with only its annotation, after the element's content.
+    group_links: &'a BTreeMap<crate::drawables::NodeId, Vec<crate::draw_primitives::GroupLink>>,
+    /// Where inline boxes sit among a paragraph's runs.
+    inline_boxes:
+        &'a BTreeMap<crate::drawables::NodeId, Vec<crate::draw_primitives::InlineBoxMark>>,
+}
+
+/// Hands each link annotation to exactly one `Link` element.
+///
+/// A link whose content is in several elements (an `<a
+/// style="display:block">` around a heading and a paragraph) gets a
+/// `Link` element in each, and krilla refuses an annotation that appears
+/// twice in the tree. Each annotation goes to the first `Link` element of
+/// its link, in document order, with content on the annotation's page, or,
+/// when no element of the link has content on that page, to the link's
+/// first element. The other elements of the link hold only content.
+struct LinkPlacement {
+    /// Annotations not placed yet, by link: (page, identifier).
+    unplaced: LinkAnnotationIds,
+    /// The pages on which each link has content in some `Link` element.
+    content_pages: BTreeMap<usize, std::collections::BTreeSet<usize>>,
+    /// Links whose first `Link` element has been built.
+    started: std::collections::BTreeSet<usize>,
+}
+
+impl LinkPlacement {
+    fn new(inputs: &TreeInputs<'_>, link_annot_ids: &LinkAnnotationIds) -> Self {
+        let mut content_pages: BTreeMap<usize, std::collections::BTreeSet<usize>> = BTreeMap::new();
+        for (node_id, items) in inputs.run_entries {
+            let pages = inputs.run_pages.get(node_id);
+            for (i, item) in items.iter().enumerate() {
+                if let crate::draw_primitives::ParagraphRunItem::LinkContent { span_ptr, .. } = item
+                    && let Some(&page) = pages.and_then(|p| p.get(i))
+                {
+                    content_pages.entry(*span_ptr).or_default().insert(page);
+                }
+            }
+        }
+        for link in inputs.group_links.values().flatten() {
+            content_pages
+                .entry(link.span_ptr)
+                .or_default()
+                .extend(link.pages.iter().copied());
+        }
+        for mark in inputs.inline_boxes.values().flatten() {
+            if let Some(ptr) = mark.link {
+                content_pages.entry(ptr).or_default().insert(mark.page);
+            }
+        }
+        Self {
+            unplaced: link_annot_ids.clone(),
+            content_pages,
+            started: std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// The annotations for the next `Link` element of link `span_ptr`, in
+    /// document order, whose content is on `pages`.
+    fn take(
+        &mut self,
+        span_ptr: usize,
+        pages: &std::collections::BTreeSet<usize>,
+    ) -> Vec<Identifier> {
+        let first = self.started.insert(span_ptr);
+        let content_pages = self.content_pages.get(&span_ptr);
+        let Some(annots) = self.unplaced.get_mut(&span_ptr) else {
+            return Vec::new();
+        };
+        let mut taken = Vec::new();
+        annots.retain(|&(page, id)| {
+            let here = pages.contains(&page)
+                || (first && !content_pages.is_some_and(|c| c.contains(&page)));
+            if here {
+                taken.push(id);
+            }
+            !here
+        });
+        taken
+    }
+
+    /// The annotations no `Link` element took, by link.
+    fn into_unplaced(self) -> impl Iterator<Item = Vec<Identifier>> {
+        self.unplaced
+            .into_values()
+            .filter(|annots| !annots.is_empty())
+            .map(|annots| annots.into_iter().map(|(_, id)| id).collect())
+    }
+}
+
+/// A `Link` element holding only annotations: for a link whose text is
+/// tagged elsewhere (inside a group tagged as one sequence) or is an
+/// artifact (in a page margin box).
+fn annotation_only_link(ids: impl IntoIterator<Item = Identifier>) -> TagGroup {
+    let mut link = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(
+        &crate::tagging::PdfTag::Link,
+        None,
+        None,
+    ));
+    for id in ids {
+        link.push(Node::Leaf(id));
+    }
+    link
+}
+
+/// Give a `TD` or `TH` its `/ColSpan` and `/RowSpan`, so assistive
+/// technology knows which columns and rows a spanning cell covers.
+fn set_table_cell_spans(tag: &mut krilla::tagging::TagKind, colspan: u32, rowspan: u32) {
+    use krilla::tagging::TagKind;
+    let span = |n: u32| std::num::NonZeroU32::new(n).filter(|n| n.get() > 1);
+    match tag {
+        TagKind::TD(td) => {
+            td.set_col_span(span(colspan));
+            td.set_row_span(span(rowspan));
+        }
+        TagKind::TH(th) => {
+            th.set_col_span(span(colspan));
+            th.set_row_span(span(rowspan));
+        }
+        _ => {}
+    }
+}
+
+/// The children of `node_id` that hold the content of an inline box whose
+/// content node is `content_id`, in document order: usually the content
+/// node itself; for a box without an element of its own, the elements
+/// inside it; for a box inside an inline element (a `Span`), that element.
+fn inline_box_children(
+    node_id: crate::drawables::NodeId,
+    content_id: crate::drawables::NodeId,
+    inputs: &TreeInputs<'_>,
+) -> Vec<crate::drawables::NodeId> {
+    let drawables = inputs.drawables;
+    let Some(children) = inputs.children_map.get(&node_id) else {
+        return Vec::new();
+    };
+    let inside = std::iter::once(content_id).chain(
+        drawables
+            .inline_box_subtree_descendants
+            .get(&content_id)
+            .into_iter()
+            .flatten()
+            .copied(),
+    );
+    // Walk up from each node of the box to the child of `node_id` above it.
+    let mut found = std::collections::BTreeSet::new();
+    for start in inside {
+        let mut current = start;
+        for _ in 0..=drawables.semantics.len() {
+            match drawables.semantics.get(&current).and_then(|e| e.parent) {
+                Some(parent) if parent == node_id => {
+                    found.insert(current);
+                    break;
+                }
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+    }
+    children
+        .iter()
+        .copied()
+        .filter(|child| found.contains(child))
+        .collect()
+}
+
+#[cfg(test)]
 fn build_tag_group(
     node_id: crate::drawables::NodeId,
     drawables: &Drawables,
@@ -4144,23 +5072,86 @@ fn build_tag_group(
     heading_titles: &BTreeMap<crate::drawables::NodeId, String>,
     children_map: &BTreeMap<crate::drawables::NodeId, Vec<crate::drawables::NodeId>>,
     run_entries: &BTreeMap<crate::drawables::NodeId, Vec<crate::draw_primitives::ParagraphRunItem>>,
-    link_annot_ids: &BTreeMap<usize, Vec<Identifier>>,
+    link_annot_ids: &LinkAnnotationIds,
 ) -> TagGroup {
+    let inputs = TreeInputs {
+        drawables,
+        identifiers,
+        heading_titles,
+        children_map,
+        run_entries,
+        run_pages: &BTreeMap::new(),
+        group_links: &BTreeMap::new(),
+        inline_boxes: &BTreeMap::new(),
+    };
+    let mut links = LinkPlacement::new(&inputs, link_annot_ids);
+    build_tag_group_with_links(node_id, &inputs, &mut links)
+}
+
+/// Build the element of `node_id` and, below it, its children's.
+fn build_tag_group_with_links(
+    node_id: crate::drawables::NodeId,
+    inputs: &TreeInputs<'_>,
+    links: &mut LinkPlacement,
+) -> TagGroup {
+    use crate::draw_primitives::ParagraphRunItem;
+    let drawables = inputs.drawables;
     let entry = &drawables.semantics[&node_id]; // invariant: node_id always derived from drawables.semantics
-    let title = heading_titles.get(&node_id).cloned();
-    let mut group = TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(
-        &entry.tag,
-        title,
-        entry.alt_text.clone(),
-    ));
+    let title = inputs.heading_titles.get(&node_id).cloned();
+    let mut tag = crate::tagging::pdf_tag_to_krilla_tag(&entry.tag, title, entry.alt_text.clone());
+    if let Some(&(colspan, rowspan)) = drawables.table_cell_spans.get(&node_id) {
+        set_table_cell_spans(&mut tag, colspan, rowspan);
+    }
+    if let Some(lang) = drawables.element_langs.get(&node_id) {
+        tag.set_lang(Some(lang.to_string()));
+    }
+    let mut group = TagGroup::new(tag);
+    // Children already built at their inline box's place among the runs.
+    let mut placed_children = std::collections::BTreeSet::new();
 
     // Paragraphs with per-run link tagging use run_entries instead of the
     // single identifiers path.
-    if let Some(run_items) = run_entries.get(&node_id) {
+    if let Some(run_items) = inputs.run_entries.get(&node_id) {
+        let pages = inputs.run_pages.get(&node_id);
+        let mut marks = inputs
+            .inline_boxes
+            .get(&node_id)
+            .map_or(&[][..], Vec::as_slice)
+            .iter()
+            .peekable();
         let mut i = 0;
-        while i < run_items.len() {
-            use crate::draw_primitives::ParagraphRunItem;
-            match &run_items[i] {
+        loop {
+            // The inline boxes drawn before item `i` come before it.
+            while let Some(mark) = marks.next_if(|m| m.run_index <= i) {
+                // A box inside a link (`<a href><img alt></a>`) goes into a
+                // `Link` element with the link's annotation.
+                let mut link_group = mark.link.map(|_| {
+                    TagGroup::new(crate::tagging::pdf_tag_to_krilla_tag(
+                        &crate::tagging::PdfTag::Link,
+                        None,
+                        None,
+                    ))
+                });
+                for child_id in inline_box_children(node_id, mark.content_id, inputs) {
+                    if placed_children.insert(child_id) {
+                        let target = link_group.as_mut().unwrap_or(&mut group);
+                        push_child_group(target, child_id, inputs, links);
+                    }
+                }
+                if let (Some(mut link_group), Some(ptr)) = (link_group, mark.link) {
+                    let pages = std::iter::once(mark.page).collect();
+                    for annot_id in links.take(ptr, &pages) {
+                        link_group.push(Node::Leaf(annot_id));
+                    }
+                    if !link_group.children.is_empty() {
+                        group.push(Node::Group(link_group));
+                    }
+                }
+            }
+            let Some(item) = run_items.get(i) else {
+                break;
+            };
+            match item {
                 ParagraphRunItem::Content(id) => {
                     group.push(Node::Leaf(*id));
                     i += 1;
@@ -4172,49 +5163,118 @@ fn build_tag_group(
                         None,
                         None,
                     ));
-                    // Collect all consecutive items with the same span_ptr.
+                    let mut link_pages = std::collections::BTreeSet::new();
+                    // Collect all consecutive items with the same span_ptr,
+                    // up to the next inline box.
                     while let Some(ParagraphRunItem::LinkContent {
                         span_ptr: p,
                         identifier: id,
                     }) = run_items.get(i)
                         && *p == ptr
+                        && marks.peek().is_none_or(|m| m.run_index > i)
                     {
                         link_group.push(Node::Leaf(*id));
+                        if let Some(&page) = pages.and_then(|p| p.get(i)) {
+                            link_pages.insert(page);
+                        }
                         i += 1;
                     }
                     // Annotation identifiers (OBJR) follow content identifiers.
                     // A cross-page link produces one identifier per page.
-                    if let Some(annot_ids) = link_annot_ids.get(&ptr) {
-                        for &annot_id in annot_ids {
-                            link_group.push(Node::Leaf(annot_id));
-                        }
+                    for annot_id in links.take(ptr, &link_pages) {
+                        link_group.push(Node::Leaf(annot_id));
                     }
                     group.push(Node::Group(link_group));
                 }
+                ParagraphRunItem::FigureContent {
+                    node_id: figure, ..
+                } => {
+                    let figure = *figure;
+                    // The text of an inline `role="img"` element is the
+                    // content of its `Figure`, in its place in the paragraph.
+                    let mut figure_group = drawables
+                        .semantics
+                        .contains_key(&figure)
+                        .then(|| build_tag_group_with_links(figure, inputs, links));
+                    while let Some(ParagraphRunItem::FigureContent {
+                        node_id: n,
+                        identifier: id,
+                    }) = run_items.get(i)
+                        && *n == figure
+                        && marks.peek().is_none_or(|m| m.run_index > i)
+                    {
+                        match figure_group.as_mut() {
+                            Some(g) => g.push(Node::Leaf(*id)),
+                            None => group.push(Node::Leaf(*id)),
+                        }
+                        i += 1;
+                    }
+                    if let Some(figure_group) = figure_group {
+                        placed_children.insert(figure);
+                        group.push(Node::Group(figure_group));
+                    }
+                }
             }
         }
-    } else if let Some(ids) = identifiers.get(&node_id) {
+    } else if let Some(ids) = inputs.identifiers.get(&node_id) {
         for &id in ids {
             group.push(Node::Leaf(id));
         }
     }
+    for link in inputs.group_links.get(&node_id).into_iter().flatten() {
+        let annot_ids = links.take(link.span_ptr, &link.pages);
+        if !annot_ids.is_empty() {
+            group.push(Node::Group(annotation_only_link(annot_ids)));
+        }
+    }
 
-    if let Some(children) = children_map.get(&node_id) {
-        for &child_id in children {
-            let child = build_tag_group(
-                child_id,
-                drawables,
-                identifiers,
-                heading_titles,
-                children_map,
-                run_entries,
-                link_annot_ids,
-            );
-            group.push(Node::Group(child));
+    for &child_id in inputs.children_map.get(&node_id).into_iter().flatten() {
+        if !placed_children.contains(&child_id) {
+            push_child_group(&mut group, child_id, inputs, links);
         }
     }
 
     group
+}
+
+/// Build `child_id`'s element and add it to `group`, unless it is empty
+/// and can be left out.
+fn push_child_group(
+    group: &mut TagGroup,
+    child_id: crate::drawables::NodeId,
+    inputs: &TreeInputs<'_>,
+    links: &mut LinkPlacement,
+) {
+    let child = build_tag_group_with_links(child_id, inputs, links);
+    if child.children.is_empty() && can_be_left_out(&inputs.drawables.semantics[&child_id]) {
+        return;
+    }
+    group.push(Node::Group(child));
+}
+
+/// Whether an element with no content can be left out of the structure
+/// tree. An element's content can end up in its parent (a group drawn
+/// with opacity is tagged as one sequence), or it may draw nothing; an
+/// empty paragraph or span only adds noise for assistive technology.
+/// Table structure stays, so rows keep their cells. A figure stays when it
+/// has alt text to give; one with neither content nor alt text describes
+/// nothing, and PDF/UA would refuse it for the missing alt text.
+fn can_be_left_out(entry: &crate::tagging::SemanticEntry) -> bool {
+    use crate::tagging::PdfTag;
+    match entry.tag {
+        PdfTag::Table
+        | PdfTag::THead
+        | PdfTag::TBody
+        | PdfTag::TFoot
+        | PdfTag::Tr
+        | PdfTag::Th { .. }
+        | PdfTag::Td => false,
+        PdfTag::Figure => entry
+            .alt_text
+            .as_deref()
+            .is_none_or(|alt| alt.trim().is_empty()),
+        _ => true,
+    }
 }
 
 #[cfg(test)]
@@ -4442,8 +5502,8 @@ mod tests {
             ],
         );
 
-        let mut link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
-        link_annot_ids.entry(99).or_default().push(annot_id);
+        let mut link_annot_ids: LinkAnnotationIds = BTreeMap::new();
+        link_annot_ids.entry(99).or_default().push((0, annot_id));
 
         let drawables = drawables_with_para(node_id);
         let identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
@@ -4488,7 +5548,7 @@ mod tests {
             }],
         );
 
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new(); // empty — no OBJR
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new(); // empty — no OBJR
 
         let drawables = drawables_with_para(node_id);
         let identifiers: BTreeMap<crate::drawables::NodeId, Vec<Identifier>> = BTreeMap::new();
@@ -4524,8 +5584,9 @@ mod tests {
         link: Option<std::sync::Arc<crate::paragraph::LinkSpan>>,
     ) -> crate::paragraph::ShapedGlyphRun {
         crate::paragraph::ShapedGlyphRun {
-            font_data: std::sync::Arc::new(vec![]),
+            font_data: Vec::new().into(),
             font_index: 0,
+            variations: Vec::new(),
             font_size: 12.0_f32.as_pt(),
             color: [0, 0, 0, 255],
             decoration: crate::paragraph::TextDecoration::default(),
@@ -4533,6 +5594,10 @@ mod tests {
             text: std::sync::Arc::from(text),
             x_offset: crate::units::Pt::ZERO,
             link,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
         }
     }
 
@@ -4603,6 +5668,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let line = make_shaped_line(vec![crate::paragraph::LineItem::InlineBox(item)]);
         let para = make_para(vec![line]);
@@ -4620,6 +5686,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         make_para(vec![make_shaped_line(vec![
             crate::paragraph::LineItem::InlineBox(item),
@@ -4876,6 +5943,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let line = make_shaped_line(vec![
             crate::paragraph::LineItem::Image(img),
@@ -5354,7 +6422,7 @@ mod tests {
     fn build_struct_tree_empty_inputs_yields_empty_tree() {
         let tc = crate::draw_primitives::TagCollector::new();
         let d = Drawables::new();
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert!(
@@ -5371,7 +6439,7 @@ mod tests {
         tc.record(node_id, crate::tagging::PdfTag::P, id, None);
         let mut d = Drawables::new();
         d.semantics.insert(node_id, make_p_semantic_entry(None));
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1, "one semantic root → one Group");
@@ -5394,7 +6462,7 @@ mod tests {
         );
         let mut d = Drawables::new();
         d.semantics.insert(node_id, make_h1_semantic_entry(None));
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1, "one root Group");
@@ -5419,7 +6487,7 @@ mod tests {
             "Intro", None,
         ))]);
         d.paragraphs.insert(node_id, make_para(vec![text_line]));
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1, "one root Group from run_entries");
@@ -5448,7 +6516,7 @@ mod tests {
                 alt_text: None,
             },
         );
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1, "only parent_id at root level");
@@ -5669,7 +6737,7 @@ mod tests {
         );
         let mut d = Drawables::new();
         d.semantics.insert(node_id, make_h1_semantic_entry(None));
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1);
@@ -5699,6 +6767,7 @@ mod tests {
             link: None,
             opacity: 1.0,
             visible: true,
+            text_index: None,
         };
         let line = crate::paragraph::ShapedLine {
             height: 16.0_f32.as_pt(),
@@ -5706,7 +6775,7 @@ mod tests {
             items: vec![crate::paragraph::LineItem::InlineBox(ib)],
         };
         d.paragraphs.insert(node_id, make_para(vec![line]));
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1);
@@ -5831,7 +6900,7 @@ mod tests {
         );
         let mut d = Drawables::new();
         d.semantics.insert(node_id, make_p_semantic_entry(None));
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1, "one root Group");
@@ -5863,7 +6932,7 @@ mod tests {
             None,
         ))]);
         d.paragraphs.insert(node_id, make_para(vec![text_line]));
-        let link_annot_ids: BTreeMap<usize, Vec<Identifier>> = BTreeMap::new();
+        let link_annot_ids: LinkAnnotationIds = BTreeMap::new();
         let mut tree = TagTree::new();
         build_struct_tree(tc, &d, &link_annot_ids, &mut tree);
         assert_eq!(tree.children.len(), 1, "one root Group");
@@ -5907,6 +6976,30 @@ mod tests {
     }
 
     #[test]
+    fn margin_boxes_of_a_right_to_left_document_are_right_to_left() {
+        let gcpm = crate::gcpm::GcpmContext::default();
+        let store = RunningElementStore::default();
+        let geom = empty_geometry();
+        let implicit: BTreeMap<usize, String> = BTreeMap::new();
+        let new = |rtl| {
+            MarginBoxRenderer::new(
+                &gcpm,
+                &store,
+                &[],
+                false,
+                &geom,
+                &HashMap::new(),
+                1,
+                &implicit,
+                rtl,
+            )
+            .html_open
+        };
+        assert_eq!(new(true), "<html dir=\"rtl\">");
+        assert_eq!(new(false), "<html>");
+    }
+
+    #[test]
     fn margin_box_renderer_new_with_string_set_mappings_takes_else_branch() {
         // Non-empty string_set_mappings forces the else branch at
         // `collect_string_set_states(pagination_geometry, &by_node_btree)`.
@@ -5930,6 +7023,7 @@ mod tests {
             &HashMap::new(),
             1,
             &implicit,
+            false,
         );
     }
 
@@ -5956,6 +7050,7 @@ mod tests {
             &HashMap::new(),
             1,
             &implicit,
+            false,
         );
     }
 
@@ -6324,6 +7419,175 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    /// Run `f` with a canvas on a tagged krilla page and a tag collector,
+    /// and return what the collector recorded.
+    fn with_tagged_canvas(
+        f: impl FnOnce(&mut crate::draw_primitives::Canvas<'_, '_>),
+    ) -> Vec<crate::draw_primitives::TagEntry> {
+        let mut tc = crate::draw_primitives::TagCollector::new();
+        let mut doc = krilla::Document::new();
+        {
+            let mut page = doc.start_page_with(
+                krilla::page::PageSettings::from_wh(100.0, 100.0).expect("page size"),
+            );
+            let mut surface = page.surface();
+            let mut canvas = crate::draw_primitives::Canvas {
+                surface: &mut surface,
+                bookmark_collector: None,
+                link_collector: None,
+                tag_collector: Some(&mut tc),
+                link_run_node_id: None,
+                in_marked_content: false,
+            };
+            f(&mut canvas);
+        }
+        tc.into_parts().0
+    }
+
+    fn drawables_with_semantic(node_id: usize, tag: crate::tagging::PdfTag) -> Drawables {
+        let mut drawables = Drawables::default();
+        drawables.semantics.insert(
+            node_id,
+            crate::tagging::SemanticEntry {
+                tag,
+                parent: None,
+                alt_text: None,
+            },
+        );
+        drawables
+    }
+
+    #[test]
+    fn try_start_tagged_draws_a_node_without_a_structure_element_as_an_artifact() {
+        // A node left out of the structure tree (inside `aria-hidden`) is
+        // hidden from assistive technology: its content is an artifact.
+        let drawables = Drawables::default();
+        let entries = with_tagged_canvas(|canvas| {
+            let tag = try_start_tagged(canvas, 7, &drawables);
+            assert!(matches!(tag, Some(OpenTag::Artifact)));
+            assert!(canvas.in_marked_content);
+            finish_tagged(canvas, tag);
+            assert!(!canvas.in_marked_content);
+        });
+        assert!(entries.is_empty(), "an artifact is recorded nowhere");
+    }
+
+    #[test]
+    fn try_start_tagged_records_content_under_an_element_of_any_kind() {
+        // The `L` of an inline-root list (`<ul><li style="display:inline">`),
+        // a table drawn as one group, a row: no element is left untagged.
+        use crate::tagging::{ListNumbering, PdfTag};
+        for tag in [
+            PdfTag::L {
+                numbering: ListNumbering::Disc,
+            },
+            PdfTag::Table,
+            PdfTag::Tr,
+            PdfTag::Link,
+        ] {
+            let drawables = drawables_with_semantic(7, tag.clone());
+            let entries = with_tagged_canvas(|canvas| {
+                let open = try_start_tagged(canvas, 7, &drawables);
+                assert!(
+                    matches!(open, Some(OpenTag::Tagged { record_id: 7, .. })),
+                    "{tag:?}"
+                );
+                finish_tagged(canvas, open);
+            });
+            assert_eq!(entries.len(), 1, "{tag:?}");
+            assert_eq!((entries[0].0, &entries[0].1), (7, &tag));
+        }
+    }
+
+    #[test]
+    fn try_start_tagged_records_an_li_under_its_lbody_or_itself() {
+        use crate::tagging::PdfTag;
+        // An inline-root `<li>`: its content belongs to the synthetic LBody.
+        let mut drawables = drawables_with_semantic(7, PdfTag::Li);
+        drawables.li_lbody_ids.insert(7, 70);
+        let entries = with_tagged_canvas(|canvas| {
+            let open = try_start_tagged(canvas, 7, &drawables);
+            finish_tagged(canvas, open);
+        });
+        assert_eq!((entries[0].0, &entries[0].1), (70, &PdfTag::LBody));
+        // An `<li>` without one (drawn as one group): the `LI` itself.
+        let drawables = drawables_with_semantic(7, PdfTag::Li);
+        let entries = with_tagged_canvas(|canvas| {
+            let open = try_start_tagged(canvas, 7, &drawables);
+            finish_tagged(canvas, open);
+        });
+        assert_eq!((entries[0].0, &entries[0].1), (7, &PdfTag::Li));
+    }
+
+    #[test]
+    fn try_start_tagged_opens_nothing_inside_marked_content() {
+        let drawables = drawables_with_semantic(7, crate::tagging::PdfTag::P);
+        let entries = with_tagged_canvas(|canvas| {
+            canvas.in_marked_content = true;
+            assert!(try_start_tagged(canvas, 7, &drawables).is_none());
+            assert!(try_start_tagged(canvas, 8, &drawables).is_none());
+            canvas.in_marked_content = false;
+        });
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn start_group_tagged_notes_links_for_its_element_until_closed() {
+        let drawables = drawables_with_semantic(7, crate::tagging::PdfTag::P);
+        with_tagged_canvas(|canvas| {
+            let open = start_group_tagged(canvas, 7, &drawables);
+            let tc = canvas.tag_collector.as_mut().expect("tagging");
+            assert!(tc.note_group_link(42), "a link in the group is noted");
+            finish_group_tagged(canvas, open);
+            let tc = canvas.tag_collector.as_mut().expect("tagging");
+            assert!(!tc.note_group_link(43), "no group is open any more");
+            let links = tc.take_group_links();
+            let ptrs: Vec<usize> = links[&7].iter().map(|l| l.span_ptr).collect();
+            assert_eq!(ptrs, vec![42]);
+        });
+    }
+
+    #[test]
+    fn start_group_tagged_as_an_artifact_notes_no_links() {
+        let drawables = Drawables::default();
+        with_tagged_canvas(|canvas| {
+            let open = start_group_tagged(canvas, 7, &drawables);
+            assert!(matches!(open, Some(OpenTag::Artifact)));
+            let tc = canvas.tag_collector.as_mut().expect("tagging");
+            assert!(!tc.note_group_link(42));
+            finish_group_tagged(canvas, open);
+        });
+    }
+
+    #[test]
+    fn start_opacity_group_tagged_only_opens_for_a_group() {
+        let drawables = drawables_with_semantic(7, crate::tagging::PdfTag::P);
+        let entries = with_tagged_canvas(|canvas| {
+            for opacity in [0.0, 1.0] {
+                assert!(start_opacity_group_tagged(canvas, 7, &drawables, opacity).is_none());
+            }
+            let open = start_opacity_group_tagged(canvas, 7, &drawables, 0.5);
+            assert!(open.is_some());
+            finish_group_tagged(canvas, open);
+        });
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn draw_with_opacity_draws_a_group_inside_marked_content() {
+        // A group opened outside marked content is decoration: an artifact.
+        with_tagged_canvas(|canvas| {
+            crate::draw_primitives::draw_with_opacity(canvas, 0.5, |canvas| {
+                assert!(canvas.in_marked_content);
+            });
+            assert!(!canvas.in_marked_content);
+            // Without a group nothing is opened.
+            crate::draw_primitives::draw_with_opacity(canvas, 1.0, |canvas| {
+                assert!(!canvas.in_marked_content);
+            });
+        });
+    }
+
     // --- paint_multicol_paragraph_slices ---
 
     #[test]
@@ -6454,6 +7718,105 @@ mod tests {
             )
             .expect("render");
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // --- PDF/A (Config::pdf_a) ---
+
+    fn render_pdf_a(level: crate::PdfA, date: Option<&str>, html: &str) -> Result<Vec<u8>> {
+        let mut builder = crate::engine::Engine::builder().pdf_a(level);
+        if let Some(date) = date {
+            builder = builder.creation_date(date);
+        }
+        builder.build().render(html)
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
+    }
+
+    #[test]
+    fn pdf_a_2b_writes_the_conformance_level() {
+        let pdf = render_pdf_a(
+            crate::PdfA::A2b,
+            Some("2026-11-21T10:00:00"),
+            "<!doctype html><p>Invoice</p>",
+        )
+        .expect("render");
+        assert!(contains(&pdf, "<pdfaid:part>2</pdfaid:part>"));
+        assert!(contains(&pdf, "<pdfaid:conformance>B</pdfaid:conformance>"));
+        assert!(contains(&pdf, "/OutputIntents"));
+    }
+
+    #[test]
+    fn pdf_a_3u_writes_the_conformance_level() {
+        let pdf = render_pdf_a(
+            crate::PdfA::A3u,
+            Some("2026-11-21"),
+            "<!doctype html><p>Invoice</p>",
+        )
+        .expect("render");
+        assert!(contains(&pdf, "<pdfaid:part>3</pdfaid:part>"));
+        assert!(contains(&pdf, "<pdfaid:conformance>U</pdfaid:conformance>"));
+    }
+
+    #[test]
+    fn pdf_a_without_a_creation_date_is_refused() {
+        let err = render_pdf_a(crate::PdfA::A2b, None, "<!doctype html><p>x</p>")
+            .expect_err("PDF/A needs a date");
+        let msg = err.to_string();
+        assert!(msg.contains("PDF/A-2b"), "{msg}");
+        assert!(msg.contains("creation date"), "{msg}");
+    }
+
+    #[test]
+    fn pdf_a_1b_refuses_transparency() {
+        let err = render_pdf_a(
+            crate::PdfA::A1b,
+            Some("2026-11-21"),
+            r#"<!doctype html><div style="opacity:.5;background:red;height:20px"></div>"#,
+        )
+        .expect_err("PDF/A-1 has no transparency");
+        assert!(err.to_string().contains("transparency"), "{err}");
+    }
+
+    #[test]
+    fn pdf_a_2a_tags_the_document() {
+        let pdf = crate::engine::Engine::builder()
+            .pdf_a(crate::PdfA::A2a)
+            .lang("en")
+            .creation_date("2026-11-21")
+            .build()
+            .render("<!doctype html><h1>Invoice</h1><p>Total</p>")
+            .expect("render");
+        assert!(contains(&pdf, "<pdfaid:conformance>A</pdfaid:conformance>"));
+        assert!(contains(&pdf, "/StructTreeRoot"));
+    }
+
+    #[test]
+    fn pdf_a_2a_needs_a_language() {
+        let err = render_pdf_a(
+            crate::PdfA::A2a,
+            Some("2026-11-21"),
+            "<!doctype html><p>x</p>",
+        )
+        .expect_err("2a needs a language");
+        assert!(err.to_string().contains("no language"), "{err}");
+    }
+
+    #[test]
+    fn pdf_a_and_pdf_ua_cannot_be_combined() {
+        let err = crate::engine::Engine::builder()
+            .pdf_a(crate::PdfA::A2b)
+            .pdf_ua(true)
+            .lang("en")
+            .title("t")
+            .creation_date("2026-11-21")
+            .build()
+            .render("<!doctype html><p>x</p>")
+            .expect_err("one validator only");
+        assert!(err.to_string().contains("cannot be combined"), "{err}");
     }
 
     // --- try_start_tagged: PdfTag::Li branch + draw_list_item_marker_tagged ---
@@ -7411,5 +8774,476 @@ mod tests {
             .render(&html)
             .expect("render");
         assert!(pdf.starts_with(b"%PDF"));
+    }
+}
+
+#[cfg(test)]
+mod struct_tree_tests {
+    use super::*;
+    use crate::draw_primitives::{ParagraphRunItem, TagCollector};
+    use crate::tagging::{PdfTag, SemanticEntry};
+    use krilla::tagging::TagKind;
+
+    /// `n` identifiers that differ from each other.
+    fn distinct_ids(n: usize) -> Vec<Identifier> {
+        use krilla::tagging::{ContentTag, SpanTag};
+        let mut doc = krilla::Document::new();
+        let settings = krilla::page::PageSettings::from_wh(100.0, 100.0).expect("page size");
+        let mut page = doc.start_page_with(settings);
+        let mut surface = page.surface();
+        (0..n)
+            .map(|_| {
+                let id = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+                surface.end_tagged();
+                id
+            })
+            .collect()
+    }
+
+    fn entry(tag: PdfTag, parent: Option<usize>) -> SemanticEntry {
+        SemanticEntry {
+            tag,
+            parent,
+            alt_text: None,
+        }
+    }
+
+    fn figure(parent: Option<usize>, alt: Option<&str>) -> SemanticEntry {
+        SemanticEntry {
+            tag: PdfTag::Figure,
+            parent,
+            alt_text: alt.map(str::to_string),
+        }
+    }
+
+    fn link_run(span_ptr: usize, identifier: Identifier) -> ParagraphRunItem {
+        ParagraphRunItem::LinkContent {
+            span_ptr,
+            identifier,
+        }
+    }
+
+    fn build(tc: TagCollector, d: &Drawables, link_annot_ids: &LinkAnnotationIds) -> Vec<Node> {
+        let mut tree = TagTree::new();
+        build_struct_tree(tc, d, link_annot_ids, &mut tree);
+        tree.children
+    }
+
+    fn group(node: &Node) -> &TagGroup {
+        match node {
+            Node::Group(g) => g,
+            Node::Leaf(_) => panic!("expected a group, got a leaf"),
+        }
+    }
+
+    fn leaves(nodes: &[Node]) -> Vec<Identifier> {
+        let mut out = Vec::new();
+        for node in nodes {
+            match node {
+                Node::Leaf(id) => out.push(*id),
+                Node::Group(g) => out.extend(leaves(&g.children)),
+            }
+        }
+        out
+    }
+
+    /// The element types of `nodes`, with `MC` for a leaf.
+    fn kinds(nodes: &[Node]) -> Vec<&'static str> {
+        nodes
+            .iter()
+            .map(|n| match n {
+                Node::Leaf(_) => "MC",
+                Node::Group(g) => match g.tag {
+                    TagKind::P(_) => "P",
+                    TagKind::Link(_) => "Link",
+                    TagKind::Figure(_) => "Figure",
+                    TagKind::Span(_) => "Span",
+                    TagKind::Div(_) => "Div",
+                    TagKind::Hn(_) => "H",
+                    TagKind::TD(_) => "TD",
+                    TagKind::TH(_) => "TH",
+                    _ => "other",
+                },
+            })
+            .collect()
+    }
+
+    fn count(ids: &[Identifier], id: Identifier) -> usize {
+        ids.iter().filter(|&&i| i == id).count()
+    }
+
+    // ── one Link element per annotation ─────────────────────────────────
+
+    /// A `Div` (1) holding two paragraphs (2, 3) that are both inside one
+    /// link, `<a style="display:block">` around them.
+    fn link_around_two_paragraphs() -> Drawables {
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::Div, None));
+        d.semantics.insert(2, entry(PdfTag::P, Some(1)));
+        d.semantics.insert(3, entry(PdfTag::P, Some(1)));
+        d
+    }
+
+    #[test]
+    fn a_link_in_two_paragraphs_puts_its_annotation_in_the_first_only() {
+        let [first, second, annot] = distinct_ids(3)[..] else {
+            unreachable!()
+        };
+        let mut tc = TagCollector::new();
+        tc.record_run(2, link_run(9, first));
+        tc.record_run(3, link_run(9, second));
+        let annots: LinkAnnotationIds = BTreeMap::from([(9, vec![(0, annot)])]);
+        let tree = build(tc, &link_around_two_paragraphs(), &annots);
+        assert_eq!(count(&leaves(&tree), annot), 1);
+        let div = group(&tree[0]);
+        let first_link = group(&group(&div.children[0]).children[0]);
+        let second_link = group(&group(&div.children[1]).children[0]);
+        assert_eq!(leaves(&first_link.children), vec![first, annot]);
+        assert_eq!(leaves(&second_link.children), vec![second]);
+    }
+
+    #[test]
+    fn each_annotation_goes_to_the_link_element_on_its_page() {
+        let [first, second, annot0, annot1] = distinct_ids(4)[..] else {
+            unreachable!()
+        };
+        let mut tc = TagCollector::new();
+        tc.set_current_page(0);
+        tc.record_run(2, link_run(9, first));
+        tc.set_current_page(1);
+        tc.record_run(3, link_run(9, second));
+        let annots: LinkAnnotationIds = BTreeMap::from([(9, vec![(0, annot0), (1, annot1)])]);
+        let tree = build(tc, &link_around_two_paragraphs(), &annots);
+        let div = group(&tree[0]);
+        let first_link = group(&group(&div.children[0]).children[0]);
+        let second_link = group(&group(&div.children[1]).children[0]);
+        assert_eq!(leaves(&first_link.children), vec![first, annot0]);
+        assert_eq!(leaves(&second_link.children), vec![second, annot1]);
+    }
+
+    #[test]
+    fn an_annotation_on_a_page_without_link_content_goes_to_the_first_element() {
+        let [first, second, annot0, annot1] = distinct_ids(4)[..] else {
+            unreachable!()
+        };
+        let mut tc = TagCollector::new();
+        tc.set_current_page(1);
+        tc.record_run(2, link_run(9, first));
+        tc.record_run(3, link_run(9, second));
+        let annots: LinkAnnotationIds = BTreeMap::from([(9, vec![(0, annot0), (1, annot1)])]);
+        let tree = build(tc, &link_around_two_paragraphs(), &annots);
+        let div = group(&tree[0]);
+        let first_link = group(&group(&div.children[0]).children[0]);
+        assert_eq!(leaves(&first_link.children), vec![first, annot0, annot1]);
+        assert_eq!(leaves(&tree).len(), 4);
+    }
+
+    #[test]
+    fn a_link_drawn_in_a_group_and_after_it_has_its_annotation_once() {
+        // `<a style="display:block"><div style="opacity:.5"><p>Faded</p></div>
+        // <p>Plain</p></a>`: the faded text is the div's content, so the
+        // div holds a Link with the annotation; the plain paragraph's Link
+        // holds only its text.
+        let [faded, plain, annot] = distinct_ids(3)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::Div, None));
+        d.semantics.insert(2, entry(PdfTag::P, None));
+        let mut tc = TagCollector::new();
+        tc.set_open_group(Some(1));
+        assert!(tc.note_group_link(9));
+        tc.set_open_group(None);
+        tc.record(1, PdfTag::Div, faded, None);
+        tc.record_run(2, link_run(9, plain));
+        let annots: LinkAnnotationIds = BTreeMap::from([(9, vec![(0, annot)])]);
+        let tree = build(tc, &d, &annots);
+        assert_eq!(count(&leaves(&tree), annot), 1);
+        let div = group(&tree[0]);
+        assert_eq!(kinds(&div.children), vec!["MC", "Link"]);
+        assert_eq!(leaves(&div.children), vec![faded, annot]);
+        assert_eq!(leaves(&group(&tree[1]).children), vec![plain]);
+    }
+
+    #[test]
+    fn an_annotation_whose_link_has_no_element_gets_a_link_of_its_own() {
+        let [annot] = distinct_ids(1)[..] else {
+            unreachable!()
+        };
+        let annots: LinkAnnotationIds = BTreeMap::from([(9, vec![(0, annot)])]);
+        let tree = build(TagCollector::new(), &Drawables::new(), &annots);
+        assert_eq!(kinds(&tree), vec!["Link"]);
+        assert_eq!(leaves(&tree), vec![annot]);
+    }
+
+    // ── inline boxes keep their place among the runs ────────────────────
+
+    #[test]
+    fn an_inline_figure_sits_between_the_runs_around_it() {
+        let [before, image, after] = distinct_ids(3)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::P, None));
+        d.semantics.insert(2, figure(Some(1), Some("gear")));
+        let mut tc = TagCollector::new();
+        tc.record_run(1, ParagraphRunItem::Content(before));
+        tc.note_inline_box(1, 2);
+        tc.record(2, PdfTag::Figure, image, None);
+        tc.record_run(1, ParagraphRunItem::Content(after));
+        let tree = build(tc, &d, &BTreeMap::new());
+        let p = group(&tree[0]);
+        assert_eq!(kinds(&p.children), vec!["MC", "Figure", "MC"]);
+        assert_eq!(leaves(&p.children), vec![before, image, after]);
+    }
+
+    #[test]
+    fn an_inline_figure_splits_the_link_around_it() {
+        let [before, image, after, annot] = distinct_ids(4)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::P, None));
+        d.semantics.insert(2, figure(Some(1), Some("gear")));
+        let mut tc = TagCollector::new();
+        tc.record_run(1, link_run(9, before));
+        tc.note_inline_box(1, 2);
+        tc.record(2, PdfTag::Figure, image, None);
+        tc.record_run(1, link_run(9, after));
+        let annots: LinkAnnotationIds = BTreeMap::from([(9, vec![(0, annot)])]);
+        let tree = build(tc, &d, &annots);
+        let p = group(&tree[0]);
+        assert_eq!(kinds(&p.children), vec!["Link", "Figure", "Link"]);
+        assert_eq!(leaves(&p.children), vec![before, annot, image, after]);
+    }
+
+    #[test]
+    fn an_inline_box_at_the_end_of_a_paragraph_comes_last() {
+        let [text, image] = distinct_ids(2)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::P, None));
+        d.semantics.insert(2, figure(Some(1), Some("gear")));
+        let mut tc = TagCollector::new();
+        tc.record_run(1, ParagraphRunItem::Content(text));
+        tc.note_inline_box(1, 2);
+        tc.record(2, PdfTag::Figure, image, None);
+        let tree = build(tc, &d, &BTreeMap::new());
+        assert_eq!(kinds(&group(&tree[0]).children), vec!["MC", "Figure"]);
+    }
+
+    #[test]
+    fn an_inline_box_inside_a_span_places_the_span() {
+        // <p>Press <span><svg …/></span> now</p>: the span holds the box.
+        let [before, image, after] = distinct_ids(3)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::P, None));
+        d.semantics.insert(2, entry(PdfTag::Span, Some(1)));
+        d.semantics.insert(3, figure(Some(2), Some("gear")));
+        let mut tc = TagCollector::new();
+        tc.record_run(1, ParagraphRunItem::Content(before));
+        tc.note_inline_box(1, 3);
+        tc.record(3, PdfTag::Figure, image, None);
+        tc.record_run(1, ParagraphRunItem::Content(after));
+        let tree = build(tc, &d, &BTreeMap::new());
+        let p = group(&tree[0]);
+        assert_eq!(kinds(&p.children), vec!["MC", "Span", "MC"]);
+        assert_eq!(leaves(&p.children), vec![before, image, after]);
+    }
+
+    #[test]
+    fn an_inline_box_without_an_element_places_the_elements_inside_it() {
+        // An inline-block (4) with no element of its own holding a figure.
+        let [before, image, after] = distinct_ids(3)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::P, None));
+        d.semantics.insert(5, figure(Some(1), Some("gear")));
+        d.inline_box_subtree_descendants.insert(4, vec![5]);
+        let mut tc = TagCollector::new();
+        tc.record_run(1, ParagraphRunItem::Content(before));
+        tc.note_inline_box(1, 4);
+        tc.record(5, PdfTag::Figure, image, None);
+        tc.record_run(1, ParagraphRunItem::Content(after));
+        let tree = build(tc, &d, &BTreeMap::new());
+        assert_eq!(kinds(&group(&tree[0]).children), vec!["MC", "Figure", "MC"]);
+    }
+
+    // ── heading titles from content ─────────────────────────────────────
+
+    fn text_para(text: &str) -> crate::drawables::ParagraphEntry {
+        let run = crate::paragraph::ShapedGlyphRun {
+            font_data: Vec::new().into(),
+            font_index: 0,
+            variations: Vec::new(),
+            font_size: 12.0_f32.as_pt(),
+            color: [0, 0, 0, 255],
+            decoration: crate::paragraph::TextDecoration::default(),
+            glyphs: vec![],
+            text: std::sync::Arc::from(text),
+            x_offset: crate::units::Pt::ZERO,
+            link: None,
+            lang: None,
+            from_paragraph_text: false,
+            inline_backgrounds: Default::default(),
+            figure: None,
+        };
+        crate::drawables::ParagraphEntry {
+            lines: vec![crate::paragraph::ShapedLine {
+                height: 16.0_f32.as_pt(),
+                baseline: 12.0_f32.as_pt(),
+                items: vec![crate::paragraph::LineItem::Text(run)],
+            }],
+            opacity: 1.0,
+            visible: true,
+            id: None,
+        }
+    }
+
+    fn heading_title(node: &Node) -> Option<String> {
+        group(node).tag.as_any().title().map(str::to_string)
+    }
+
+    #[test]
+    fn a_heading_takes_its_title_from_the_paragraphs_inside_it() {
+        // <h1>Annual report<small style="display:block">2026</small></h1>
+        let [a, b] = distinct_ids(2)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::H { level: 1 }, None));
+        d.semantics.insert(3, entry(PdfTag::P, Some(1)));
+        d.semantics.insert(4, entry(PdfTag::P, Some(1)));
+        // The anonymous block (4) holding "Annual report" sorts at the
+        // first node it wraps (2), before the <small> (3).
+        d.semantic_order.insert(4, 2);
+        d.paragraphs.insert(3, text_para("2026"));
+        d.paragraphs.insert(4, text_para("Annual report"));
+        let mut tc = TagCollector::new();
+        tc.record(4, PdfTag::P, a, None);
+        tc.record(3, PdfTag::P, b, None);
+        let tree = build(tc, &d, &BTreeMap::new());
+        assert_eq!(
+            heading_title(&tree[0]).as_deref(),
+            Some("Annual report 2026")
+        );
+    }
+
+    #[test]
+    fn a_heading_without_text_takes_the_alt_text_of_its_image() {
+        let [image] = distinct_ids(1)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::H { level: 1 }, None));
+        d.semantics.insert(2, figure(Some(1), Some("Acme")));
+        let mut tc = TagCollector::new();
+        tc.record(2, PdfTag::Figure, image, None);
+        let tree = build(tc, &d, &BTreeMap::new());
+        assert_eq!(heading_title(&tree[0]).as_deref(), Some("Acme"));
+    }
+
+    #[test]
+    fn a_heading_keeps_the_title_of_its_own_text() {
+        let [own, inner] = distinct_ids(2)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::H { level: 2 }, None));
+        d.semantics.insert(2, entry(PdfTag::P, Some(1)));
+        d.paragraphs.insert(2, text_para("Inner"));
+        let mut tc = TagCollector::new();
+        tc.record(1, PdfTag::H { level: 2 }, own, Some("Own".to_string()));
+        tc.record(2, PdfTag::P, inner, None);
+        let tree = build(tc, &d, &BTreeMap::new());
+        assert_eq!(heading_title(&tree[0]).as_deref(), Some("Own"));
+    }
+
+    #[test]
+    fn hidden_text_does_not_title_a_heading() {
+        let [inner] = distinct_ids(1)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::H { level: 1 }, None));
+        d.semantics.insert(2, entry(PdfTag::P, Some(1)));
+        let mut hidden = text_para("Secret");
+        hidden.visible = false;
+        d.paragraphs.insert(2, hidden);
+        let mut tc = TagCollector::new();
+        tc.record(2, PdfTag::P, inner, None);
+        let tree = build(tc, &d, &BTreeMap::new());
+        assert_eq!(heading_title(&tree[0]), None);
+    }
+
+    // ── table cell spans ────────────────────────────────────────────────
+
+    #[test]
+    fn spanning_table_cells_get_col_span_and_row_span() {
+        let ids = distinct_ids(3);
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::Tr, None));
+        d.semantics.insert(
+            2,
+            entry(
+                PdfTag::Th {
+                    scope: crate::tagging::TableHeaderScope::Column,
+                },
+                Some(1),
+            ),
+        );
+        d.semantics.insert(3, entry(PdfTag::Td, Some(1)));
+        d.semantics.insert(4, entry(PdfTag::Td, Some(1)));
+        d.table_cell_spans.insert(2, (1, 2));
+        d.table_cell_spans.insert(3, (3, 1));
+        let mut tc = TagCollector::new();
+        tc.record(2, PdfTag::Td, ids[0], None);
+        tc.record(3, PdfTag::Td, ids[1], None);
+        tc.record(4, PdfTag::Td, ids[2], None);
+        let tree = build(tc, &d, &BTreeMap::new());
+        let row = group(&tree[0]);
+        assert_eq!(kinds(&row.children), vec!["TH", "TD", "TD"]);
+        let spans: Vec<(Option<u32>, Option<u32>)> = row
+            .children
+            .iter()
+            .map(|cell| {
+                let tag = group(cell).tag.as_any();
+                (
+                    tag.col_span().map(|n| n.get()),
+                    tag.row_span().map(|n| n.get()),
+                )
+            })
+            .collect();
+        assert_eq!(spans, vec![(None, Some(2)), (Some(3), None), (None, None)]);
+    }
+
+    // ── empty elements ──────────────────────────────────────────────────
+
+    #[test]
+    fn an_empty_figure_is_kept_only_with_alt_text() {
+        assert!(can_be_left_out(&figure(None, None)));
+        assert!(can_be_left_out(&figure(None, Some(""))));
+        assert!(can_be_left_out(&figure(None, Some("  "))));
+        assert!(!can_be_left_out(&figure(None, Some("Logo"))));
+        assert!(!can_be_left_out(&entry(PdfTag::Td, None)));
+        assert!(!can_be_left_out(&entry(PdfTag::Tr, None)));
+        assert!(!can_be_left_out(&entry(PdfTag::Table, None)));
+        assert!(can_be_left_out(&entry(PdfTag::P, None)));
+
+        let [text] = distinct_ids(1)[..] else {
+            unreachable!()
+        };
+        let mut d = Drawables::new();
+        d.semantics.insert(1, entry(PdfTag::Div, None));
+        d.semantics.insert(2, figure(Some(1), None));
+        d.semantics.insert(3, figure(Some(1), Some("Logo")));
+        let mut tc = TagCollector::new();
+        tc.record(1, PdfTag::Div, text, None);
+        let tree = build(tc, &d, &BTreeMap::new());
+        assert_eq!(kinds(&group(&tree[0]).children), vec!["MC", "Figure"]);
     }
 }

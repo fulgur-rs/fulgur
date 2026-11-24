@@ -18,7 +18,7 @@ parallel = ["dep:rayon"]
 [dependencies]
 fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
 rayon = { version = "1", optional = true }
-cssparser = "0.37"
+cssparser = "0.38"
 krilla = "0.7.0"
 krilla-svg = "0.7.0"
 usvg = "0.45"
@@ -27,13 +27,18 @@ usvg = "0.45"
 data-url = "0.3"
 # Bounded SVGZ decompression in the SVG sanitizer (usvg's is unbounded).
 flate2 = "1.1.9"
-blitz-html = "0.2"
-blitz-dom = "0.2"
-blitz-traits = "0.2"
-taffy = "0.9"
-parley = "0.6"
+blitz-html = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015" }
+blitz-dom = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015", features = ["floats"] }
+blitz-traits = { git = "https://github.com/DioxusLabs/blitz", rev = "b4ad543def00146850352c3da5dbc027f9053015" }
+# TODO(blitz-master): back to DioxusLabs/taffy once #1417 lands; must be the
+# Taffy the local Blitz uses.
+taffy = { git = "https://github.com/bahadirdogru/taffy", rev = "210a6afeae0f02424963dcbcbfce9132d445031d" }
+parley = "0.13"
 skrifa = "0.47"
-stylo = "0.8.0"
+stylo = "0.24.0"
+# Stylo's own traits (`ToCss`, `ParsingMode`), for resolving colours Stylo
+# does not compute for Servo (`column-rule-color`). Already built by stylo.
+stylo_traits = "0.24.0"
 thiserror = "2"
 minijinja = { version = "=2.24.0", features = ["unstable_machinery"] }
 serde_json = "1"
@@ -49,6 +54,11 @@ unicode-properties = "0.1"
 # (fulgur-zsn8).
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Maps the font files of metric-compatible substitutes (`font_aliases`), as
+# fontique maps system fonts. Already built by fontique.
+memmap2 = "0.9"
 
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -61,12 +61,14 @@
 //! repeat `position: fixed` elements on every page (`is_repeat=true`
 //! on the resulting `PaginationGeometry`).
 
+use crate::blitz_adapter::NodeLayoutExt;
 use crate::units::F32Units;
-use blitz_dom::BaseDocument;
+use blitz_dom::CopyStyleGetters;
+use blitz_dom::{BaseDocument, LayoutPassState};
 use std::collections::{BTreeMap, BTreeSet};
 use style::values::specified::box_::DisplayInside;
 use taffy::{
-    AvailableSpace, CacheTree, LayoutPartialTree, NodeId, RoundTree, Size, TraversePartialTree,
+    CacheTree, LayoutContainingBlock, LayoutPartialTree, NodeId, RoundTree, TraversePartialTree,
     TraverseTree,
 };
 
@@ -147,7 +149,8 @@ pub type PaginationGeometryTable = BTreeMap<usize, PaginationGeometry>;
 /// callers can either thread it into `ConvertContext` or drop it for
 /// observational use.
 pub struct PaginationLayoutTree<'a> {
-    pub(crate) doc: &'a mut BaseDocument,
+    /// Blitz's layout pass over the document (derefs to `BaseDocument`).
+    pub(crate) doc: LayoutPassState<'a>,
     pub(crate) page_height_px: f32,
     pub(crate) geometry: PaginationGeometryTable,
     /// Cached id of the `<body>` element, if any. Used as the
@@ -242,6 +245,50 @@ pub fn run_pass_with_break_and_running<'a>(
     )
 }
 
+/// Paginate with `paginate`, then lay out again, page by page, every
+/// multicol container that breaks across pages (from where it starts) and
+/// paginate again, so that its columns continue on the next page instead
+/// of running off the first one. Repeats while the set of such containers
+/// or their starts change (later containers move when earlier ones grow),
+/// a few times at most. `multicol_geometry` is updated in place.
+pub fn paginate_with_paged_multicol(
+    doc: &mut BaseDocument,
+    column_styles: &crate::column_css::ColumnStyleTable,
+    multicol_geometry: &mut crate::multicol_layout::MulticolGeometryTable,
+    page_height_px: f32,
+    mut paginate: impl FnMut(&mut BaseDocument) -> PaginationGeometryTable,
+) -> PaginationGeometryTable {
+    const MAX_ROUNDS: usize = 4;
+    let mut pagination = paginate(doc);
+    let mut previous = std::collections::BTreeMap::new();
+    for _ in 0..MAX_ROUNDS {
+        let paged: std::collections::BTreeMap<usize, crate::multicol_layout::PagedStart> =
+            multicol_geometry
+                .keys()
+                .filter_map(|&id| {
+                    let geom = pagination.get(&id)?;
+                    (!geom.is_repeat && geom.fragments.len() > 1).then(|| {
+                        (
+                            id,
+                            crate::multicol_layout::PagedStart {
+                                page_h: page_height_px,
+                                top_in_page: geom.fragments[0].y.to_f32(),
+                            },
+                        )
+                    })
+                })
+                .collect();
+        if paged.is_empty() || paged == previous {
+            break;
+        }
+        let relaid = crate::multicol_layout::run_paged_pass(doc, column_styles, &paged);
+        multicol_geometry.extend(relaid);
+        previous = paged;
+        pagination = paginate(doc);
+    }
+    pagination
+}
+
 fn run_pass_inner<'a>(
     doc: &'a mut BaseDocument,
     page_height_px: f32,
@@ -285,7 +332,7 @@ impl<'a> PaginationLayoutTree<'a> {
     pub fn new(doc: &'a mut BaseDocument, page_height_px: f32) -> Self {
         let body_id = find_body_id(doc);
         Self {
-            doc,
+            doc: LayoutPassState::new(doc),
             page_height_px,
             geometry: BTreeMap::new(),
             body_id,
@@ -359,7 +406,7 @@ impl<'a> PaginationLayoutTree<'a> {
         if self.used_page_names.is_none() {
             self.used_page_names = self
                 .column_styles
-                .map(|cs| crate::blitz_adapter::compute_used_page_names(self.doc, cs));
+                .map(|cs| crate::blitz_adapter::compute_used_page_names(&self.doc, cs));
         }
         let Some(body_id) = self.body_id else {
             return;
@@ -368,13 +415,13 @@ impl<'a> PaginationLayoutTree<'a> {
         let prior_unrounded = self.doc.get_unrounded_layout(nid);
         let prior_final = self
             .doc
-            .get_node(body_id)
-            .map(|n| n.final_layout)
+            .get_node(crate::blitz_adapter::bid(body_id))
+            .map(|n| *n.final_layout_or_zero())
             .unwrap_or_default();
 
-        let avail = Size {
-            width: AvailableSpace::Definite(prior_unrounded.size.width.max(1.0)),
-            height: AvailableSpace::MaxContent,
+        let avail = taffy::Size {
+            width: taffy::AvailableSpace::Definite(prior_unrounded.size.width.max(1.0)),
+            height: taffy::AvailableSpace::MaxContent,
         };
         taffy::compute_root_layout(self, nid, avail);
 
@@ -384,9 +431,9 @@ impl<'a> PaginationLayoutTree<'a> {
         // float-rep differences when `compute_root_layout` re-stores
         // the same logical values via `set_unrounded_layout` /
         // `set_final_layout`.
-        if let Some(node) = self.doc.get_node_mut(body_id) {
-            node.unrounded_layout = prior_unrounded;
-            node.final_layout = prior_final;
+        if let Some(node) = self.doc.get_node_mut(crate::blitz_adapter::bid(body_id)) {
+            *node.unrounded_layout_mut() = prior_unrounded;
+            *node.final_layout_mut() = prior_final;
         }
     }
 
@@ -421,8 +468,8 @@ impl<'a> PaginationLayoutTree<'a> {
 
         let body_layout = self
             .doc
-            .get_node(body_id)
-            .map(|n| n.final_layout)
+            .get_node(crate::blitz_adapter::bid(body_id))
+            .map(|n| *n.final_layout_or_zero())
             .unwrap_or_default();
         let body_w = body_layout.size.width;
         let body_x = body_layout.location.x;
@@ -478,7 +525,7 @@ impl<'a> PaginationLayoutTree<'a> {
         // text content for this exact reason).
         let children = self
             .doc
-            .get_node(body_id)
+            .get_node(crate::blitz_adapter::bid(body_id))
             .map(|n| {
                 let layout_borrow = n.layout_children.borrow();
                 if let Some(lc) = layout_borrow.as_deref()
@@ -486,7 +533,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 {
                     lc.to_vec()
                 } else {
-                    n.children.clone()
+                    n.children.to_vec()
                 }
             })
             .unwrap_or_default();
@@ -529,7 +576,10 @@ impl<'a> PaginationLayoutTree<'a> {
             {
                 use ::style::properties::longhands::position::computed_value::T as Pos;
                 let is_out_of_flow = child.primary_styles().is_some_and(|s| {
-                    matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+                    matches!(
+                        s.get_box().slow_clone_position(),
+                        Pos::Absolute | Pos::Fixed
+                    )
                 });
                 if is_out_of_flow {
                     continue;
@@ -548,14 +598,14 @@ impl<'a> PaginationLayoutTree<'a> {
             // element's source position lands — exactly what
             // `collect_running_element_states` needs to map running
             // instances to their per-page state.
-            if self
-                .running_store
-                .is_some_and(|s| s.instance_for_node(child_id).is_some())
-            {
+            if self.running_store.is_some_and(|s| {
+                s.instance_for_node(crate::blitz_adapter::uid(child_id))
+                    .is_some()
+            }) {
                 if child.element_data().is_some() {
-                    let layout = child.final_layout;
+                    let layout = child.final_layout_or_zero();
                     self.geometry
-                        .entry(child_id)
+                        .entry(crate::blitz_adapter::uid(child_id))
                         .or_default()
                         .fragments
                         .push(Fragment {
@@ -569,7 +619,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 }
                 continue;
             }
-            let layout = child.final_layout;
+            let layout = child.final_layout_or_zero();
             // fulgur-2m6w: defend against a non-finite Taffy height
             // (`+inf` / `NaN`). A `NaN` height slips past the
             // `child_h > page_height_px + 1.0` slice gate (NaN compares
@@ -583,7 +633,10 @@ impl<'a> PaginationLayoutTree<'a> {
             } else {
                 0.0
             };
-            let child_w = if layout.size.width > 0.0 {
+            // A box without a layout falls back to its container's width; a
+            // laid-out box keeps a zero width (an empty table column), which
+            // would otherwise count as overflowing the page by that width.
+            let child_w = if layout.size.width > 0.0 || layout.size.height > 0.0 {
                 layout.size.width
             } else {
                 body_w
@@ -615,7 +668,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 // properties at all, silently dropping the directive.
                 let zero_break_props = self
                     .column_styles
-                    .and_then(|t| t.get(&child_id))
+                    .and_then(|t| t.get(&crate::blitz_adapter::uid(child_id)))
                     .cloned()
                     .unwrap_or_default();
                 // fulgur-uebl: floats are out of normal flow for the
@@ -626,7 +679,8 @@ impl<'a> PaginationLayoutTree<'a> {
                 // not influence break decisions on adjacent in-flow
                 // boxes.
                 let zero_is_float = crate::blitz_adapter::node_is_floating(child);
-                let (zero_used_start, zero_used_end) = self.used_page_endpoints_of(child_id);
+                let (zero_used_start, zero_used_end) =
+                    self.used_page_endpoints_of(crate::blitz_adapter::uid(child_id));
                 let zero_page_name_changed = !zero_is_float
                     && prev_used_page
                         .as_ref()
@@ -641,7 +695,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 }
                 if child.element_data().is_some() {
                     self.geometry
-                        .entry(child_id)
+                        .entry(crate::blitz_adapter::uid(child_id))
                         .or_default()
                         .fragments
                         .push(Fragment {
@@ -652,6 +706,18 @@ impl<'a> PaginationLayoutTree<'a> {
                             height: 0.0_f32.as_px(),
                         });
                     emitted += 1;
+                    // A box with no in-flow height can still hold
+                    // visible descendants: an absolutely positioned
+                    // child, or content overflowing `height: 0`.
+                    record_subtree_descendants(
+                        &mut self.geometry,
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
+                        page_index,
+                        cursor_y,
+                        body_x + layout.location.x,
+                        0,
+                    );
                 }
                 if !zero_is_float {
                     prev_used_page = Some(zero_used_end);
@@ -680,7 +746,7 @@ impl<'a> PaginationLayoutTree<'a> {
             // multicol). Default `Auto` for nodes the table does not cover.
             let break_props = self
                 .column_styles
-                .and_then(|t| t.get(&child_id))
+                .and_then(|t| t.get(&crate::blitz_adapter::uid(child_id)))
                 .cloned()
                 .unwrap_or_default();
 
@@ -697,7 +763,8 @@ impl<'a> PaginationLayoutTree<'a> {
             // establish class A break points, so they're skipped from
             // both the comparison and the `prev_used_page` update.
             let is_float = crate::blitz_adapter::node_is_floating(child);
-            let (used_start, used_end) = self.used_page_endpoints_of(child_id);
+            let (used_start, used_end) =
+                self.used_page_endpoints_of(crate::blitz_adapter::uid(child_id));
             let page_name_changed =
                 !is_float && prev_used_page.as_ref().is_some_and(|p| *p != used_start);
 
@@ -758,14 +825,26 @@ impl<'a> PaginationLayoutTree<'a> {
                     cursor_y = 0.0;
                 }
                 let para_x = layout.location.x;
+                let first_fragment = self
+                    .geometry
+                    .get(&crate::blitz_adapter::uid(child_id))
+                    .map_or(0, |g| g.fragments.len());
                 let (new_page_index, new_cursor_y, frag_count) = fragment_inline_root(
                     &mut self.geometry,
-                    child_id,
+                    crate::blitz_adapter::uid(child_id),
                     body_x + para_x,
                     child_w,
                     cursor_y,
                     page_index,
                     self.page_height_px,
+                    &line_metrics,
+                );
+                record_inline_root_descendants(
+                    &mut self.geometry,
+                    &self.doc,
+                    crate::blitz_adapter::uid(child_id),
+                    body_x + para_x,
+                    first_fragment,
                     &line_metrics,
                 );
                 page_index = new_page_index;
@@ -847,58 +926,68 @@ impl<'a> PaginationLayoutTree<'a> {
             // outer fragmenter treats the multicol container as a
             // single unit for break decisions.
             //
-            // fulgur-916y: multicol containers with a `column-span:
-            // all` direct child get an exception — the span subtree
-            // is laid out by Taffy as a full-width block flowing
-            // between the column groups, so block-flow recursion via
-            // `fragment_block_subtree` can split it across pages
-            // when it overflows. Containers without span:all stay
-            // atomic.
+            // A container that does not fit the rest of the page is broken
+            // across pages by `fragment_multicol_container` instead (its
+            // span:all children included); one that fits is placed whole.
             let is_multicol = child_node.is_some_and(crate::blitz_adapter::is_multicol_container);
-            let multicol_has_span_all = is_multicol
-                && child_node.is_some_and(|n| {
-                    n.children.iter().any(|&id| {
-                        self.doc
-                            .get_node(id)
-                            .is_some_and(crate::blitz_adapter::has_column_span_all)
-                    })
-                });
             let available_strip = (self.page_height_px - cursor_y).max(0.0);
             let avoid_fits_whole_page = avoid_inside && child_h <= self.page_height_px + 1.0;
-            let needs_recursion = has_splittable_children
-                && (!is_multicol || multicol_has_span_all)
-                && (has_forced_break_below(self.doc, child_id, self.column_styles, 0)
-                    || has_page_name_change_below(
-                        self.doc,
-                        child_id,
+            // A multicol container that does not fit the rest of the page
+            // breaks across pages, its columns continuing on the next one.
+            let multicol_breaks =
+                is_multicol && !avoid_fits_whole_page && child_h > available_strip + 1.0;
+            let needs_recursion = multicol_breaks
+                || has_splittable_children
+                    && !is_multicol
+                    && (has_forced_break_below(
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
+                        self.column_styles,
+                        0,
+                    ) || has_page_name_change_below(
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
                         self.used_page_names.as_ref(),
                         0,
-                    )
-                    || (!avoid_fits_whole_page
+                    ) || (!avoid_fits_whole_page
                         && would_split_block_subtree(
-                            self.doc,
-                            child_id,
+                            &self.doc,
+                            crate::blitz_adapter::uid(child_id),
                             available_strip,
                             self.page_height_px,
                             0,
                         )));
             if needs_recursion {
                 let child_x_in_body = body_x + layout.location.x;
-                let (new_page, new_cursor) = fragment_block_subtree(
-                    &mut self.geometry,
-                    self.doc,
-                    self.column_styles,
-                    self.used_page_names.as_ref(),
-                    child_id,
-                    child_w,
-                    child_x_in_body,
-                    page_index,
-                    cursor_y,
-                    self.page_height_px,
-                    0,
-                    false,
-                    &mut remaining_repeat_budget,
-                );
+                let (new_page, new_cursor) = if multicol_breaks {
+                    fragment_multicol_container(
+                        &mut self.geometry,
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
+                        child_x_in_body,
+                        child_w,
+                        child_h,
+                        page_index,
+                        cursor_y,
+                        self.page_height_px,
+                    )
+                } else {
+                    fragment_block_subtree(
+                        &mut self.geometry,
+                        &self.doc,
+                        self.column_styles,
+                        self.used_page_names.as_ref(),
+                        crate::blitz_adapter::uid(child_id),
+                        child_w,
+                        child_x_in_body,
+                        page_index,
+                        cursor_y,
+                        self.page_height_px,
+                        0,
+                        false,
+                        &mut remaining_repeat_budget,
+                    )
+                };
                 page_index = new_page;
                 cursor_y = new_cursor;
                 emitted += 1;
@@ -979,7 +1068,7 @@ impl<'a> PaginationLayoutTree<'a> {
             if !has_transform && child_h > self.page_height_px + 1.0 {
                 let first_slice_h = (self.page_height_px - cursor_y).min(child_h);
                 self.geometry
-                    .entry(child_id)
+                    .entry(crate::blitz_adapter::uid(child_id))
                     .or_default()
                     .fragments
                     .push(Fragment {
@@ -991,8 +1080,8 @@ impl<'a> PaginationLayoutTree<'a> {
                     });
                 record_subtree_descendants(
                     &mut self.geometry,
-                    self.doc,
-                    child_id,
+                    &self.doc,
+                    crate::blitz_adapter::uid(child_id),
                     page_index,
                     cursor_y,
                     frag_x,
@@ -1026,7 +1115,11 @@ impl<'a> PaginationLayoutTree<'a> {
                 // high-severity DoS).
                 let collapse_childless = self.page_height_px > 0.0
                     && (remaining / self.page_height_px).ceil() > crate::MAX_PAGES as f32
-                    && !subtree_has_rendered_content(self.doc, child_id, 0);
+                    && !subtree_has_rendered_content(
+                        &self.doc,
+                        crate::blitz_adapter::uid(child_id),
+                        0,
+                    );
                 if collapse_childless {
                     // fulgur-c8re (Codex P1 on PR #575): bound the OCCUPIED
                     // SPACE, not just the fragment pushes. `implied_page_count`
@@ -1058,7 +1151,7 @@ impl<'a> PaginationLayoutTree<'a> {
                         page_index += 1;
                         last_slice_h = remaining.min(self.page_height_px);
                         self.geometry
-                            .entry(child_id)
+                            .entry(crate::blitz_adapter::uid(child_id))
                             .or_default()
                             .fragments
                             .push(Fragment {
@@ -1107,7 +1200,7 @@ impl<'a> PaginationLayoutTree<'a> {
                 height: child_h.as_px(),
             };
             self.geometry
-                .entry(child_id)
+                .entry(crate::blitz_adapter::uid(child_id))
                 .or_default()
                 .fragments
                 .push(frag);
@@ -1127,8 +1220,8 @@ impl<'a> PaginationLayoutTree<'a> {
             // this geometry today read only `page_index`.
             record_subtree_descendants(
                 &mut self.geometry,
-                self.doc,
-                child_id,
+                &self.doc,
+                crate::blitz_adapter::uid(child_id),
                 page_index,
                 cursor_y,
                 frag_x,
@@ -1185,19 +1278,21 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
+    let Some(parent) = doc.get_node(crate::blitz_adapter::bid(parent_id)) else {
         return false;
     };
     let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: &[usize] = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(&parent.children);
+    let walk_children: &[usize] = &crate::blitz_adapter::uids(
+        layout_children_borrow
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&parent.children),
+    );
     for &child_id in walk_children {
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
-        let layout = child.final_layout;
+        let layout = child.final_layout_or_zero();
         // `visibility: hidden` / `collapse` occupies layout space but paints
         // nothing (conversion skips its paint), so it does not count as
         // content — a `<div style="visibility:hidden">` must not defeat the
@@ -1220,6 +1315,234 @@ fn subtree_has_rendered_content(doc: &BaseDocument, parent_id: usize, depth: usi
         return true;
     }
     false
+}
+
+/// Break a multicol container that does not fit the rest of the page
+/// across pages, starting at `page_y` on `page_index`: one fragment per
+/// page, the first ending at the page end. Its descendants go to the page
+/// their position falls on (see [`record_paged_descendants`]).
+///
+/// The multicol pass lays such a container out page by page (once the
+/// engine knows where it starts, see
+/// `multicol_layout::run_paged_pass`), so its column rows end at the page
+/// boundaries this cuts at. Returns the page and cursor after it.
+#[allow(clippy::too_many_arguments)]
+fn fragment_multicol_container(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    node_id: usize,
+    x: f32,
+    width: f32,
+    height: f32,
+    page_index: u32,
+    page_y: f32,
+    page_height_px: f32,
+) -> (u32, f32) {
+    let first_h = (page_height_px - page_y).max(0.0).min(height);
+    let mut page = page_index;
+    let mut push = |page: u32, y: f32, h: f32| {
+        geometry
+            .entry(node_id)
+            .or_default()
+            .fragments
+            .push(Fragment {
+                page_index: page,
+                x: x.as_px(),
+                y: y.as_px(),
+                width: width.as_px(),
+                height: h.as_px(),
+            });
+    };
+    push(page, page_y, first_h);
+    let mut remaining = height - first_h;
+    let mut last_h = first_h;
+    while remaining > 0.5 && page < crate::MAX_PAGES && page_height_px > 0.0 {
+        page += 1;
+        last_h = remaining.min(page_height_px);
+        push(page, 0.0, last_h);
+        remaining -= last_h;
+    }
+    let pages = PagedSlices {
+        first_page: page_index,
+        first_y: page_y,
+        first_h,
+        page_h: page_height_px,
+        last_page: page,
+    };
+    record_paged_descendants(geometry, doc, node_id, &pages, 0.0, x, 0);
+    let cursor = if page == page_index {
+        page_y + first_h
+    } else {
+        last_h
+    };
+    (page, cursor)
+}
+
+/// The page slices of a container broken by [`fragment_multicol_container`].
+struct PagedSlices {
+    first_page: u32,
+    /// Page-local y of the container top.
+    first_y: f32,
+    /// Height of the container on its first page.
+    first_h: f32,
+    page_h: f32,
+    last_page: u32,
+}
+
+impl PagedSlices {
+    /// The page that container-relative `y` falls on, the page-local y
+    /// there, and the container-relative y where that page's slice ends.
+    fn locate(&self, y: f32) -> (u32, f32, f32) {
+        // Positions within half a pixel of a page end belong to the next
+        // page (layout rounding).
+        const SNAP: f32 = 0.5;
+        if y < self.first_h - SNAP || self.page_h <= 0.0 {
+            return (self.first_page, self.first_y + y, self.first_h);
+        }
+        let k = ((y - self.first_h + SNAP) / self.page_h).floor().max(0.0);
+        let page = (self.first_page + 1 + k as u32).min(self.last_page);
+        let start = self.first_h + (page - self.first_page - 1) as f32 * self.page_h;
+        (page, y - start, start + self.page_h)
+    }
+}
+
+/// [`record_subtree_descendants`] for a container broken across pages by
+/// [`fragment_multicol_container`]: each descendant lands on the page its
+/// top falls on, and one taller than the rest of that page gets a fragment
+/// on every page it reaches, as split blocks do. `parent_y` is the
+/// parent's y relative to the container top.
+fn record_paged_descendants(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    parent_id: usize,
+    pages: &PagedSlices,
+    parent_y: f32,
+    parent_x_in_body: f32,
+    depth: usize,
+) {
+    if depth >= crate::MAX_DOM_DEPTH {
+        return;
+    }
+    let Some(parent) = doc.get_node(crate::blitz_adapter::bid(parent_id)) else {
+        return;
+    };
+    // Layout children first, as in `record_subtree_descendants`.
+    let layout_children_borrow = parent.layout_children.borrow();
+    let walk_children: &[usize] = &crate::blitz_adapter::uids(
+        layout_children_borrow
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&parent.children),
+    );
+    for &child_id in walk_children {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
+            continue;
+        };
+        let layout = child.final_layout_or_zero();
+        let (w, h) = (layout.size.width, layout.size.height);
+        let child_x = parent_x_in_body + layout.location.x;
+        let child_y = parent_y + layout.location.y;
+        if h > 0.0 || w > 0.0 {
+            let entry = geometry.entry(child_id).or_default();
+            let mut top = child_y;
+            let bottom = child_y + h;
+            loop {
+                let (page, page_y, slice_end) = pages.locate(top);
+                let part = (bottom.min(slice_end) - top).max(0.0);
+                entry.fragments.push(Fragment {
+                    page_index: page,
+                    x: child_x.as_px(),
+                    y: page_y.as_px(),
+                    width: w.as_px(),
+                    height: if part > 0.0 { part } else { h }.as_px(),
+                });
+                if bottom <= slice_end + 0.5 || page >= pages.last_page {
+                    break;
+                }
+                top = slice_end;
+            }
+        }
+        record_paged_descendants(geometry, doc, child_id, pages, child_y, child_x, depth + 1);
+    }
+}
+
+/// Record the boxes inside a paragraph that [`fragment_inline_root`] split
+/// into the fragments from `first_fragment` on (inline blocks, floats,
+/// images), each on the page of the fragment its top falls in, with its
+/// subtree. `fragment_inline_root` records the paragraph alone; without
+/// this these boxes have no geometry and are not drawn.
+fn record_inline_root_descendants(
+    geometry: &mut PaginationGeometryTable,
+    doc: &BaseDocument,
+    paragraph_id: usize,
+    paragraph_x_in_body: f32,
+    first_fragment: usize,
+    line_metrics: &[(f32, f32)],
+) {
+    const SNAP: f32 = 0.5;
+    // Each fragment's (page, page y, top in the paragraph, height). The
+    // fragments are consecutive line ranges, from the first line's top.
+    let Some(fragments) = geometry
+        .get(&paragraph_id)
+        .and_then(|g| g.fragments.get(first_fragment..))
+    else {
+        return;
+    };
+    let mut local_top = line_metrics.first().map_or(0.0, |l| l.0);
+    let slices: Vec<(u32, f32, f32)> = fragments
+        .iter()
+        .map(|f| {
+            let slice = (f.page_index, f.y.to_f32(), local_top);
+            local_top += f.height.to_f32();
+            slice
+        })
+        .collect();
+    let Some(&first) = slices.first() else {
+        return;
+    };
+    let Some(paragraph) = doc.get_node(crate::blitz_adapter::bid(paragraph_id)) else {
+        return;
+    };
+    let layout_children = paragraph.layout_children.borrow();
+    let children: Vec<usize> = crate::blitz_adapter::uids(
+        layout_children
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&paragraph.children),
+    );
+    drop(layout_children);
+    for child_id in children {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
+            continue;
+        };
+        if child.element_data().is_none() {
+            continue;
+        }
+        let layout = child.final_layout_or_zero();
+        let y = layout.location.y;
+        let (page_index, page_y, top) = slices
+            .iter()
+            .rev()
+            .find(|s| s.2 <= y + SNAP)
+            .copied()
+            .unwrap_or(first);
+        let child_x = paragraph_x_in_body + layout.location.x;
+        let child_y = page_y + (y - top);
+        if layout.size.width > 0.0 || layout.size.height > 0.0 {
+            geometry
+                .entry(child_id)
+                .or_default()
+                .fragments
+                .push(Fragment {
+                    page_index,
+                    x: child_x.as_px(),
+                    y: child_y.as_px(),
+                    width: layout.size.width.as_px(),
+                    height: layout.size.height.as_px(),
+                });
+        }
+        record_subtree_descendants(geometry, doc, child_id, page_index, child_y, child_x, 1);
+    }
 }
 
 /// fulgur-s67g Phase 2.5: recursively record fragments for every
@@ -1255,7 +1578,7 @@ fn record_subtree_descendants(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
+    let Some(parent) = doc.get_node(crate::blitz_adapter::bid(parent_id)) else {
         return;
     };
     // Prefer Blitz's `layout_children` over the raw DOM `children` when
@@ -1277,15 +1600,17 @@ fn record_subtree_descendants(
     // (fulgur-bq6i: review_card_inline_block.html lost its
     // "OK Approved" rounded badge for this exact reason.)
     let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: &[usize] = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .unwrap_or(&parent.children);
+    let walk_children: &[usize] = &crate::blitz_adapter::uids(
+        layout_children_borrow
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&parent.children),
+    );
     for &child_id in walk_children {
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
-        let layout = child.final_layout;
+        let layout = child.final_layout_or_zero();
         let h = layout.size.height;
         let w = layout.size.width;
         // Phase 4 PR 5: zero-size containers (`<tbody>`, `<tr>`,
@@ -1358,7 +1683,7 @@ fn would_split_block_subtree(
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
     }
-    let Some(parent) = doc.get_node(parent_id) else {
+    let Some(parent) = doc.get_node(crate::blitz_adapter::bid(parent_id)) else {
         return false;
     };
     let mut cursor: f32 = 0.0;
@@ -1372,14 +1697,16 @@ fn would_split_block_subtree(
     // returns false, and the parent falls back to a single
     // oversize fragment.
     let layout_children_borrow = parent.layout_children.borrow();
-    let walk_children: Vec<usize> = layout_children_borrow
-        .as_deref()
-        .filter(|v| !v.is_empty())
-        .map(|v| v.to_vec())
-        .unwrap_or_else(|| parent.children.clone());
+    let walk_children: Vec<usize> = crate::blitz_adapter::uids(
+        &layout_children_borrow
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_vec())
+            .unwrap_or_else(|| parent.children.to_vec()),
+    );
     drop(layout_children_borrow);
     for &child_id in &walk_children {
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
         if crate::blitz_adapter::is_whitespace_only_text_node(child) {
@@ -1388,30 +1715,41 @@ fn would_split_block_subtree(
         {
             use ::style::properties::longhands::position::computed_value::T as Pos;
             let is_oof = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+                matches!(
+                    s.get_box().slow_clone_position(),
+                    Pos::Absolute | Pos::Fixed
+                )
             });
             if is_oof {
                 continue;
             }
         }
-        let layout = child.final_layout;
+        let layout = child.final_layout_or_zero();
         let h = layout.size.height;
         if h <= 0.0 {
             continue;
         }
         let this_top = layout.location.y;
-        let gap = (this_top - prev_bottom).max(0.0);
-        cursor += gap;
-        if cursor + h > available_h {
-            return true;
-        }
         if h > page_h_px {
             // Grandchild itself oversized → would recurse → would
             // split, regardless of `available_h` budget.
             return true;
         }
-        cursor += h;
-        prev_bottom = this_top + h;
+        // A child beside the previous one (cells of a table row, grid or
+        // flex items in one row) only takes the part of its height that
+        // reaches below the bottom reached so far; adding its whole height
+        // would count each row once per cell.
+        let gap = this_top - prev_bottom;
+        let advance = if gap >= 0.0 {
+            gap + h
+        } else {
+            (h + gap).max(0.0)
+        };
+        if cursor + advance > available_h {
+            return true;
+        }
+        cursor += advance;
+        prev_bottom = prev_bottom.max(this_top + h);
     }
     false
 }
@@ -1478,7 +1816,7 @@ fn has_forced_break_below(
     if depth >= crate::MAX_DOM_DEPTH {
         return false;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
     for &child_id in &node.children {
@@ -1493,7 +1831,7 @@ fn has_forced_break_below(
         {
             continue;
         }
-        if let Some(props) = column_styles.and_then(|t| t.get(&child_id))
+        if let Some(props) = column_styles.and_then(|t| t.get(&crate::blitz_adapter::uid(child_id)))
             && (matches!(
                 props.break_before,
                 Some(crate::draw_primitives::BreakBefore::Page)
@@ -1504,7 +1842,12 @@ fn has_forced_break_below(
         {
             return true;
         }
-        if has_forced_break_below(doc, child_id, column_styles, depth + 1) {
+        if has_forced_break_below(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            column_styles,
+            depth + 1,
+        ) {
             return true;
         }
     }
@@ -1530,7 +1873,7 @@ fn has_page_name_change_below(
     let Some(table) = used_page_names else {
         return false;
     };
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return false;
     };
     // Atomic inline containers (`inline-block`, `inline-flex`, etc.)
@@ -1582,7 +1925,10 @@ fn has_page_name_change_below(
         {
             use ::style::properties::longhands::position::computed_value::T as Pos;
             let is_out_of_flow = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+                matches!(
+                    s.get_box().slow_clone_position(),
+                    Pos::Absolute | Pos::Fixed
+                )
             });
             if is_out_of_flow {
                 continue;
@@ -1596,7 +1942,10 @@ fn has_page_name_change_below(
         if crate::blitz_adapter::node_is_floating(child) {
             continue;
         }
-        let (child_start, child_end) = table.get(&child_id).cloned().unwrap_or((None, None));
+        let (child_start, child_end) = table
+            .get(&crate::blitz_adapter::uid(child_id))
+            .cloned()
+            .unwrap_or((None, None));
         if !suppress_direct_compare && prev_used.as_ref().is_some_and(|p| *p != child_start) {
             return true;
         }
@@ -1606,7 +1955,12 @@ fn has_page_name_change_below(
         // Always recurse: even when direct sibling comparison is
         // suppressed (flex / grid container), descendants in their
         // own BFC may still trigger an internal page-name break.
-        if has_page_name_change_below(doc, child_id, used_page_names, depth + 1) {
+        if has_page_name_change_below(
+            doc,
+            crate::blitz_adapter::uid(child_id),
+            used_page_names,
+            depth + 1,
+        ) {
             return true;
         }
     }
@@ -1750,7 +2104,7 @@ fn collect_repeating_table_cells(
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     let Some(display) = node.primary_styles().map(|s| s.clone_display().inside()) else {
@@ -1792,7 +2146,7 @@ fn collect_repeating_table_cells(
     for &child_id in &node.children {
         collect_repeating_table_cells(
             doc,
-            child_id,
+            crate::blitz_adapter::uid(child_id),
             next_in_header,
             depth + 1,
             header_claimed,
@@ -1810,7 +2164,7 @@ fn repeating_table_header(
     if child_depth >= crate::MAX_DOM_DEPTH {
         return None;
     }
-    let table = doc.get_node(table_id)?;
+    let table = doc.get_node(crate::blitz_adapter::bid(table_id))?;
     let display = table.primary_styles().map(|s| s.clone_display().inside())?;
     if display != DisplayInside::Table {
         return None;
@@ -1824,7 +2178,7 @@ fn repeating_table_header(
     for &child_id in &table.children {
         collect_repeating_table_cells(
             doc,
-            child_id,
+            crate::blitz_adapter::uid(child_id),
             false,
             child_depth,
             &mut header_claimed,
@@ -1838,18 +2192,24 @@ fn repeating_table_header(
 
     let header_top_px = header_cell_ids
         .iter()
-        .filter_map(|&id| doc.get_node(id).map(|n| n.final_layout.location.y))
+        .filter_map(|&id| {
+            doc.get_node(crate::blitz_adapter::bid(id))
+                .map(|n| n.final_layout_or_zero().location.y)
+        })
         .reduce(f32::min)?;
     let header_bottom_px = header_cell_ids
         .iter()
         .filter_map(|&id| {
-            doc.get_node(id)
-                .map(|n| n.final_layout.location.y + n.final_layout.size.height)
+            doc.get_node(crate::blitz_adapter::bid(id))
+                .map(|n| n.final_layout_or_zero().location.y + n.final_layout_or_zero().size.height)
         })
         .reduce(f32::max)?;
     let body_origin_px = body_cell_ids
         .iter()
-        .filter_map(|&id| doc.get_node(id).map(|n| n.final_layout.location.y))
+        .filter_map(|&id| {
+            doc.get_node(crate::blitz_adapter::bid(id))
+                .map(|n| n.final_layout_or_zero().location.y)
+        })
         .reduce(f32::min)?;
     if !header_top_px.is_finite() || !header_bottom_px.is_finite() || !body_origin_px.is_finite() {
         return None;
@@ -1888,8 +2248,8 @@ fn repeating_table_header(
     // not fit, no body content can land here.
     let first_body_lead_px = body_cell_ids
         .iter()
-        .filter_map(|&id| doc.get_node(id))
-        .filter(|cell| (cell.final_layout.location.y - body_origin_px).abs() < 0.5)
+        .filter_map(|&id| doc.get_node(crate::blitz_adapter::bid(id)))
+        .filter(|cell| (cell.final_layout_or_zero().location.y - body_origin_px).abs() < 0.5)
         .map(|cell| {
             // Count real boxes, not raw children. Blitz keeps whitespace-only
             // text nodes between formatted elements, so indented markup gives
@@ -1908,7 +2268,7 @@ fn repeating_table_header(
                     // unit that has to fit under the band.
                     !crate::blitz_adapter::is_whitespace_only_text_node(child)
                         && !crate::blitz_adapter::is_out_of_flow_node(child)
-                        && child.final_layout.size.height > 0.0
+                        && child.final_layout_or_zero().size.height > 0.0
                 })
                 .collect();
 
@@ -1919,12 +2279,12 @@ fn repeating_table_header(
             // usually set on the cell anyway (fulgur-naj7.6: a text-only
             // `td { height: 30px }` otherwise measured one ~16px line).
             let Some(lead) = boxes.first().filter(|_| boxes.len() >= 2) else {
-                return cell.final_layout.size.height;
+                return cell.final_layout_or_zero().size.height;
             };
 
             // The leading unit's *bottom*, not its height: padding-top and any
             // gap above it also have to fit before the row places content.
-            lead.final_layout.location.y + lead.final_layout.size.height
+            lead.final_layout_or_zero().location.y + lead.final_layout_or_zero().size.height
         })
         .reduce(f32::min)
         .unwrap_or(0.0);
@@ -2006,7 +2366,7 @@ fn fragmented_descendant_page_extent(
     if depth >= crate::MAX_DOM_DEPTH {
         return 0.0;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return 0.0;
     };
     let layout_children = node.layout_children.borrow();
@@ -2016,7 +2376,7 @@ fn fragmented_descendant_page_extent(
         .unwrap_or(&node.children);
     children.iter().fold(0.0_f32, |extent, &child_id| {
         let child_extent = geometry
-            .get(&child_id)
+            .get(&crate::blitz_adapter::uid(child_id))
             .into_iter()
             .flat_map(|entry| &entry.fragments)
             .filter(|fragment| fragment.page_index == page_index)
@@ -2027,7 +2387,7 @@ fn fragmented_descendant_page_extent(
             .max(fragmented_descendant_page_extent(
                 geometry,
                 doc,
-                child_id,
+                crate::blitz_adapter::uid(child_id),
                 page_index,
                 page_start_y,
                 depth + 1,
@@ -2045,10 +2405,10 @@ fn record_header_template(
     depth: usize,
 ) {
     for &cell_id in &header.header_cell_ids {
-        let Some(cell) = doc.get_node(cell_id) else {
+        let Some(cell) = doc.get_node(crate::blitz_adapter::bid(cell_id)) else {
             continue;
         };
-        let layout = cell.final_layout;
+        let layout = cell.final_layout_or_zero();
         let cell_x = table_x + layout.location.x;
         let cell_y = table_y + layout.location.y;
         geometry
@@ -2339,8 +2699,8 @@ fn fragment_block_subtree_inner(
         // Bailed: emit a single whole-fragment for the parent at its
         // entry coordinates so geometry still has an entry for it.
         let h = doc
-            .get_node(parent_id)
-            .map(|n| n.final_layout.size.height)
+            .get_node(crate::blitz_adapter::bid(parent_id))
+            .map(|n| n.final_layout_or_zero().size.height)
             .unwrap_or(0.0);
         geometry
             .entry(parent_id)
@@ -2355,7 +2715,7 @@ fn fragment_block_subtree_inner(
             });
         return (page_in, cursor_in + h);
     }
-    let Some(parent) = doc.get_node(parent_id) else {
+    let Some(parent) = doc.get_node(crate::blitz_adapter::bid(parent_id)) else {
         return (page_in, cursor_in);
     };
 
@@ -2426,14 +2786,16 @@ fn fragment_block_subtree_inner(
     // monolithic + trailing inline text).
     let walk_children = children_override.map(Vec::from).unwrap_or_else(|| {
         let layout_children_borrow = parent.layout_children.borrow();
-        layout_children_borrow
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .map(Vec::from)
-            .unwrap_or_else(|| parent.children.clone())
+        crate::blitz_adapter::uids(
+            &layout_children_borrow
+                .as_deref()
+                .filter(|v| !v.is_empty())
+                .map(Vec::from)
+                .unwrap_or_else(|| parent.children.to_vec()),
+        )
     });
     for &child_id in &walk_children {
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
         // Whitespace-only text — same skip as `fragment_pagination_root`.
@@ -2445,13 +2807,16 @@ fn fragment_block_subtree_inner(
         {
             use ::style::properties::longhands::position::computed_value::T as Pos;
             let is_out_of_flow = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+                matches!(
+                    s.get_box().slow_clone_position(),
+                    Pos::Absolute | Pos::Fixed
+                )
             });
             if is_out_of_flow {
                 continue;
             }
         }
-        let layout = child.final_layout;
+        let layout = child.final_layout_or_zero();
         // fulgur-2m6w: same non-finite guard as `fragment_pagination_root`.
         // A nested child with a non-finite Taffy height (`+inf` / `NaN`, or
         // an `f32::MAX` height that overflows to `+inf` after one
@@ -2463,7 +2828,10 @@ fn fragment_block_subtree_inner(
         } else {
             0.0
         };
-        let child_w = if layout.size.width > 0.0 {
+        // A box without a layout falls back to its container's width; a
+        // laid-out box keeps a zero width (an empty table column), which
+        // would otherwise count as overflowing the page by that width.
+        let child_w = if layout.size.width > 0.0 || layout.size.height > 0.0 {
             layout.size.width
         } else {
             parent_w
@@ -2623,6 +2991,17 @@ fn fragment_block_subtree_inner(
                         width: child_w.as_px(),
                         height: 0.0_f32.as_px(),
                     });
+                // Descendants of a box with no in-flow height, as in
+                // `fragment_pagination_root`.
+                record_subtree_descendants(
+                    geometry,
+                    doc,
+                    child_id,
+                    page_index,
+                    cursor_y,
+                    parent_x_in_body + layout.location.x,
+                    depth + 1,
+                );
             }
             // Honour `break-after: page` for zero-height elements
             // too — same fulgur-p3uf (Phase 3.1.5a) fix as
@@ -2834,6 +3213,7 @@ fn fragment_block_subtree_inner(
                 child_page_y = 0.0;
             }
             let pre_split_page = page_index;
+            let first_fragment = geometry.get(&child_id).map_or(0, |g| g.fragments.len());
             // codex P1: start from `child_page_y` (this child's own
             // rebased page-local y), not the parent's running
             // `cursor_y` — for block flow the two are equal, but for
@@ -2849,6 +3229,14 @@ fn fragment_block_subtree_inner(
                 child_page_y,
                 page_index,
                 page_height_px,
+                &line_metrics,
+            );
+            record_inline_root_descendants(
+                geometry,
+                doc,
+                child_id,
+                child_x_in_body,
+                first_fragment,
                 &line_metrics,
             );
             // Same shape as the recursion branch's fulgur-oc51 fix
@@ -3032,18 +3420,23 @@ fn fragment_block_subtree_inner(
         // before branch above leaves a sliver of its background behind
         // on the current page instead of moving the whole box.
         let avoid_fits_whole_page = avoid_inside && child_h <= page_height_px + 1.0;
-        let needs_recursion = !child.children.is_empty()
-            && !is_multicol
-            && (has_forced_break_below(doc, child_id, column_styles, 0)
-                || has_page_name_change_below(doc, child_id, used_page_names, 0)
-                || (!avoid_fits_whole_page
-                    && would_split_block_subtree(
-                        doc,
-                        child_id,
-                        available_strip,
-                        page_height_px,
-                        0,
-                    )));
+        // As in the body-direct branch: a multicol container that does not
+        // fit the rest of the page breaks across pages.
+        let multicol_breaks =
+            is_multicol && !avoid_fits_whole_page && child_page_y + child_h > page_height_px + 1.0;
+        let needs_recursion = multicol_breaks
+            || !child.children.is_empty()
+                && !is_multicol
+                && (has_forced_break_below(doc, child_id, column_styles, 0)
+                    || has_page_name_change_below(doc, child_id, used_page_names, 0)
+                    || (!avoid_fits_whole_page
+                        && would_split_block_subtree(
+                            doc,
+                            child_id,
+                            available_strip,
+                            page_height_px,
+                            0,
+                        )));
         if needs_recursion {
             let occupied_before_recursion = initial_page_occupied;
             let row_started_on_occupied_strip = row_state
@@ -3061,21 +3454,35 @@ fn fragment_block_subtree_inner(
             // below the previous one instead of beside it. Using
             // `child_page_y` keeps each cell's recursion strip aligned to
             // the row's y on the current page.
-            let (np, nc) = fragment_block_subtree(
-                geometry,
-                doc,
-                column_styles,
-                used_page_names,
-                child_id,
-                child_w,
-                child_x_in_body,
-                page_index,
-                child_page_y,
-                page_height_px,
-                depth + 1,
-                initial_page_occupied,
-                remaining_repeat_budget,
-            );
+            let (np, nc) = if multicol_breaks {
+                fragment_multicol_container(
+                    geometry,
+                    doc,
+                    child_id,
+                    child_x_in_body,
+                    child_w,
+                    child_h,
+                    page_index,
+                    child_page_y,
+                    page_height_px,
+                )
+            } else {
+                fragment_block_subtree(
+                    geometry,
+                    doc,
+                    column_styles,
+                    used_page_names,
+                    child_id,
+                    child_w,
+                    child_x_in_body,
+                    page_index,
+                    child_page_y,
+                    page_height_px,
+                    depth + 1,
+                    initial_page_occupied,
+                    remaining_repeat_budget,
+                )
+            };
             let occupied_page_extent = if occupied_before_recursion || row_started_on_occupied_strip
             {
                 fragmented_descendant_page_extent(
@@ -3398,12 +3805,26 @@ fn collect_inline_line_metrics(node: &blitz_dom::Node) -> Vec<(f32, f32)> {
     let Some(text_layout) = elem.inline_layout_data.as_deref() else {
         return Vec::new();
     };
-    text_layout
-        .layout
+    let layout = &text_layout.layout;
+    let mut count = layout.len();
+    // A forced break (`<br>`, a preserved newline) at the end of the content
+    // ends the last line box without starting another. Parley still emits an
+    // empty line after it, which Blitz leaves out of the inline root's height;
+    // leave it out here too, or the paragraph is one line taller than its box.
+    if count >= 2
+        && let (Some(prev), Some(last)) = (layout.get(count - 2), layout.get(count - 1))
+        && prev.break_reason() == parley::BreakReason::Explicit
+        && last.text_range().is_empty()
+        && last.items().next().is_none()
+    {
+        count -= 1;
+    }
+    layout
         .lines()
+        .take(count)
         .map(|line| {
             let m = line.metrics();
-            (m.min_coord, m.max_coord)
+            (m.block_min_coord, m.block_max_coord)
         })
         .collect()
 }
@@ -3792,7 +4213,7 @@ pub fn append_position_fixed_fragments(
     let body_offset_xy = body_origin_in_px(doc);
     let mut fixed_ids: Vec<usize> = Vec::new();
     let root_id = doc.root_element().id;
-    walk_for_position_fixed(doc, root_id, &mut fixed_ids, 0);
+    walk_for_position_fixed(doc, crate::blitz_adapter::uid(root_id), &mut fixed_ids, 0);
 
     // Aggregate budget across all fixed roots and their descendants: each
     // node emits one fragment per page, so the retained total is
@@ -3802,7 +4223,7 @@ pub fn append_position_fixed_fragments(
     let mut emitted: usize = 0;
 
     for id in fixed_ids {
-        let Some(node) = doc.get_node(id) else {
+        let Some(node) = doc.get_node(crate::blitz_adapter::bid(id)) else {
             continue;
         };
         // Re-check style here even though `walk_for_position_fixed`
@@ -3811,11 +4232,11 @@ pub fn append_position_fixed_fragments(
         // single-threaded code path).
         let is_fixed = node
             .primary_styles()
-            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed));
+            .is_some_and(|s| matches!(s.get_box().slow_clone_position(), Pos::Fixed));
         if !is_fixed {
             continue;
         }
-        let layout = node.final_layout;
+        let layout = node.final_layout_or_zero();
         let (w, h) = (layout.size.width, layout.size.height);
         // fulgur-a8m5: Taffy's `compute_root_layout` (used by
         // `relayout_position_fixed`) does not resolve `bottom` / `right`
@@ -3922,13 +4343,13 @@ fn record_fixed_subtree_descendants(
         if depth >= crate::MAX_DOM_DEPTH {
             return;
         }
-        let Some(node) = doc.get_node(node_id) else {
+        let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
             return;
         };
         let stored_x = root_stored_xy.0 + offset_in_subtree.0;
         let stored_y = root_stored_xy.1 + offset_in_subtree.1;
-        let w = node.final_layout.size.width;
-        let h = node.final_layout.size.height;
+        let w = node.final_layout_or_zero().size.width;
+        let h = node.final_layout_or_zero().size.height;
 
         let entry = geometry.entry(node_id).or_default();
         entry.fragments.clear();
@@ -3960,17 +4381,20 @@ fn record_fixed_subtree_descendants(
             if let Some(lc) = layout_borrow.as_deref()
                 && !lc.is_empty()
             {
-                lc.to_vec()
+                crate::blitz_adapter::uids(lc)
             } else {
-                node.children.clone()
+                crate::blitz_adapter::uids(&node.children.clone())
             }
         };
         for child_id in children {
-            let Some(child) = doc.get_node(child_id) else {
+            let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
                 continue;
             };
             let is_oof = child.primary_styles().is_some_and(|s| {
-                matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed)
+                matches!(
+                    s.get_box().slow_clone_position(),
+                    Pos::Absolute | Pos::Fixed
+                )
             });
             if is_oof {
                 continue;
@@ -3979,13 +4403,13 @@ fn record_fixed_subtree_descendants(
                 continue;
             }
             let child_offset = (
-                offset_in_subtree.0 + child.final_layout.location.x,
-                offset_in_subtree.1 + child.final_layout.location.y,
+                offset_in_subtree.0 + child.final_layout_or_zero().location.x,
+                offset_in_subtree.1 + child.final_layout_or_zero().location.y,
             );
             walk(
                 geometry,
                 doc,
-                child_id,
+                crate::blitz_adapter::uid(crate::blitz_adapter::bid(child_id)),
                 child_offset,
                 root_stored_xy,
                 pages,
@@ -3995,7 +4419,7 @@ fn record_fixed_subtree_descendants(
         }
     }
 
-    let Some(root) = doc.get_node(fixed_root_id) else {
+    let Some(root) = doc.get_node(crate::blitz_adapter::bid(fixed_root_id)) else {
         return;
     };
     let children: Vec<usize> = {
@@ -4003,29 +4427,35 @@ fn record_fixed_subtree_descendants(
         if let Some(lc) = layout_borrow.as_deref()
             && !lc.is_empty()
         {
-            lc.to_vec()
+            crate::blitz_adapter::uids(lc)
         } else {
-            root.children.clone()
+            crate::blitz_adapter::uids(&root.children.clone())
         }
     };
     for child_id in children {
-        let Some(child) = doc.get_node(child_id) else {
+        let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
             continue;
         };
-        let is_oof = child
-            .primary_styles()
-            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed));
+        let is_oof = child.primary_styles().is_some_and(|s| {
+            matches!(
+                s.get_box().slow_clone_position(),
+                Pos::Absolute | Pos::Fixed
+            )
+        });
         if is_oof {
             continue;
         }
         if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             continue;
         }
-        let child_offset = (child.final_layout.location.x, child.final_layout.location.y);
+        let child_offset = (
+            child.final_layout_or_zero().location.x,
+            child.final_layout_or_zero().location.y,
+        );
         walk(
             geometry,
             doc,
-            child_id,
+            crate::blitz_adapter::uid(crate::blitz_adapter::bid(child_id)),
             child_offset,
             root_stored_xy,
             pages,
@@ -4065,7 +4495,7 @@ pub fn append_position_absolute_body_direct_fragments(
         Some(id) => id,
         None => return,
     };
-    let body = match doc.get_node(body_id) {
+    let body = match doc.get_node(crate::blitz_adapter::bid(body_id)) {
         Some(n) => n,
         None => return,
     };
@@ -4092,7 +4522,10 @@ pub fn append_position_absolute_body_direct_fragments(
         if crate::blitz_adapter::is_whitespace_only_text_node(child) {
             return false;
         }
-        if running_store.is_some_and(|s| s.instance_for_node(child_id).is_some()) {
+        if running_store.is_some_and(|s| {
+            s.instance_for_node(crate::blitz_adapter::uid(child_id))
+                .is_some()
+        }) {
             return false;
         }
         !is_out_of_flow_positioned(child) && !crate::blitz_adapter::node_is_floating(child)
@@ -4103,11 +4536,11 @@ pub fn append_position_absolute_body_direct_fragments(
         };
         let is_abs_only = child
             .primary_styles()
-            .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute));
+            .is_some_and(|s| matches!(s.get_box().slow_clone_position(), Pos::Absolute));
         if !is_abs_only {
             continue;
         }
-        let layout = child.final_layout;
+        let layout = child.final_layout_or_zero();
         let (w, h) = (layout.size.width, layout.size.height);
         let (resolved_x, resolved_y) =
             resolve_viewport_cb_location(child, w, h, viewport_w_px, viewport_h_px)
@@ -4132,7 +4565,7 @@ pub fn append_position_absolute_body_direct_fragments(
         record_subtree_fragments_at_offset(
             geometry,
             doc,
-            child_id,
+            crate::blitz_adapter::uid(child_id),
             (resolved_x, resolved_y),
             body_offset_xy,
             viewport_h_px,
@@ -4200,7 +4633,7 @@ fn record_subtree_fragments_at_offset(
         if depth >= crate::MAX_DOM_DEPTH {
             return;
         }
-        let Some(node) = doc.get_node(node_id) else {
+        let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
             return;
         };
         // Prefer `layout_children` so anonymous block wrappers Stylo
@@ -4212,9 +4645,9 @@ fn record_subtree_fragments_at_offset(
             if let Some(lc) = layout_borrow.as_deref()
                 && !lc.is_empty()
             {
-                lc.to_vec()
+                crate::blitz_adapter::uids(lc)
             } else {
-                node.children.clone()
+                crate::blitz_adapter::uids(&node.children.clone())
             }
         };
         // The containing block for THIS node's out-of-flow children is
@@ -4230,18 +4663,18 @@ fn record_subtree_fragments_at_offset(
         let node_positioned = {
             use ::style::properties::longhands::position::computed_value::T as Pos;
             node.primary_styles()
-                .is_some_and(|s| !matches!(s.get_box().clone_position(), Pos::Static))
+                .is_some_and(|s| !matches!(s.get_box().slow_clone_position(), Pos::Static))
         };
         let (child_cb_anchor, child_cb_size) = if node_positioned {
-            let border = node.final_layout.border;
+            let border = node.final_layout_or_zero().border;
             (
                 (
                     offset_in_subtree.0 + border.left,
                     offset_in_subtree.1 + border.top,
                 ),
                 (
-                    node.final_layout.size.width - border.left - border.right,
-                    node.final_layout.size.height - border.top - border.bottom,
+                    node.final_layout_or_zero().size.width - border.left - border.right,
+                    node.final_layout_or_zero().size.height - border.top - border.bottom,
                 ),
             )
         } else {
@@ -4253,14 +4686,14 @@ fn record_subtree_fragments_at_offset(
         // back at draw time.
         let final_y_for_paging = root_xy_for_paging.1 + offset_in_subtree.1;
         let stored_x = root_xy_for_paging.0 + offset_in_subtree.0 - body_offset.0;
-        let w = node.final_layout.size.width;
-        let h = node.final_layout.size.height;
+        let w = node.final_layout_or_zero().size.width;
+        let h = node.final_layout_or_zero().size.height;
         let is_size_contained = has_contain_size(node);
         let monolithic_adjust: f32 = children
             .iter()
-            .filter_map(|child_id| doc.get_node(*child_id))
+            .filter_map(|child_id| doc.get_node(crate::blitz_adapter::bid(*child_id)))
             .filter(|child| !is_out_of_flow_positioned(child) && has_contain_size(child))
-            .map(|child| (child.final_layout.size.height - page_h_px).max(0.0))
+            .map(|child| (child.final_layout_or_zero().size.height - page_h_px).max(0.0))
             .sum();
         let h_for_paging = (h - monolithic_adjust).max(0.0);
         let mut descendant_total_pages = total_pages;
@@ -4424,7 +4857,7 @@ fn record_subtree_fragments_at_offset(
 
         let mut monolithic_y_adjust = 0.0;
         for child_id in children {
-            let Some(child) = doc.get_node(child_id) else {
+            let Some(child) = doc.get_node(crate::blitz_adapter::bid(child_id)) else {
                 continue;
             };
             // Out-of-flow descendants:
@@ -4444,13 +4877,16 @@ fn record_subtree_fragments_at_offset(
             //     insets.
             {
                 use ::style::properties::longhands::position::computed_value::T as Pos;
-                match child.primary_styles().map(|s| s.get_box().clone_position()) {
+                match child
+                    .primary_styles()
+                    .map(|s| s.get_box().slow_clone_position())
+                {
                     // Fixed is handled by its own pass; skip here.
                     Some(Pos::Fixed) => continue,
                     Some(Pos::Absolute) => {
                         let (child_w, child_h) = (
-                            child.final_layout.size.width,
-                            child.final_layout.size.height,
+                            child.final_layout_or_zero().size.width,
+                            child.final_layout_or_zero().size.height,
                         );
                         // Resolve against the nearest positioned ancestor's
                         // padding box (`child_cb_*`), NOT the immediate DOM
@@ -4463,7 +4899,10 @@ fn record_subtree_fragments_at_offset(
                             child_cb_size.0,
                             child_cb_size.1,
                         )
-                        .unwrap_or((child.final_layout.location.x, child.final_layout.location.y));
+                        .unwrap_or((
+                            child.final_layout_or_zero().location.x,
+                            child.final_layout_or_zero().location.y,
+                        ));
                         // Per-axis anchor: an explicit inset is relative to the
                         // CB origin (`child_cb_anchor`); an `auto` inset keeps
                         // the static position, i.e. the flow offset relative to
@@ -4487,7 +4926,7 @@ fn record_subtree_fragments_at_offset(
                         walk(
                             geometry,
                             doc,
-                            child_id,
+                            crate::blitz_adapter::uid(crate::blitz_adapter::bid(child_id)),
                             nested_offset,
                             root_xy_for_paging,
                             body_offset,
@@ -4512,13 +4951,13 @@ fn record_subtree_fragments_at_offset(
                 continue;
             }
             let child_offset = (
-                offset_in_subtree.0 + child.final_layout.location.x,
-                offset_in_subtree.1 + child.final_layout.location.y - monolithic_y_adjust,
+                offset_in_subtree.0 + child.final_layout_or_zero().location.x,
+                offset_in_subtree.1 + child.final_layout_or_zero().location.y - monolithic_y_adjust,
             );
             walk(
                 geometry,
                 doc,
-                child_id,
+                crate::blitz_adapter::uid(crate::blitz_adapter::bid(child_id)),
                 child_offset,
                 root_xy_for_paging,
                 body_offset,
@@ -4533,7 +4972,8 @@ fn record_subtree_fragments_at_offset(
                 emitted,
             );
             if has_contain_size(child) {
-                monolithic_y_adjust += (child.final_layout.size.height - page_h_px).max(0.0);
+                monolithic_y_adjust +=
+                    (child.final_layout_or_zero().size.height - page_h_px).max(0.0);
             }
         }
     }
@@ -4585,14 +5025,18 @@ fn explicit_inset_axes(node: &blitz_dom::Node) -> (bool, bool) {
 fn is_out_of_flow_positioned(node: &blitz_dom::Node) -> bool {
     use ::style::properties::longhands::position::computed_value::T as Pos;
 
-    node.primary_styles()
-        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Absolute | Pos::Fixed))
+    node.primary_styles().is_some_and(|s| {
+        matches!(
+            s.get_box().slow_clone_position(),
+            Pos::Absolute | Pos::Fixed
+        )
+    })
 }
 
 fn has_contain_size(node: &blitz_dom::Node) -> bool {
     node.primary_styles().is_some_and(|s| {
         s.get_box()
-            .clone_contain()
+            .slow_clone_contain()
             .contains(::style::values::computed::box_::Contain::SIZE)
     })
 }
@@ -4637,10 +5081,13 @@ fn body_origin_in_px(doc: &BaseDocument) -> (f32, f32) {
     let Some(body_id) = find_body_id(doc) else {
         return (0.0, 0.0);
     };
-    let Some(body) = doc.get_node(body_id) else {
+    let Some(body) = doc.get_node(crate::blitz_adapter::bid(body_id)) else {
         return (0.0, 0.0);
     };
-    (body.final_layout.location.x, body.final_layout.location.y)
+    (
+        body.final_layout_or_zero().location.x,
+        body.final_layout_or_zero().location.y,
+    )
 }
 
 /// Resolve a viewport-CB-anchored absolute/fixed element's CSS px
@@ -4693,7 +5140,7 @@ fn resolve_viewport_cb_location(
     // the margin term corrects fixed end-anchoring as well as abs. The margin
     // is subtracted unrounded between the two rounded terms; fixedpos-004's
     // pixel-exact reftest is the validator for this rounding choice.
-    let margin = node.final_layout.margin;
+    let margin = node.final_layout_or_zero().margin;
     let x = if let Some(l) = left {
         l
     } else if let Some(r) = right {
@@ -4701,7 +5148,7 @@ fn resolve_viewport_cb_location(
         // edge before subtracting element width.
         (cb_w_px - r).round() - margin.right - el_w_px.round()
     } else {
-        node.final_layout.location.x
+        node.final_layout_or_zero().location.x
     };
     let y = if let Some(t) = top {
         t
@@ -4712,7 +5159,7 @@ fn resolve_viewport_cb_location(
         // px boundary when cb height / element size are sub-pixel.
         (cb_h_px - b).round() - margin.bottom - el_h_px.round()
     } else {
-        node.final_layout.location.y
+        node.final_layout_or_zero().location.y
     };
     Some((x, y))
 }
@@ -4745,26 +5192,26 @@ fn walk_for_position_fixed(doc: &BaseDocument, node_id: usize, out: &mut Vec<usi
     if depth >= crate::MAX_DOM_DEPTH {
         return;
     }
-    let Some(node) = doc.get_node(node_id) else {
+    let Some(node) = doc.get_node(crate::blitz_adapter::bid(node_id)) else {
         return;
     };
     let is_fixed = node
         .primary_styles()
-        .is_some_and(|s| matches!(s.get_box().clone_position(), Pos::Fixed));
+        .is_some_and(|s| matches!(s.get_box().slow_clone_position(), Pos::Fixed));
     if is_fixed {
         out.push(node_id);
     }
     for &child_id in &node.children {
-        walk_for_position_fixed(doc, child_id, out, depth + 1);
+        walk_for_position_fixed(doc, crate::blitz_adapter::uid(child_id), out, depth + 1);
     }
     // Pseudo-elements: a `::before { position: fixed }` would
     // otherwise be missed by the children-only walk. The `before` /
     // `after` slots live directly on `Node`, not on `ElementData`.
-    if let Some(pseudo_id) = node.before {
-        walk_for_position_fixed(doc, pseudo_id, out, depth + 1);
+    if let Some(pseudo_id) = node.before() {
+        walk_for_position_fixed(doc, crate::blitz_adapter::uid(pseudo_id), out, depth + 1);
     }
-    if let Some(pseudo_id) = node.after {
-        walk_for_position_fixed(doc, pseudo_id, out, depth + 1);
+    if let Some(pseudo_id) = node.after() {
+        walk_for_position_fixed(doc, crate::blitz_adapter::uid(pseudo_id), out, depth + 1);
     }
 }
 
@@ -4797,9 +5244,9 @@ fn find_body_id(doc: &BaseDocument) -> Option<usize> {
             continue;
         };
         if let Some(elem) = child.element_data()
-            && elem.name.local.as_ref() == "body"
+            && (&elem.name.local) == "body"
         {
-            return Some(*child_id);
+            return Some(crate::blitz_adapter::uid(*child_id));
         }
     }
     None
@@ -4813,9 +5260,9 @@ fn find_body_id(doc: &BaseDocument) -> Option<usize> {
 // to drive the fragmenter through Taffy's normal dispatch. Keeping the
 // shapes here so the upgrade is a localized change.
 
-impl TraversePartialTree for PaginationLayoutTree<'_> {
+impl<'d> TraversePartialTree for PaginationLayoutTree<'d> {
     type ChildIter<'a>
-        = <BaseDocument as TraversePartialTree>::ChildIter<'a>
+        = <LayoutPassState<'d> as TraversePartialTree>::ChildIter<'a>
     where
         Self: 'a;
 
@@ -4838,29 +5285,18 @@ impl CacheTree for PaginationLayoutTree<'_> {
     fn cache_get(
         &self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        input: &taffy::LayoutInput,
     ) -> Option<taffy::LayoutOutput> {
-        self.doc
-            .cache_get(node_id, known_dimensions, available_space, run_mode)
+        self.doc.cache_get(node_id, input)
     }
 
     fn cache_store(
         &mut self,
         node_id: NodeId,
-        known_dimensions: Size<Option<f32>>,
-        available_space: Size<AvailableSpace>,
-        run_mode: taffy::RunMode,
+        input: &taffy::LayoutInput,
         layout_output: taffy::LayoutOutput,
     ) {
-        self.doc.cache_store(
-            node_id,
-            known_dimensions,
-            available_space,
-            run_mode,
-            layout_output,
-        );
+        self.doc.cache_store(node_id, input, layout_output);
     }
 
     fn cache_clear(&mut self, node_id: NodeId) {
@@ -4868,9 +5304,9 @@ impl CacheTree for PaginationLayoutTree<'_> {
     }
 }
 
-impl LayoutPartialTree for PaginationLayoutTree<'_> {
+impl<'d> LayoutPartialTree for PaginationLayoutTree<'d> {
     type CoreContainerStyle<'a>
-        = &'a taffy::Style<style::Atom>
+        = <LayoutPassState<'d> as LayoutPartialTree>::CoreContainerStyle<'a>
     where
         Self: 'a;
 
@@ -4896,8 +5332,31 @@ impl LayoutPartialTree for PaginationLayoutTree<'_> {
         if Some(usize::from(node_id)) == self.body_id {
             return compute_pagination_layout(self, node_id, inputs);
         }
-        // Everything else delegates to BaseDocument's normal dispatch.
+        // Everything else delegates to Blitz's normal dispatch.
         self.doc.compute_child_layout(node_id, inputs)
+    }
+}
+
+impl<'d> LayoutContainingBlock for PaginationLayoutTree<'d> {
+    type OofItemStyle<'a>
+        = <LayoutPassState<'d> as LayoutContainingBlock>::OofItemStyle<'a>
+    where
+        Self: 'a;
+
+    fn get_oof_item_style(&self, node_id: NodeId) -> Self::OofItemStyle<'_> {
+        self.doc.get_oof_item_style(node_id)
+    }
+
+    fn clear_hoisted_children(&mut self, node_id: NodeId) {
+        self.doc.clear_hoisted_children(node_id);
+    }
+
+    fn add_hoisted_children(&mut self, node_id: NodeId, hoisted: &[NodeId]) {
+        self.doc.add_hoisted_children(node_id, hoisted);
+    }
+
+    fn get_detailed_layout_info(&self, node_id: NodeId) -> &taffy::DetailedLayoutInfo<style::Atom> {
+        self.doc.get_detailed_layout_info(node_id)
     }
 }
 
@@ -4908,6 +5367,18 @@ impl RoundTree for PaginationLayoutTree<'_> {
 
     fn set_final_layout(&mut self, node_id: NodeId, layout: &taffy::Layout) {
         self.doc.set_final_layout(node_id, layout);
+    }
+
+    fn is_out_of_flow(&self, node_id: NodeId) -> bool {
+        self.doc.is_out_of_flow(node_id)
+    }
+
+    fn hoisted_child_count(&self, node_id: NodeId) -> usize {
+        self.doc.hoisted_child_count(node_id)
+    }
+
+    fn get_hoisted_child_id(&self, node_id: NodeId, index: usize) -> NodeId {
+        self.doc.get_hoisted_child_id(node_id, index)
     }
 }
 
@@ -4946,6 +5417,8 @@ fn compute_pagination_layout(
 mod tests {
     use super::*;
     use crate::blitz_adapter;
+    #[allow(unused_imports)]
+    use crate::blitz_adapter::TaffyDocExt;
     use std::ops::DerefMut;
     use std::sync::Arc;
 
@@ -5049,9 +5522,9 @@ mod tests {
         let parent_id = find_by_id(&doc, "d").expect("div#d should exist");
         // The bail copies this node's laid-out height into the fragment.
         let node_h = doc
-            .get_node(parent_id)
+            .get_node(crate::blitz_adapter::bid(parent_id))
             .expect("div node")
-            .final_layout
+            .final_layout_or_zero()
             .size
             .height;
         assert!(
@@ -5131,7 +5604,12 @@ mod tests {
         );
         let table_id = find_by_id(&doc, "t").unwrap();
         let header_id = find_by_id(&doc, "h").unwrap();
-        let table_height = doc.get_node(table_id).unwrap().final_layout.size.height;
+        let table_height = doc
+            .get_node(crate::blitz_adapter::bid(table_id))
+            .unwrap()
+            .final_layout_or_zero()
+            .size
+            .height;
         let mut geometry = PaginationGeometryTable::new();
         let mut remaining_repeat_budget = crate::MAX_SUBTREE_PAGE_FRAGMENTS;
 
@@ -5211,21 +5689,21 @@ mod tests {
     /// Find the first element node carrying `id="<id>"`.
     fn find_by_id(doc: &blitz_dom::BaseDocument, id: &str) -> Option<usize> {
         fn walk(doc: &blitz_dom::BaseDocument, node_id: usize, target: &str) -> Option<usize> {
-            let node = doc.get_node(node_id)?;
+            let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
             if let Some(ed) = node.element_data()
-                && let Some(attr_id) = ed.attrs().iter().find(|a| a.name.local.as_ref() == "id")
+                && let Some(attr_id) = ed.attrs().iter().find(|a| (&a.name.local) == "id")
                 && attr_id.value.as_str() == target
             {
                 return Some(node_id);
             }
             for &child in &node.children {
-                if let Some(found) = walk(doc, child, target) {
+                if let Some(found) = walk(doc, crate::blitz_adapter::uid(child), target) {
                     return Some(found);
                 }
             }
             None
         }
-        walk(doc, doc.root_element().id, id)
+        walk(doc, crate::blitz_adapter::uid(doc.root_element().id), id)
     }
 
     /// css-tables-3: "If a table owns multiple `display: table-header-group`
@@ -5265,7 +5743,12 @@ mod tests {
         let b1 = find_by_id(&doc, "b1").unwrap();
         let foot = find_by_id(&doc, "foot").unwrap();
         // The body now starts at the demoted second header group, not at `b1`.
-        let body_y = doc.get_node(h2).unwrap().final_layout.location.y;
+        let body_y = doc
+            .get_node(crate::blitz_adapter::bid(h2))
+            .unwrap()
+            .final_layout_or_zero()
+            .location
+            .y;
 
         let metadata = repeating_table_header(&doc, table_id, 1).unwrap();
 
@@ -5373,7 +5856,12 @@ mod tests {
         let header_block_id = find_by_id(&doc, "header-block").unwrap();
         let first_row_id = find_by_id(&doc, "row-1").unwrap();
         let last_row_id = find_by_id(&doc, "row-5").unwrap();
-        let body_origin = doc.get_node(first_row_id).unwrap().final_layout.location.y;
+        let body_origin = doc
+            .get_node(crate::blitz_adapter::bid(first_row_id))
+            .unwrap()
+            .final_layout_or_zero()
+            .location
+            .y;
 
         let geometry = run_pass(&mut doc, 90.0);
         let table_pages: Vec<u32> = geometry[&table_id]
@@ -6420,9 +6908,9 @@ mod tests {
             let mut doc = parse(html, 600.0);
             let id = find_by_id(doc.deref_mut(), "x").expect("div#x");
             doc.deref_mut()
-                .get_node_mut(id)
+                .get_node_mut(crate::blitz_adapter::bid(id))
                 .expect("div#x")
-                .final_layout
+                .final_layout_mut()
                 .size
                 .height = bad;
             let table = run_pass(&mut doc, 800.0);
@@ -7364,9 +7852,9 @@ h2 { string-set: chapter-title content(text); }
         // pagination-cap tests) instead of redefining it here.
         let tiny_id = find_by_id(doc.deref_mut(), "tiny").expect("tiny abs node");
         doc.deref_mut()
-            .get_node_mut(tiny_id)
+            .get_node_mut(crate::blitz_adapter::bid(tiny_id))
             .expect("tiny abs node")
-            .final_layout
+            .final_layout_mut()
             .size
             .height = 800.1;
         let mut geom = PaginationGeometryTable::new();
@@ -7414,9 +7902,9 @@ h2 { string-set: chapter-title content(text); }
         let mut doc = parse(html, 600.0);
         let abs_id = find_node_by_local_name(&doc, "div").expect("abs div");
         doc.deref_mut()
-            .get_node_mut(abs_id)
+            .get_node_mut(crate::blitz_adapter::bid(abs_id))
             .expect("abs div")
-            .final_layout
+            .final_layout_mut()
             .size
             .height = f32::MAX;
         let mut geom = PaginationGeometryTable::new();
@@ -7615,9 +8103,9 @@ h2 { string-set: chapter-title content(text); }
         let mut doc = parse(html, 600.0);
         let bad = find_by_id(doc.deref_mut(), "bad").expect("div#bad");
         doc.deref_mut()
-            .get_node_mut(bad)
+            .get_node_mut(crate::blitz_adapter::bid(bad))
             .expect("div#bad")
-            .final_layout
+            .final_layout_mut()
             .size
             .height = f32::INFINITY;
         let table = blitz_adapter::extract_column_style_table(&doc, &[]);
@@ -8063,15 +8551,12 @@ h2 { string-set: chapter-title content(text); }
         let mut doc = parse(&html, 500.0);
 
         fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
-            let node = doc.get_node(node_id)?;
-            if node
-                .element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "p")
-            {
+            let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
+            if node.element_data().is_some_and(|e| (&e.name.local) == "p") {
                 return Some(node_id);
             }
             for &child in &node.children {
-                if let Some(found) = find_p(doc, child) {
+                if let Some(found) = find_p(doc, crate::blitz_adapter::uid(child)) {
                     return Some(found);
                 }
             }
@@ -8129,15 +8614,12 @@ h2 { string-set: chapter-title content(text); }
         let wrap_id = find_by_id(&doc, "wrap").expect("div#wrap");
 
         fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
-            let node = doc.get_node(node_id)?;
-            if node
-                .element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "p")
-            {
+            let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
+            if node.element_data().is_some_and(|e| (&e.name.local) == "p") {
                 return Some(node_id);
             }
             for &child in &node.children {
-                if let Some(found) = find_p(doc, child) {
+                if let Some(found) = find_p(doc, crate::blitz_adapter::uid(child)) {
                     return Some(found);
                 }
             }
@@ -8202,7 +8684,10 @@ h2 { string-set: chapter-title content(text); }
             let table_cs = blitz_adapter::extract_column_style_table(&doc, &[]);
             let parent_id = find_by_id(&doc, "parent").expect("div#parent");
             let p1_id = find_by_id(&doc, "p1").expect("p#p1");
-            let lines = super::collect_inline_line_metrics(doc.get_node(p1_id).expect("p1 node"));
+            let lines = super::collect_inline_line_metrics(
+                doc.get_node(crate::blitz_adapter::bid(p1_id))
+                    .expect("p1 node"),
+            );
             let geom =
                 super::run_pass_with_break_styles(doc.deref_mut(), 400.0_f32.as_px(), &table_cs);
             let parent_geom = geom.get(&parent_id).expect("div#parent must be recorded");
@@ -8257,15 +8742,12 @@ h2 { string-set: chapter-title content(text); }
         let after_id = find_by_id(&doc, "after").expect("div#after");
 
         fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
-            let node = doc.get_node(node_id)?;
-            if node
-                .element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "p")
-            {
+            let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
+            if node.element_data().is_some_and(|e| (&e.name.local) == "p") {
                 return Some(node_id);
             }
             for &child in &node.children {
-                if let Some(found) = find_p(doc, child) {
+                if let Some(found) = find_p(doc, crate::blitz_adapter::uid(child)) {
                     return Some(found);
                 }
             }
@@ -8750,15 +9232,12 @@ h2 { string-set: chapter-title content(text); }
         let mut doc = parse(html, 200.0);
 
         fn find_p(doc: &blitz_dom::BaseDocument, node_id: usize) -> Option<usize> {
-            let node = doc.get_node(node_id)?;
-            if node
-                .element_data()
-                .is_some_and(|e| e.name.local.as_ref() == "p")
-            {
+            let node = doc.get_node(crate::blitz_adapter::bid(node_id))?;
+            if node.element_data().is_some_and(|e| (&e.name.local) == "p") {
                 return Some(node_id);
             }
             for &child in &node.children {
-                if let Some(found) = find_p(doc, child) {
+                if let Some(found) = find_p(doc, crate::blitz_adapter::uid(child)) {
                     return Some(found);
                 }
             }
@@ -9080,20 +9559,20 @@ h2 { string-set: chapter-title content(text); }
         let base: &blitz_dom::BaseDocument = doc.deref();
         let root_id = base.root_element().id;
         fn walk(base: &blitz_dom::BaseDocument, id: usize, tag: &str) -> Option<usize> {
-            let node = base.get_node(id)?;
+            let node = base.get_node(crate::blitz_adapter::bid(id))?;
             if let Some(elem) = node.element_data()
-                && elem.name.local.as_ref() == tag
+                && (&elem.name.local) == tag
             {
                 return Some(id);
             }
             for &child_id in &node.children {
-                if let Some(found) = walk(base, child_id, tag) {
+                if let Some(found) = walk(base, crate::blitz_adapter::uid(child_id), tag) {
                     return Some(found);
                 }
             }
             None
         }
-        walk(base, root_id, tag)
+        walk(base, crate::blitz_adapter::uid(root_id), tag)
     }
 
     /// fulgur-puml: `explicit_inset_axes` must classify each axis as
@@ -9127,7 +9606,10 @@ h2 { string-set: chapter-title content(text); }
             let html = format!("<html><body>{frag}</body></html>");
             let doc = parse(&html, 600.0);
             let id = find_node_by_local_name(&doc, "div").expect("div present");
-            let node = doc.deref().get_node(id).expect("node present");
+            let node = doc
+                .deref()
+                .get_node(crate::blitz_adapter::bid(id))
+                .expect("node present");
             assert_eq!(explicit_inset_axes(node), *expected, "fragment: {frag}");
         }
     }
@@ -10559,5 +11041,73 @@ h2 { string-set: chapter-title content(text); }
             states[0].is_empty(),
             "store-only node (not in geom) must not produce a state entry"
         );
+    }
+
+    #[test]
+    fn paged_slices_locate_positions_on_their_page() {
+        let pages = super::PagedSlices {
+            first_page: 2,
+            first_y: 300.0,
+            first_h: 100.0,
+            page_h: 400.0,
+            last_page: 4,
+        };
+        assert_eq!(pages.locate(0.0), (2, 300.0, 100.0));
+        assert_eq!(pages.locate(99.0), (2, 399.0, 100.0));
+        // Within half a pixel of the page end: the next page.
+        let (page, y, end) = pages.locate(99.8);
+        assert_eq!((page, end), (3, 500.0));
+        assert!((y + 0.2).abs() < 1e-3);
+        assert_eq!(pages.locate(250.0), (3, 150.0, 500.0));
+        assert_eq!(pages.locate(500.0), (4, 0.0, 900.0));
+        // Past the last slice stays on the last page.
+        assert_eq!(pages.locate(2000.0).0, 4);
+    }
+
+    /// A `<br>` that ends a paragraph ends its last line; the empty line
+    /// Parley adds after it is not part of the paragraph (Blitz leaves it out
+    /// of the height too), or the content below moves down one line.
+    #[test]
+    fn trailing_forced_break_adds_no_line() {
+        let count = |content: &str| {
+            let doc = parse(
+                &format!(
+                    r#"<!doctype html><html><body style="margin:0"><p id="p" style="margin:0">{content}</p></body></html>"#
+                ),
+                400.0,
+            );
+            let p = find_by_id(&doc, "p").expect("p#p");
+            super::collect_inline_line_metrics(
+                doc.get_node(crate::blitz_adapter::bid(p)).expect("p node"),
+            )
+            .len()
+        };
+        assert_eq!(count("x<br>"), 1);
+        assert_eq!(count("x<br><br>"), 2);
+        assert_eq!(count("x<br>y"), 2);
+    }
+
+    /// The cells of a table row sit beside each other: deciding whether the
+    /// table must be split counts each row once, not once per cell.
+    #[test]
+    fn cells_of_a_row_count_once_when_deciding_to_split() {
+        let cell = "<td style='padding:0'><div style='height:20px'></div></td>";
+        let row = format!("<tr>{}</tr>", cell.repeat(6));
+        let doc = parse(
+            &format!(
+                "<!doctype html><html><body style='margin:0'>\
+                 <table id='t' style='border-spacing:0'>{}</table></body></html>",
+                row.repeat(10)
+            ),
+            400.0,
+        );
+        let table = find_by_id(&doc, "t").expect("table#t");
+        // A 200px table fits a 300px page.
+        assert!(!super::would_split_block_subtree(
+            &doc, table, 300.0, 300.0, 0
+        ));
+        assert!(super::would_split_block_subtree(
+            &doc, table, 150.0, 300.0, 0
+        ));
     }
 }

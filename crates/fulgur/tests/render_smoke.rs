@@ -2425,6 +2425,338 @@ fn page_property_inside_flex_container_does_not_propagate_outward() {
         .expect("flex page render");
     assert!(!pdf.is_empty());
 }
+/// A multicol container taller than the page breaks across pages: its
+/// columns fill each page to the page end and continue on the next page,
+/// and only the last page's columns are balanced. Every block lands whole
+/// inside a page.
+#[test]
+fn multicol_taller_than_the_page_continues_on_the_next_page() {
+    use fulgur::PageSize;
+
+    // 400px pages; 40 blocks of 50px in two columns: 8 per column, so
+    // 16, 16 and then 8 balanced as 4 + 4.
+    let blocks = r#"<div style="height: 50px"></div>"#.repeat(40);
+    let html = format!(
+        r#"<!doctype html><html><body style="margin:0">
+        <div style="column-count: 2; column-gap: 0">{blocks}</div>
+    </body></html>"#
+    );
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 300.0,
+            height: 300.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let (_drawables, geometry) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+    let mut per_page = std::collections::BTreeMap::<u32, usize>::new();
+    for geom in geometry.values() {
+        for f in &geom.fragments {
+            if (f.height.to_f32() - 50.0).abs() < 0.01 && f.width.to_f32() < 250.0 {
+                assert!(
+                    f.y.to_f32() + f.height.to_f32() <= 400.5,
+                    "block at y={} runs off its page",
+                    f.y.to_f32()
+                );
+                *per_page.entry(f.page_index).or_default() += 1;
+            }
+        }
+    }
+    assert_eq!(
+        per_page.into_iter().collect::<Vec<_>>(),
+        vec![(0, 16), (1, 16), (2, 8)]
+    );
+}
+
+/// A multicol container that starts lower on a page fills that page's
+/// columns from where it starts, then whole pages.
+#[test]
+fn multicol_starting_mid_page_fills_the_rest_of_the_page_first() {
+    use fulgur::PageSize;
+
+    // 100px above the columns leaves 300px: 6 blocks per column there,
+    // then 16 per page; the last 12 balance as 6 + 6.
+    let blocks = r#"<div style="height: 50px"></div>"#.repeat(40);
+    let html = format!(
+        r#"<!doctype html><html><body style="margin:0">
+        <div style="height: 100px"></div>
+        <div style="column-count: 2; column-gap: 0">{blocks}</div>
+    </body></html>"#
+    );
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 300.0,
+            height: 300.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let (_drawables, geometry) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+    let mut per_page = std::collections::BTreeMap::<u32, usize>::new();
+    for geom in geometry.values() {
+        for f in &geom.fragments {
+            if (f.height.to_f32() - 50.0).abs() < 0.01 && f.width.to_f32() < 250.0 {
+                assert!(f.y.to_f32() + f.height.to_f32() <= 400.5);
+                if f.page_index == 0 {
+                    assert!(f.y.to_f32() >= 99.5, "block above the columns' start");
+                }
+                *per_page.entry(f.page_index).or_default() += 1;
+            }
+        }
+    }
+    assert_eq!(
+        per_page.into_iter().collect::<Vec<_>>(),
+        vec![(0, 12), (1, 16), (2, 12)]
+    );
+}
+
+/// `scale` lays the document out on a page `1 / scale` times larger and
+/// prints it scaled onto the real paper: the same page size, fewer pages.
+#[test]
+fn scale_prints_more_per_page_on_the_same_paper() {
+    let html = format!(
+        "<!doctype html><html><body>{}</body></html>",
+        "<p>Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>".repeat(200)
+    );
+    let pages = |scale: f32| {
+        let pdf = Engine::builder()
+            .scale(scale)
+            .build()
+            .render(&html)
+            .expect("render");
+        let doc = lopdf::Document::load_mem(&pdf).expect("PDF must parse");
+        for (_, page) in doc.get_pages() {
+            let media_box = doc
+                .get_dictionary(page)
+                .and_then(|d| d.get(b"MediaBox"))
+                .and_then(|b| b.as_array())
+                .expect("MediaBox")
+                .clone();
+            let width = media_box[2].as_float().unwrap_or_default();
+            assert!(
+                (width - 595.28).abs() < 0.1,
+                "A4 paper at any scale: {width}"
+            );
+        }
+        page_count(&pdf)
+    };
+    let full = pages(1.0);
+    let scaled = pages(0.5);
+    assert!(
+        full >= 2 && scaled < full,
+        "{full} pages at 1, {scaled} at 0.5"
+    );
+}
+
+/// With `shrink_to_fit`, content wider than the page is laid out again on a
+/// wider page so it fits; without it, the page keeps its width.
+#[test]
+fn content_wider_than_the_page_is_shrunk_to_fit() {
+    let html = r#"<!doctype html><html><body style="margin:0"><div id=wide style="width:800px;height:20px"></div></body></html>"#;
+    let body_width = |engine: Engine| {
+        let layout = engine.layout(html).expect("layout");
+        let body = layout.drawables.body_id.expect("body");
+        layout.geometry[&body].fragments[0].width.to_f32()
+    };
+    // A4 with 20 mm margins: about 642 CSS px of content.
+    let plain = body_width(Engine::builder().build());
+    assert!(plain < 700.0, "{plain}");
+    let fitted = body_width(Engine::builder().shrink_to_fit(0.5).build());
+    assert!(
+        (fitted - 800.0).abs() < 1.0,
+        "laid out 800px wide: {fitted}"
+    );
+    let floor = body_width(Engine::builder().shrink_to_fit(0.9).build());
+    assert!(
+        (floor - plain / 0.9).abs() < 1.0,
+        "no lower than the minimum: {floor}"
+    );
+}
+
+/// Blitz places an absolutely positioned box relative to its containing
+/// block (here the initial containing block), not its parent. The box must
+/// be drawn where it is, inside the page: not off the page, where it made
+/// shrink-to-fit scale the whole document down, and not dropped when its
+/// parent has no in-flow height.
+#[test]
+fn absolute_boxes_without_a_positioned_parent_are_drawn_in_place() {
+    let text = "absmarker ".repeat(60);
+    let cases = [
+        format!(
+            r#"<table width="100%"><tr><td></td><td><div style="position:absolute">{text}</div></td></tr></table>"#
+        ),
+        format!(r#"<div><div style="position:absolute">{text}</div></div>"#),
+        format!(
+            r#"<div style="position:relative"><div style="position:absolute">{text}</div></div>"#
+        ),
+        format!(r#"<div>in flow text<div style="position:absolute">{text}</div></div>"#),
+    ];
+    for body in cases {
+        let html = format!("<!doctype html><html><body><p>Visible</p>{body}</body></html>");
+        let body_width = |engine: Engine| {
+            let layout = engine.layout(&html).expect("layout");
+            let body = layout.drawables.body_id.expect("body");
+            layout.geometry[&body].fragments[0].width.to_f32()
+        };
+        let plain = body_width(Engine::builder().build());
+        let fitted = body_width(Engine::builder().shrink_to_fit(0.5).build());
+        assert!(
+            (fitted - plain).abs() < 1.0,
+            "the box fits the page, nothing to shrink: {plain} vs {fitted} for {body}"
+        );
+        let pdf = Engine::builder().build().render(&html).expect("render");
+        let Some(extracted) = extract_pdf_text(&pdf) else {
+            continue;
+        };
+        assert_eq!(
+            extracted.matches("absmarker").count(),
+            60,
+            "every word drawn for {body}: {extracted}"
+        );
+    }
+}
+
+/// Tables in the collapsing border model draw their borders. Blitz lays the
+/// borders out as gutters and leaves the cells without a border, so nothing
+/// was drawn; now each cell draws its own border centred on the gutter, in
+/// its own color per side, and a table border at least as wide wins at the
+/// table's edge.
+#[test]
+fn collapsed_table_borders_are_drawn() {
+    let html = r#"<!doctype html><html><body style="margin:0">
+<table style="border-collapse:collapse;border:3px solid #c00">
+<tr><td style="border:1px solid #000">a</td><td style="border-bottom:2px solid #00c">b</td></tr>
+</table></body></html>"#;
+    let engine = Engine::builder().build();
+    let (drawables, _) = engine.build_drawables_and_geometry_for_testing_no_gcpm(html);
+    let collapsed: Vec<_> = drawables
+        .block_styles
+        .values()
+        .map(|b| &b.style)
+        .chain(drawables.tables.values().map(|t| &t.style))
+        .filter_map(|s| s.collapsed_border)
+        .collect();
+    assert_eq!(
+        collapsed.len(),
+        3,
+        "the table and its two cells: {collapsed:?}"
+    );
+    let px = |pt: fulgur::units::Pt| (pt.to_f32() / 0.75 * 100.0).round() / 100.0;
+
+    // Cell a: 1px black, drawn only on its inner side; its outer sides give
+    // way to the table's wider border. Cell b: only a blue bottom border, on
+    // the table's edge, where the table's 3px border wins.
+    let table = collapsed
+        .iter()
+        .find(|c| c.colors[0] == [0xcc, 0, 0, 255])
+        .expect("table border");
+    assert_eq!(table.widths.map(px), [3.0; 4]);
+    let a = collapsed
+        .iter()
+        .find(|c| c.colors[1] == [0, 0, 0, 255] && px(c.widths[1]) == 1.0)
+        .expect("cell a");
+    assert_eq!(a.widths.map(px), [0.0, 1.0, 0.0, 0.0], "{a:?}");
+    let b = collapsed
+        .iter()
+        .find(|c| c.colors[2] == [0, 0, 0xcc, 255])
+        .expect("cell b");
+    assert_eq!(
+        b.widths.map(px),
+        [0.0; 4],
+        "the table's 3px border wins: {b:?}"
+    );
+}
+
+/// A float inside a line of text is drawn where Blitz placed it (its Taffy
+/// layout), not at its placeholder in the line, and boxes inside
+/// paragraphs that pagination splits across pages get geometry on the
+/// page their line lands on. Both used to be lost: the float was drawn at
+/// the placeholder or not at all, and inline blocks and floats in a
+/// paragraph split across pages were not drawn.
+#[test]
+fn boxes_inside_paragraphs_split_across_pages_are_drawn() {
+    use fulgur::PageSize;
+
+    let para = r#"<p style="margin:0"><span style="float:left;width:61px;height:37px;background:#7ad"></span>Lorem ipsum <span style="display:inline-block;width:43px;height:19px;background:#7ad"></span> dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor.</p>"#;
+    let html = format!(
+        r#"<!doctype html><html><body style="margin:0;font:12px/20px sans-serif"><div style="width:220px">{}</div></body></html>"#,
+        para.repeat(6)
+    );
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 300.0,
+            height: 225.0,
+        })
+        .margin(fulgur::config::Margin::uniform(0.0))
+        .build();
+    let (drawables, geometry) = engine.build_drawables_and_geometry_for_testing_no_gcpm(&html);
+    let mut floats = Vec::new();
+    let mut inline_blocks = Vec::new();
+    for geom in geometry.values() {
+        for f in &geom.fragments {
+            let size = (f.width.to_f32().round(), f.height.to_f32().round());
+            if size == (61.0, 37.0) {
+                floats.push((f.page_index, f.x.to_f32()));
+            } else if size == (43.0, 19.0) {
+                inline_blocks.push(f.page_index);
+            }
+        }
+    }
+    assert_eq!(floats.len(), 6, "a float per paragraph: {floats:?}");
+    assert_eq!(inline_blocks.len(), 6, "an inline block per paragraph");
+    assert!(
+        floats.iter().all(|&(_, x)| x.abs() < 0.5),
+        "floats at the left edge: {floats:?}"
+    );
+    assert!(
+        floats.iter().any(|&(page, _)| page > 0),
+        "content reaches page 2"
+    );
+    // The float is not a box in the line.
+    let float_items = drawables
+        .paragraphs
+        .values()
+        .flat_map(|p| &p.lines)
+        .flat_map(|l| &l.items)
+        .filter(|item| matches!(item, fulgur::paragraph::LineItem::InlineBox(b) if (b.width.to_f32() - 61.0).abs() < 1.0))
+        .count();
+    assert_eq!(float_items, 0);
+}
+
+/// A bordered box broken across columns is painted in slices: the convert
+/// pass records one `BlockSlice` per column, offset by the box height in
+/// earlier columns, so the slices add up to the whole box.
+#[test]
+fn multicol_bordered_box_split_emits_block_slices() {
+    use fulgur::PageSize;
+
+    let html = r#"<!doctype html><html><body style="margin:0">
+        <div style="column-count: 2; column-gap: 0;">
+          <div style="border: 2px solid red; padding: 8px; background: #eef">
+            <div style="height: 50px"></div><div style="height: 50px"></div>
+            <div style="height: 50px"></div><div style="height: 50px"></div>
+          </div>
+        </div>
+    </body></html>"#;
+    let engine = Engine::builder()
+        .page_size(PageSize {
+            width: 400.0,
+            height: 600.0,
+        })
+        .build();
+    let drawables = engine.build_drawables_for_testing_no_gcpm(html);
+    assert_eq!(drawables.block_slices.len(), 1);
+    let entry = drawables.block_slices.values().next().unwrap();
+    assert_eq!(entry.slices.len(), 2);
+    let total: f32 = entry.slices.iter().map(|s| s.size_pt.1.to_f32()).sum();
+    assert!((total - entry.height_pt.to_f32()).abs() < 0.01);
+    // 220px box: 110px (82.5pt) per column.
+    assert!((entry.height_pt.to_f32() - 165.0).abs() < 0.01);
+    assert_eq!(entry.slices[0].offset_pt.to_f32(), 0.0);
+    assert!((entry.slices[1].offset_pt.to_f32() - 82.5).abs() < 0.01);
+    assert!(entry.slices[1].origin_pt.0 > entry.slices[0].origin_pt.0);
+    let pdf = engine.render(html).expect("render");
+    assert!(!pdf.is_empty());
+}
 
 /// fulgur-6q5 Task 7: convert pass populates `Drawables.paragraph_slices`
 /// from `MulticolGeometry::paragraph_splits`. Case B fixture — inline-root
@@ -5324,6 +5656,14 @@ fn table_caption_side_bottom_via_injected_css() {
 /// wrapper does not shrink the table away from full width (the primary
 /// SaaS report-table use case). fulgur-78o.
 fn full_width_table_max_cell_x(with_caption: bool) -> f32 {
+    table_max_cell_x("100%", with_caption)
+}
+
+/// Max cell-text x for a two-column table of the given CSS `width`,
+/// optionally with a caption. The cells' text is 12px (9pt); the caption's
+/// (16px, 12pt) is left out: it is centred over the table, so it can lie
+/// further right than the second column's text.
+fn table_max_cell_x(width: &str, with_caption: bool) -> f32 {
     use fulgur::inspect::inspect;
     let caption = if with_caption {
         "<caption>CAP</caption>"
@@ -5334,7 +5674,7 @@ fn full_width_table_max_cell_x(with_caption: bool) -> f32 {
         r#"<!doctype html><html><head><style>
           td {{ font-size: 12px; padding: 4px; }}
         </style></head><body>
-          <table style="width:100%">{caption}
+          <table style="width:{width}">{caption}
             <tbody><tr><td>leftcell</td><td>rightcell</td></tr></tbody>
           </table>
         </body></html>"#
@@ -5347,7 +5687,7 @@ fn full_width_table_max_cell_x(with_caption: bool) -> f32 {
     inspected
         .text_items
         .iter()
-        .filter(|t| t.font_size <= 15.0)
+        .filter(|t| t.font_size < 10.0)
         .map(|t| t.x)
         .fold(f32::NEG_INFINITY, f32::max)
 }
@@ -5362,6 +5702,19 @@ fn table_caption_preserves_full_width_table() {
     assert!(
         (without - with).abs() < 1.0,
         "caption must not change table width: max cell x without={without}, with={with}"
+    );
+}
+
+/// A percentage width other than 100% must be applied once, not twice:
+/// the caption wrapper takes the percentage and the table fills the
+/// wrapper, so a `width:50%` table must not shrink to 25%.
+#[test]
+fn table_caption_preserves_half_width_table() {
+    let without = table_max_cell_x("50%", false);
+    let with = table_max_cell_x("50%", true);
+    assert!(
+        (without - with).abs() < 1.0,
+        "caption must not change a 50% table's width: max cell x without={without}, with={with}"
     );
 }
 
@@ -6965,4 +7318,68 @@ fn test_render_non_srgb_color_spaces_smoke() {
         .render(html)
         .expect("render non-sRGB colour spaces");
     assert!(!pdf.is_empty());
+}
+
+/// A table cell's `vertical-align: middle` centres its lines in the row. Blitz
+/// records the shift as the text layout's `block_offset` without moving
+/// Parley's lines, so the paragraph has to carry it into the PDF.
+#[test]
+fn middle_aligned_cell_text_is_centred_in_the_row() {
+    use fulgur::inspect::inspect;
+    let html = r#"<!doctype html><html><body style="margin:0">
+      <table style="border-spacing:0"><tr>
+        <td style="padding:0"><div style="width:10px;height:200px"></div></td>
+        <td style="padding:0;vertical-align:top;font-size:12px">top</td>
+        <td style="padding:0;vertical-align:middle;font-size:12px">mid</td>
+        <td style="padding:0;vertical-align:bottom;font-size:12px">bot</td>
+      </tr></table>
+    </body></html>"#;
+    let pdf = noto_engine().render(html).expect("render must succeed");
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("valign.pdf");
+    std::fs::write(&path, &pdf).expect("write pdf");
+    let inspected = inspect(&path).expect("inspect pdf");
+    // `inspect` may give glyph ids rather than text: the three cells' words
+    // are told apart by their order from left to right.
+    let mut items: Vec<_> = inspected.text_items.iter().collect();
+    items.sort_by(|a, b| a.x.total_cmp(&b.x));
+    let [top, mid, bot] = items[..] else {
+        panic!("expected three text items: {items:?}");
+    };
+    // The row is 200px (150pt) tall and a line about 16px (12pt).
+    let (top, mid, bot) = (top.y, mid.y, bot.y);
+    let half = (mid - top).abs();
+    let full = (bot - top).abs();
+    assert!((65.0..75.0).contains(&half), "middle: {top} {mid}");
+    assert!((130.0..145.0).contains(&full), "bottom: {top} {bot}");
+}
+
+/// Marks positioned by GPOS keep their direction. Over a capital, Noto Sans
+/// raises a combining diaeresis to the capital's anchor. Parley reports glyph
+/// offsets growing downwards; the PDF glyph's `y_offset` grows upwards, as in
+/// the font, so the raised mark has a positive offset. With the sign lost,
+/// marks above went below and marks below went above: Arabic dots in Noto
+/// Naskh Arabic floated over the letters.
+#[test]
+fn combining_mark_over_a_capital_is_raised() {
+    let d = noto_engine().build_drawables_for_testing_no_gcpm(
+        "<!DOCTYPE html><html><body><p>Q\u{0308}</p></body></html>",
+    );
+    let glyphs: Vec<_> = d
+        .paragraphs
+        .values()
+        .flat_map(|p| p.lines.iter())
+        .flat_map(|line| line.items.iter())
+        .filter_map(|item| match item {
+            fulgur::paragraph::LineItem::Text(run) => Some(run.glyphs.iter()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(glyphs.len(), 2, "A and the mark: {glyphs:?}");
+    assert!(
+        glyphs[1].y_offset > 0.05,
+        "the diaeresis must be raised, y_offset {}",
+        glyphs[1].y_offset
+    );
 }

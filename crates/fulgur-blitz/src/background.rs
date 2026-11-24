@@ -28,6 +28,17 @@ pub fn draw_box_shadows(
     if style.box_shadows.is_empty() {
         return;
     }
+    canvas.as_artifact(|canvas| draw_box_shadows_inner(canvas, style, x, y, w, h));
+}
+
+fn draw_box_shadows_inner(
+    canvas: &mut Canvas<'_, '_>,
+    style: &BlockStyle,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) {
     for shadow in style.box_shadows.iter().rev() {
         if shadow.inset {
             continue; // defensive; inset shadows are excluded upstream in convert.rs
@@ -492,11 +503,17 @@ pub fn draw_background(
     w: f32,
     h: f32,
 ) {
-    draw_background_color(canvas, style, x, y, w, h);
-    // Draw layers in reverse order (last declared = bottom-most)
-    for layer in style.background_layers.iter().rev() {
-        draw_background_layer(canvas, style, layer, x, y, w, h);
+    // Nothing to paint: no empty artifact either.
+    if style.background_color.is_none() && style.background_layers.is_empty() {
+        return;
     }
+    canvas.as_artifact(|canvas| {
+        draw_background_color(canvas, style, x, y, w, h);
+        // Draw layers in reverse order (last declared = bottom-most)
+        for layer in style.background_layers.iter().rev() {
+            draw_background_layer(canvas, style, layer, x, y, w, h);
+        }
+    });
 }
 
 fn build_rect_path(x: f32, y: f32, w: f32, h: f32) -> Option<krilla::geom::Path> {

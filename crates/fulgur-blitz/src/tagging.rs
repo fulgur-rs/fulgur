@@ -41,6 +41,7 @@ pub fn pdf_tag_to_krilla_tag(
         PdfTag::Tr => krilla::tagging::Tag::<krilla::tagging::kind::TR>::TR.into(),
         PdfTag::Th { scope } => krilla::tagging::Tag::TH(header_scope(*scope)).into(),
         PdfTag::Td => krilla::tagging::Tag::<krilla::tagging::kind::TD>::TD.into(),
+        PdfTag::Caption => krilla::tagging::Tag::<krilla::tagging::kind::Caption>::Caption.into(),
         PdfTag::Link => krilla::tagging::Tag::<krilla::tagging::kind::Link>::Link.into(),
     }
 }
@@ -316,6 +317,7 @@ mod tests {
         assert_eq!(classify_element("tbody"), Some(PdfTag::TBody));
         assert_eq!(classify_element("tfoot"), Some(PdfTag::TFoot));
         assert_eq!(classify_element("tr"), Some(PdfTag::Tr));
+        assert_eq!(classify_element("caption"), Some(PdfTag::Caption));
         assert_eq!(
             classify_element("th"),
             Some(PdfTag::Th {

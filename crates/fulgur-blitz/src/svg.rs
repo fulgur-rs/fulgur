@@ -27,6 +27,59 @@ pub(crate) fn sandboxed_options() -> usvg::Options<'static> {
     }
 }
 
+/// [`sandboxed_options`] plus the system font database (loaded once per
+/// process), so `<text>` inside an inline `<svg>` can resolve its fonts the
+/// way Blitz's own parse of the same element does.
+pub(crate) fn sandboxed_options_with_system_fonts() -> usvg::Options<'static> {
+    static FONT_DB: std::sync::LazyLock<std::sync::Arc<usvg::fontdb::Database>> =
+        std::sync::LazyLock::new(|| {
+            let mut db = usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            set_generic_families(&mut db);
+            std::sync::Arc::new(db)
+        });
+    usvg::Options {
+        fontdb: FONT_DB.clone(),
+        ..sandboxed_options()
+    }
+}
+
+/// Points fontdb's generic families at the fonts the system configures for
+/// them. fontdb's defaults are fixed names (`Arial`, `Times New Roman`,
+/// `Courier New`, ...); where those are not installed, as on most Linux
+/// systems, `<text font-family="sans-serif">` found no font and was dropped.
+/// fontique asks the platform (fontconfig on Linux), as Blitz does for HTML
+/// text, so SVG and HTML text use the same faces.
+fn set_generic_families(db: &mut usvg::fontdb::Database) {
+    use parley::fontique::{Collection, CollectionOptions, GenericFamily};
+    let mut collection = Collection::new(CollectionOptions {
+        shared: false,
+        system_fonts: true,
+    });
+    let mut resolve = |generic: GenericFamily| -> Option<String> {
+        collection
+            .generic_families(generic)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .find_map(|id| collection.family_name(id).map(str::to_owned))
+    };
+    if let Some(name) = resolve(GenericFamily::SansSerif) {
+        db.set_sans_serif_family(name);
+    }
+    if let Some(name) = resolve(GenericFamily::Serif) {
+        db.set_serif_family(name);
+    }
+    if let Some(name) = resolve(GenericFamily::Monospace) {
+        db.set_monospace_family(name);
+    }
+    if let Some(name) = resolve(GenericFamily::Cursive) {
+        db.set_cursive_family(name);
+    }
+    if let Some(name) = resolve(GenericFamily::Fantasy) {
+        db.set_fantasy_family(name);
+    }
+}
+
 /// An inline `<svg>` element rendered as vector graphics.
 #[derive(Clone)]
 pub struct SvgRender {
@@ -300,6 +353,22 @@ mod tests {
             }
         }
         let _ = doc.finish();
+    }
+
+    #[test]
+    fn generic_families_resolve_to_installed_fonts() {
+        let opts = sandboxed_options_with_system_fonts();
+        if opts.fontdb.faces().next().is_none() {
+            return; // no system fonts at all
+        }
+        let query = usvg::fontdb::Query {
+            families: &[usvg::fontdb::Family::SansSerif],
+            ..Default::default()
+        };
+        assert!(
+            opts.fontdb.query(&query).is_some(),
+            "sans-serif must map to a font that is installed"
+        );
     }
 
     #[test]
