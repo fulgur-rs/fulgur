@@ -522,3 +522,30 @@ fn an_inline_role_img_holds_its_text_in_place() {
     assert_eq!(kinds("Figure"), [["MC"]]);
     assert_eq!(figure_alts(&doc), ["4 of 5 stars"]);
 }
+
+const BLOCK_IMAGE_LINK: &str = "<div><a href=\"https://example.com\"><img alt=\"Logo\"      style=\"display:block\" width=\"20\" height=\"20\" src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==\"></a></div>";
+
+#[test]
+fn a_block_image_inside_a_link_is_a_link_area() {
+    // Link areas came only from inline runs, so an image drawn as a block
+    // inside <a href> was not clickable.
+    let pdf = Engine::builder()
+        .build()
+        .render(&format!("{PAGE}<h1>T</h1>{BLOCK_IMAGE_LINK}"))
+        .expect("render");
+    assert_eq!(link_annotations(&load(&pdf)).len(), 1);
+}
+
+#[test]
+fn a_block_image_link_is_in_a_link_element() {
+    let pdf = render_ua(&format!("{PAGE}<h1>T</h1>{BLOCK_IMAGE_LINK}"))
+        .expect("PDF/UA accepts a block image link");
+    let doc = load(&pdf);
+    let links: Vec<Vec<String>> = struct_elements(&doc)
+        .into_iter()
+        .filter(|(_, d)| name_of(d, b"S").as_deref() == Some("Link"))
+        .map(|(_, d)| kid_kinds(&doc, d))
+        .collect();
+    assert_eq!(links, [["OBJR"]]);
+    assert_each_annotation_in_one_link(&pdf);
+}

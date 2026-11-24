@@ -470,6 +470,9 @@ pub struct Drawables {
     pub block_slices: BTreeMap<NodeId, BlockSlicesEntry>,
     pub images: TrackedMap<ImageEntry>,
     pub svgs: TrackedMap<SvgEntry>,
+    /// Block-level images and SVGs inside an `<a href>`, with that link: their
+    /// box is a link area, as inline content's glyph runs are.
+    pub block_links: BTreeMap<NodeId, std::sync::Arc<crate::paragraph::LinkSpan>>,
     pub tables: TrackedMap<TableEntry>,
     pub list_items: TrackedMap<ListItemEntry>,
     pub multicol_rules: BTreeMap<NodeId, MulticolRuleEntry>,
@@ -535,6 +538,7 @@ impl Default for Drawables {
             block_slices: BTreeMap::new(),
             images: TrackedMap::default(),
             svgs: TrackedMap::default(),
+            block_links: BTreeMap::new(),
             tables: TrackedMap::default(),
             list_items: TrackedMap::default(),
             multicol_rules: BTreeMap::new(),

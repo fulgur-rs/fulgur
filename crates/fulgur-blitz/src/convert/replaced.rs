@@ -21,10 +21,14 @@ pub(super) fn try_convert(
         // Fall through to the generic / content-url paths below when the
         // asset can't be resolved (missing in bundle, unsupported format,
         // or `ImageData::None` from upstream SVG parse failure).
-        if tag == "img" && convert_image(ctx, node, ctx.assets, out) {
-            return true;
-        }
-        if tag == "svg" && convert_svg(ctx, node, ctx.assets, out) {
+        let converted = (tag == "img" && convert_image(ctx, node, ctx.assets, out))
+            || (tag == "svg" && convert_svg(ctx, node, ctx.assets, out));
+        if converted {
+            // A replaced element inside a link is a link area of its own when
+            // it is drawn as a block (inline ones are items of their line).
+            if let Some(link) = ctx.link_cache.lookup(doc, node_id) {
+                out.block_links.insert(node_id, link);
+            }
             return true;
         }
     }

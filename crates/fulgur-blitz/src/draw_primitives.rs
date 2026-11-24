@@ -679,6 +679,23 @@ impl TagCollector {
         true
     }
 
+    /// Note a link whose area is the box of element `node_id` (a block-level
+    /// image inside `<a href>`): its structure element gets a `Link` with the
+    /// link's annotation.
+    pub fn note_node_link(&mut self, node_id: crate::drawables::NodeId, span_ptr: usize) {
+        let page = self.current_page;
+        let links = self.group_links.entry(node_id).or_default();
+        match links.iter_mut().find(|l| l.span_ptr == span_ptr) {
+            Some(link) => {
+                link.pages.insert(page);
+            }
+            None => links.push(GroupLink {
+                span_ptr,
+                pages: std::iter::once(page).collect(),
+            }),
+        }
+    }
+
     /// The links noted inside groups, by group element.
     pub fn take_group_links(&mut self) -> BTreeMap<crate::drawables::NodeId, Vec<GroupLink>> {
         std::mem::take(&mut self.group_links)

@@ -1460,6 +1460,21 @@ pub(crate) fn dispatch_fragment(
         draw_table_v2(canvas, table, geom, x_pt, y_pt, frag);
         return;
     }
+    // A block-level image inside a link: its box is the link's area.
+    if let Some(link) = drawables.block_links.get(&node_id) {
+        let rect = crate::draw_primitives::Rect {
+            x: x_pt.as_pt(),
+            y: y_pt.as_pt(),
+            width: frag.width.in_pt(),
+            height: frag.height.in_pt(),
+        };
+        if let Some(collector) = canvas.link_collector.as_deref_mut() {
+            collector.push_rect(link, rect);
+        }
+        if let Some(tc) = canvas.tag_collector.as_mut() {
+            tc.note_node_link(node_id, std::sync::Arc::as_ptr(link) as usize);
+        }
+    }
     // True when this block / list-item / paragraph spans multiple
     // pages (the fragmenter recorded one fragment per page slice).
     // Passed down so `draw_block_inner_paint` can use the per-page
