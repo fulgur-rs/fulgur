@@ -2312,8 +2312,20 @@ mod edge_case_tests {
             1,
             "expected exactly one TransformEntry (for the rotated <div>, not for <p>)"
         );
-        // Verify the entry belongs to a node that has descendants (the <p>),
-        // not to a leaf node.
+        // Obtain the <div>'s NodeId from the semantic map (the only Div entry
+        // in this single-element fixture) and verify the transform entry is
+        // keyed by that exact NodeId, not by the <p> or any other node.
+        let div_id = d
+            .semantics
+            .iter()
+            .find(|(_, e)| matches!(e.tag, crate::tagging::PdfTag::Div))
+            .map(|(id, _)| *id)
+            .expect("expected a Div semantic entry for the <div>");
+        assert!(
+            d.transforms.contains_key(&div_id),
+            "TransformEntry must be keyed by the <div>'s NodeId"
+        );
+        // Verify the entry belongs to a node that has descendants (the <p>).
         let entry = d.transforms.values().next().unwrap();
         assert!(
             !entry.descendants.is_empty(),
