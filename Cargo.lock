@@ -3025,7 +3025,7 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 [[package]]
 name = "raikiri-dom"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "bitflags 2.13.2",
  "cssparser 0.37.0",
@@ -3048,7 +3048,7 @@ dependencies = [
 [[package]]
 name = "raikiri-html"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3071,12 +3071,12 @@ dependencies = [
 [[package]]
 name = "raikiri-layout-geometry"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 
 [[package]]
 name = "raikiri-layout-style"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "raikiri-layout-geometry",
  "raikiri-style",
@@ -3086,7 +3086,7 @@ dependencies = [
 [[package]]
 name = "raikiri-net"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "data-url",
  "image",
@@ -3098,7 +3098,7 @@ dependencies = [
 [[package]]
 name = "raikiri-style"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
@@ -3112,7 +3112,7 @@ dependencies = [
 [[package]]
 name = "raikiri-svg"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3127,7 +3127,7 @@ dependencies = [
 [[package]]
 name = "raikiri-traits"
 version = "0.0.7"
-source = "git+https://github.com/fulgur-rs/raikiri.git?rev=0608854e22340e4f5decec14d061d359199d9ae4#0608854e22340e4f5decec14d061d359199d9ae4"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "bytes",
  "libc",
