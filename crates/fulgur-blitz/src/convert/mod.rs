@@ -2290,4 +2290,46 @@ mod edge_case_tests {
             bad_block_ids.len()
         );
     }
+
+    // --- CSS transform recording (record_transform / node_has_transform) ---
+
+    #[test]
+    fn dom_to_drawables_records_transform_entry_for_rotated_div() {
+        // `transform: rotate(45deg)` makes `node_has_transform` return `true`,
+        // so `convert_node` calls `record_transform` and inserts a
+        // `TransformEntry` for that element.  Without this test,
+        // `record_transform` and the `true` path of `node_has_transform`
+        // are never reached by any other unit test.
+        let d = build_drawables(
+            "<!DOCTYPE html><html><body>\
+             <div style=\"transform: rotate(45deg)\"><p>content</p></div>\
+             </body></html>",
+        );
+        assert!(
+            !d.transforms.is_empty(),
+            "expected a TransformEntry for the rotated <div>"
+        );
+        // The rotated div has at least the <p> as a descendant; verify the
+        // descendants list is populated (not just the entry itself).
+        let entry = d.transforms.values().next().unwrap();
+        assert!(
+            !entry.descendants.is_empty(),
+            "rotated <div> should have at least one descendant node id recorded"
+        );
+    }
+
+    #[test]
+    fn dom_to_drawables_no_transform_entries_for_plain_elements() {
+        // Elements without a CSS `transform:` property must not produce any
+        // `TransformEntry`: `node_has_transform` returns `false`, the draw
+        // mark is never captured, and `record_transform` is never called.
+        let d = build_drawables(
+            "<!DOCTYPE html><html><body><div><p>no transform here</p></div></body></html>",
+        );
+        assert!(
+            d.transforms.is_empty(),
+            "plain element must not produce a TransformEntry; found {}",
+            d.transforms.len()
+        );
+    }
 }
