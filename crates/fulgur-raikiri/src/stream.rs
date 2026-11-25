@@ -192,6 +192,8 @@ impl<'a> PdfSink<'a, '_> {
     }
 
     fn finish(mut self, summary: StreamSummary) -> Result<Vec<u8>> {
+        #[cfg(feature = "streaming-diagnostics")]
+        eprintln!("{:?}", summary.diagnostics);
         if self.painter.is_none() {
             self.start(None, self.document_url.clone())?;
         }
@@ -257,6 +259,21 @@ impl PageSink for PdfSink<'_, '_> {
             *self.failure.borrow_mut() = Some(error);
             io
         })
+    }
+
+    fn stage_table_page(&mut self, page: StreamPage<'_>) -> std::io::Result<bool> {
+        self.page(page, Vec::new())?;
+        Ok(true)
+    }
+
+    fn discard_staged_table_pages(&mut self) {
+        self.painter = None;
+        self.lang = None;
+        self.pages.clear();
+        self.outline = self
+            .config
+            .effective_bookmarks()
+            .then(OutlineBuilder::default);
     }
 
     fn finish(self, summary: StreamSummary) -> std::io::Result<Self::Output> {
