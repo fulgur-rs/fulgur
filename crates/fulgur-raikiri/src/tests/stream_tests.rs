@@ -74,6 +74,18 @@ fn pages_delivered_early_match_the_batch_pdf() {
 }
 
 #[test]
+fn a_late_split_table_row_discards_tentative_pdf_pages() {
+    let html = format!(
+        "<!doctype html><style>@page{{size:300px 240px;margin:10px}}body{{margin:0}}table{{width:100%}}tr{{break-inside:avoid}}</style><!--{}--><table>{}<tr><td>{}</td></tr></table>",
+        " ".repeat(54 * 1024),
+        "<tr><td>short row</td></tr>".repeat(600),
+        "long row ".repeat(500)
+    );
+    let (batch, streamed) = both(&html, &Config::default());
+    assert!(batch == streamed, "replay produced a different PDF");
+}
+
+#[test]
 fn early_pages_show_the_real_page_count() {
     let css = "<style>@page { size: 300px 200px; margin: 40px; \
         @bottom-center { content: counter(page) ' of ' counter(pages) } } \
