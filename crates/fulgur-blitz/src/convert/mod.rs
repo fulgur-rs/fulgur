@@ -2305,12 +2305,15 @@ mod edge_case_tests {
              <div style=\"transform: rotate(45deg)\"><p>content</p></div>\
              </body></html>",
         );
-        assert!(
-            !d.transforms.is_empty(),
-            "expected a TransformEntry for the rotated <div>"
+        // Exactly one entry: the rotated <div> itself.  Using len() == 1 also
+        // proves the <p> child did NOT receive its own TransformEntry.
+        assert_eq!(
+            d.transforms.len(),
+            1,
+            "expected exactly one TransformEntry (for the rotated <div>, not for <p>)"
         );
-        // The rotated div has at least the <p> as a descendant; verify the
-        // descendants list is populated (not just the entry itself).
+        // Verify the entry belongs to a node that has descendants (the <p>),
+        // not to a leaf node.
         let entry = d.transforms.values().next().unwrap();
         assert!(
             !entry.descendants.is_empty(),
