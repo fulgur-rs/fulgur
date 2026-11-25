@@ -106,7 +106,57 @@ fn text_outside_classified_elements_gets_a_paragraph() {
 #[test]
 fn loose_text_around_a_paragraph_keeps_reading_order() {
     let pdf = tagged_pdf("Before<p>Middle</p>After", &tagged());
-    assert_eq!(outline(&pdf), "Document[P[#] P[#] P[#]]");
+    let catalog = pdf.catalog().unwrap();
+    let root = resolve(&pdf, catalog.get(b"StructTreeRoot").unwrap())
+        .as_dict()
+        .unwrap();
+    let children = |dict: &Dictionary| match resolve(&pdf, dict.get(b"K").unwrap()) {
+        Object::Array(kids) => kids.clone(),
+        kid => vec![kid.clone()],
+    };
+    let top = children(root);
+    assert_eq!(top.len(), 1);
+    let doc = resolve(&pdf, &top[0]).as_dict().unwrap();
+    let mut paragraphs = Vec::new();
+    for kid in children(doc) {
+        let paragraph = resolve(&pdf, &kid).as_dict().unwrap();
+        assert_eq!(paragraph.get(b"S").unwrap().as_name().unwrap(), b"P");
+        let mut text = String::new();
+        for item in children(paragraph) {
+            let id = match resolve(&pdf, &item) {
+                Object::Integer(id) => *id,
+                Object::Dictionary(dict) => dict.get(b"MCID").unwrap().as_i64().unwrap(),
+                other => panic!("unexpected paragraph kid {other:?}"),
+            };
+            let page = pdf.get_pages()[&1];
+            let mut content = lopdf::content::Content::decode(&pdf.get_page_content(page)).unwrap();
+            let mut open = Vec::new();
+            content.operations.retain(|op| {
+                match op.operator.as_str() {
+                    "BDC" => open.push(
+                        op.operands[1]
+                            .as_dict()
+                            .ok()
+                            .and_then(|d| d.get(b"MCID").ok())
+                            .and_then(|v| v.as_i64().ok()),
+                    ),
+                    "BMC" => open.push(None),
+                    "EMC" => {
+                        open.pop();
+                    }
+                    "TJ" | "Tj" => return open.iter().rev().flatten().next() == Some(&id),
+                    _ => {}
+                }
+                true
+            });
+            let mut copy = pdf.clone();
+            copy.change_page_content(page, content.encode().unwrap())
+                .unwrap();
+            text.extend(copy.extract_text(&[1]).unwrap().split_whitespace());
+        }
+        paragraphs.push(text);
+    }
+    assert_eq!(paragraphs, ["Before", "Middle", "After"]);
 }
 
 #[test]
