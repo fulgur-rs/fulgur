@@ -302,7 +302,7 @@ fn canvas_images_are_positioned_in_the_root_box() {
     // CSS Backgrounds 3 §2.11.2: the image is placed in the root element's
     // box, which is 100 px high here, not in the 160 px page area.
     let pdf = render_with_dot(&format!(
-        "{ROOT_PAGES}<html style=\"background: url(dot.png) no-repeat right bottom / 10px 10px\">\
+        "<!doctype html>{ROOT_PAGES}<html style=\"background: url(dot.png) no-repeat right bottom / 10px 10px\">\
          <body><p style=\"height: 100px\">one</p></body></html>"
     ));
     assert_bounds(&images(&pdf, 1), &[[270.0, 110.0, 280.0, 120.0]]);
@@ -380,7 +380,7 @@ fn a_scaled_root_scales_the_canvas_images_around_its_origin() {
     // The transform origin is the middle of the root's border box: the
     // 260 x 100 px box at (20, 20) scales around (150, 70).
     let pdf = render_with_dot(&format!(
-        "{ROOT_PAGES}<html style=\"transform: scale(2); \
+        "<!doctype html>{ROOT_PAGES}<html style=\"transform: scale(2); \
          background: url(dot.png) no-repeat 0 0 / 10px 10px\">\
          <body><p style=\"height: 100px\">one</p></body></html>"
     ));

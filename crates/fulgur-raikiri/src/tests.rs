@@ -1378,9 +1378,9 @@ fn double_border_fallback_uses_each_side_width() {
 fn body_overflow_clips_when_the_root_overflow_is_not_visible() {
     let html = |root: &str, height: &str| {
         format!(
-            "<style>@page {{ size: 300px 200px; margin: 20px }} html {{ {root} }} \
+            "<!doctype html><style>@page {{ size: 300px 200px; margin: 20px }} html {{ {root} }} \
              body {{ margin: 0; border: 5px solid black; overflow: hidden; {height} }}</style>\
-             <p style=\"background-color: blue; height: 100px\"></p>"
+             <p style=\"background-color: blue; height: 100px; margin: 0\"></p>"
         )
     };
     // With a visible root, the body's overflow goes to the page.

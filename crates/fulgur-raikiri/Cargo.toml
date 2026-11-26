@@ -11,14 +11,17 @@ readme = "README.md"
 keywords = ["pdf", "html", "css", "converter"]
 categories = ["text-processing"]
 
+[features]
+streaming-diagnostics = ["raikiri-html/streaming-diagnostics"]
+
 [dependencies]
 krilla = "0.7.0"
 tiny-skia = "0.12"
 skrifa = "0.47"
 fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
-raikiri-html = "0.0.6"
-raikiri-net = "0.0.6"
-raikiri-traits = "0.0.6"
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "927abda1ea1c7719ad9eaed8b66b81b9908b53ae" }
+raikiri-net = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "927abda1ea1c7719ad9eaed8b66b81b9908b53ae" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "927abda1ea1c7719ad9eaed8b66b81b9908b53ae" }
 url = "2.5"
 percent-encoding = "2"
 flpdf = "0.10"

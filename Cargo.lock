@@ -1091,9 +1091,9 @@ dependencies = [
 
 [[package]]
 name = "font-types"
-version = "0.12.6"
+version = "0.12.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c92d9081c7ab3bd83ef1eecdfad090f3d966e3ce74106779664114cfe1a6274"
+checksum = "835ae9d781464a79026cde387f9cbc650c9a4909d7cf7e658b127e3c35d2f35d"
 dependencies = [
  "bytemuck",
 ]
@@ -1564,14 +1564,15 @@ dependencies = [
 
 [[package]]
 name = "harfrust"
-version = "0.14.0"
+version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86aa776d6d32b072119e1f1650f4db843ff4382a4aaa6a2c9c4e35703cd377cb"
+checksum = "865dcc4105d51c323d8fedbb2d75b5e9c8ecddf5613f74c82f851d0afbc97114"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
- "read-fonts 0.45.0",
+ "read-fonts 0.46.0",
  "smallvec",
+ "yoke",
 ]
 
 [[package]]
@@ -3023,12 +3024,12 @@ checksum = "dc33ff2d4973d518d823d61aa239014831e521c75da58e3df4840d3f47749d09"
 
 [[package]]
 name = "raikiri-dom"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "89f478f33026197839da058694aef46f1a58b1652d92f208b738911e8893b720"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "bitflags 2.13.2",
  "cssparser 0.37.0",
+ "icu_properties",
  "raikiri-layout-geometry",
  "raikiri-layout-style",
  "raikiri-style",
@@ -3039,16 +3040,15 @@ dependencies = [
  "skrifa 0.48.0",
  "smol_str 0.3.6",
  "stacker",
- "taffy 0.15.0",
+ "taffy 0.15.1",
  "url",
  "wuff",
 ]
 
 [[package]]
 name = "raikiri-html"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a9c871beef4c3c86236686c32ca8afc161f01332181318c8bff59738b282c6c"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "cssparser 0.37.0",
  "data-url",
@@ -3062,6 +3062,7 @@ dependencies = [
  "rustc-hash",
  "shodo",
  "smol_str 0.3.6",
+ "tempfile",
  "unicode-script",
  "url",
  "xml5ever 0.40.0",
@@ -3069,26 +3070,23 @@ dependencies = [
 
 [[package]]
 name = "raikiri-layout-geometry"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b56ec7ee923ce2a4b6f47db0ad86b8973f3e0bb2155520ed136dee11e08b868"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 
 [[package]]
 name = "raikiri-layout-style"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "baeb3afad2282ba44ee330c3a13397635e007f81df1f498bb7a8fdd8acc372db"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "raikiri-layout-geometry",
  "raikiri-style",
- "taffy 0.15.0",
+ "taffy 0.15.1",
 ]
 
 [[package]]
 name = "raikiri-net"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "daad756605e420a8c9a667950459a19cabedcdf7a0a7bf64ccad4d09e59b0855"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "data-url",
  "image",
@@ -3099,23 +3097,22 @@ dependencies = [
 
 [[package]]
 name = "raikiri-style"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45318a861688e8b892e9ec31ab0dc8c6573f5643f55cf8e137ec7f44ef90f0a3"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "cssparser 0.37.0",
  "precomputed-hash",
  "rustc-hash",
  "selectors 0.40.0",
  "smol_str 0.3.6",
+ "svgtypes 0.16.1",
  "triomphe",
 ]
 
 [[package]]
 name = "raikiri-svg"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15569d3c5b1facddc55272de0cf99b4c1df9a33a54626e15a4c67df76baf1edb"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "cssparser 0.37.0",
  "raikiri-traits",
@@ -3129,9 +3126,8 @@ dependencies = [
 
 [[package]]
 name = "raikiri-traits"
-version = "0.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57aa0959a592132d9d41bd7cc3f0143a17f636097f6b7d0548587f5c3dda0854"
+version = "0.0.7"
+source = "git+https://github.com/fulgur-rs/raikiri.git?rev=927abda1ea1c7719ad9eaed8b66b81b9908b53ae#927abda1ea1c7719ad9eaed8b66b81b9908b53ae"
 dependencies = [
  "bytes",
  "libc",
@@ -3278,7 +3274,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "046a7d674daf459825b32f5062056d6882db0d2f5a479fbd76ccfc870ac18709"
 dependencies = [
  "bytemuck",
- "font-types 0.12.6",
+ "font-types 0.12.7",
  "once_cell",
 ]
 
@@ -3289,7 +3285,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5a0cf4bb6cbce4c29756270d189a5e400ac05e91192161d83a0bcb6e68492e8"
 dependencies = [
  "bytemuck",
- "font-types 0.12.6",
+ "font-types 0.12.7",
  "once_cell",
 ]
 
@@ -3300,8 +3296,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a5b7bed3d16ab428d8fa533640ab805ff50e7ad8a4d00649de1259e70023282"
 dependencies = [
  "bytemuck",
- "font-types 0.12.6",
+ "font-types 0.12.7",
  "once_cell",
+ "yoke",
+]
+
+[[package]]
+name = "read-fonts"
+version = "0.46.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bdaa4fffe9ff3ca2c353fa9729792805b9b3e324695ff5a081f860612e81b330"
+dependencies = [
+ "bytemuck",
+ "foldhash 0.2.0",
+ "font-types 0.12.7",
+ "once_cell",
+ "smallvec",
  "yoke",
 ]
 
@@ -3696,13 +3706,13 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "shodo"
-version = "0.0.38"
+version = "0.0.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0da71e49256890b608b6dbea90aa5be5e77c55c8faf37f683b96f0d1c28ef336"
+checksum = "636b49e904e106b2a0e300e041eda0bb7753c132f19817b14f87ccaf837e3224"
 dependencies = [
  "foldhash 0.2.0",
  "fontique 0.11.1",
- "harfrust 0.14.0",
+ "harfrust 0.15.0",
  "icu_casemap",
  "icu_locale_core",
  "icu_normalizer",
@@ -4217,9 +4227,9 @@ dependencies = [
 
 [[package]]
 name = "taffy"
-version = "0.15.0"
+version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c8480887e8803986d96a7173729565520d4bbb721ad6b7ad6941a22897207aa"
+checksum = "31f7bd2d97198df05186f93a3a3c306845f40e8b3c22bf9279cdd7e5cf5fea7d"
 dependencies = [
  "serde",
  "slotmap",

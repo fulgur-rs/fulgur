@@ -229,3 +229,19 @@ When cropped diagonal inner arcs intersect, their common outline is computed
 with adaptive vector segments (0.05px control-hull tolerance, bounded to 1024
 segments per corner for extreme coordinates). Single-corner crops and ordinary
 rounded rectangles retain cubic curves.
+
+### Reproducing the streaming table PDF comparison
+
+Build the release driver once. Run the resulting binary directly so the
+elapsed time and peak RSS cover HTML input through the final PDF write.
+Both modes use the supplied font with system fonts disabled.
+
+```sh
+cargo build --release --locked -p fulgur-raikiri --example table_probe
+/usr/bin/time -f '%e s, %M KiB' target/release/examples/table_probe rows.html streaming.pdf Ahem.ttf streaming
+/usr/bin/time -f '%e s, %M KiB' target/release/examples/table_probe rows.html batch.pdf Ahem.ttf batch
+```
+
+With a custom Cargo target directory, use the binary in its
+`release/examples` directory. The large-table fixture and measurements are
+described in the Raikiri checkout under `crates/raikiri-bench/README.md`.
