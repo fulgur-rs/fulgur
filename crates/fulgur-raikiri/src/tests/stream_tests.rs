@@ -86,6 +86,54 @@ fn a_late_split_table_row_discards_tentative_pdf_pages() {
 }
 
 #[test]
+fn uniform_table_streaming_preserves_every_row_and_replays_wrapped_cells() {
+    let mut assets = fulgur_core::AssetBundle::new();
+    assets
+        .add_font_file(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/.fonts/NotoSans-Regular.ttf"),
+        )
+        .unwrap();
+    let options = RenderOptions {
+        assets: Some(&assets),
+        system_fonts: false,
+        ..Default::default()
+    };
+    for wrap in [false, true] {
+        let mut html = String::from(
+            "<!doctype html><style>body{font-family:'Noto Sans';font-size:10px}table{width:100%;border-collapse:collapse}td,th{border:1px solid;padding:2px}</style><table><thead><tr><th>Id</th><th>Item</th></tr></thead><tbody>",
+        );
+        for i in 0..1800 {
+            let extra = if wrap && i == 1600 {
+                "long description ".repeat(16)
+            } else {
+                String::new()
+            };
+            html.push_str(&format!(
+                "<tr><td>{i}</td><td>Item {i} {extra}end</td></tr>"
+            ));
+        }
+        html.push_str("</tbody></table>");
+        let (_dir, path) = input(&html);
+        let expected = render_with_options(&path, &Default::default(), &options).unwrap();
+        let before = crate::stream::COMPLETED_TABLE_SAMPLES.get();
+        let actual = render_streaming(&path, &Default::default(), &options).unwrap();
+        assert_eq!(
+            crate::stream::COMPLETED_TABLE_SAMPLES.get() - before,
+            usize::from(!wrap)
+        );
+        let text_by_page = |bytes: &[u8]| {
+            let pdf = lopdf::Document::load_mem(bytes).unwrap();
+            pdf.get_pages()
+                .keys()
+                .map(|page| pdf.extract_text(&[*page]).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(text_by_page(&actual), text_by_page(&expected));
+    }
+}
+
+#[test]
 fn early_pages_show_the_real_page_count() {
     let css = "<style>@page { size: 300px 200px; margin: 40px; \
         @bottom-center { content: counter(page) ' of ' counter(pages) } } \

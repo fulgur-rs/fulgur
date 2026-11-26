@@ -30,6 +30,11 @@ use std::rc::Rc;
 /// Input bytes handed to the layout at a time.
 const READ_CHUNK: usize = 64 * 1024;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static COMPLETED_TABLE_SAMPLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Read, lay out, and paint an HTML file, painting each page as soon as no
 /// later input can change it.
 ///
@@ -484,6 +489,8 @@ impl PageSink for PdfSink<'_, '_> {
             consumed += count;
             index += 1;
         }
+        #[cfg(test)]
+        COMPLETED_TABLE_SAMPLES.set(COMPLETED_TABLE_SAMPLES.get() + 1);
         Ok(Some(index))
     }
 

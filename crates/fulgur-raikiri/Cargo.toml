@@ -16,14 +16,14 @@ streaming-diagnostics = ["raikiri-html/streaming-diagnostics"]
 
 [dependencies]
 rayon = "1"
-raikiri-dom = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "ec9d632ccf9e8cfe1b5d1789b1a46347494362c1" }
+raikiri-dom = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "9ca1b3d36a0ba1b637e29c703eb421385e92372b" }
 krilla = "0.7.0"
 tiny-skia = "0.12"
 skrifa = "0.47"
 fulgur-core = { version = "0.41.0", path = "../fulgur-core" }
-raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "ec9d632ccf9e8cfe1b5d1789b1a46347494362c1" }
-raikiri-net = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "ec9d632ccf9e8cfe1b5d1789b1a46347494362c1" }
-raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "ec9d632ccf9e8cfe1b5d1789b1a46347494362c1" }
+raikiri-html = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "9ca1b3d36a0ba1b637e29c703eb421385e92372b" }
+raikiri-net = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "9ca1b3d36a0ba1b637e29c703eb421385e92372b" }
+raikiri-traits = { git = "https://github.com/fulgur-rs/raikiri.git", rev = "9ca1b3d36a0ba1b637e29c703eb421385e92372b" }
 url = "2.5"
 percent-encoding = "2"
 flpdf = "0.10"
