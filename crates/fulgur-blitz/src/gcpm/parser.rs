@@ -1776,6 +1776,17 @@ mod tests {
         assert!(extract_top_level_import_hrefs(css).is_empty());
     }
 
+    #[test]
+    fn extract_top_level_import_hrefs_import_with_number_token() {
+        // `@import 42;` — a bare number token instead of a URL/string.
+        // Exercises the `_ => return Err(...)` arm in ImportHrefScanner's
+        // AtRuleParser::parse_prelude (the token is neither an unquoted URL,
+        // a quoted string, nor a `url()` function call), so the rule is
+        // silently dropped via cssparser error recovery.
+        let css = "@import 42; body { color: red; }";
+        assert!(extract_top_level_import_hrefs(css).is_empty());
+    }
+
     /// Codex review (PR #768, discussion r4039213850): CSS syntax makes an
     /// `@import` that comes after any other top-level statement invalid —
     /// it must be ignored, not resolved. `.x { color: red }` here is a
