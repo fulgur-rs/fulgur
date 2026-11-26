@@ -258,6 +258,16 @@ impl<'a> Painter<'a> {
         margin_boxes: &[MarginBox],
         targets: &LinkTargets<'_>,
     ) -> Result<Vec<PageLink>> {
+        self.page_with_runs(page, margin_boxes, targets, &page.text_runs())
+    }
+
+    pub(crate) fn page_with_runs<'p>(
+        &mut self,
+        page: &Page<'p>,
+        margin_boxes: &[MarginBox],
+        targets: &LinkTargets<'_>,
+        runs: &[PositionedGlyphRun<'p>],
+    ) -> Result<Vec<PageLink>> {
         let Self {
             pdf,
             fonts,
@@ -301,7 +311,17 @@ impl<'a> Painter<'a> {
             };
             if let Some(matrix) = matrix {
                 transform::with(surface, matrix, |surface| {
-                    paint_body(surface, page, space, fonts, svg, raster, tags, canvas_owner)
+                    paint_body(
+                        surface,
+                        page,
+                        space,
+                        fonts,
+                        svg,
+                        raster,
+                        tags,
+                        canvas_owner,
+                        runs,
+                    )
                 })?;
             }
             if group.is_some() {
@@ -427,11 +447,11 @@ fn paint_body(
     raster: &mut raster::RasterCache<'_>,
     tags: &mut Tags,
     canvas_owner: Option<NodeId>,
+    runs: &[PositionedGlyphRun<'_>],
 ) -> Result<()> {
-    let runs = page.text_runs();
-    let events = page.paint_order_for_text_runs(&runs);
+    let events = page.paint_order_for_text_runs(runs);
     let events = inside_root_transform(&events, space);
-    let paint = if in_order(page, events, &runs) {
+    let paint = if in_order(page, events, runs) {
         paint_ordered
     } else {
         paint_legacy
@@ -440,7 +460,7 @@ fn paint_body(
         surface,
         page,
         events,
-        &runs,
+        runs,
         fonts,
         svg,
         raster,
