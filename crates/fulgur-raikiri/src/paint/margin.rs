@@ -156,6 +156,7 @@ fn paint_box(
             raster,
             &mut Tags::disabled(),
             None,
+            &running.layout.page().text_runs(),
         );
         surface.pop();
         surface.pop();
