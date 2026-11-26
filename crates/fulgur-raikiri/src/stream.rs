@@ -266,6 +266,229 @@ impl PageSink for PdfSink<'_, '_> {
         Ok(true)
     }
 
+    fn wants_table_sample(&self) -> bool {
+        true
+    }
+
+    fn stage_table_sample(
+        &mut self,
+        sample: &raikiri_html::DocumentLayout,
+        ending: &raikiri_html::DocumentLayout,
+        rows: &mut raikiri_html::TableTextRows<'_>,
+    ) -> std::io::Result<Option<u32>> {
+        use raikiri_dom::{Document, StandaloneAlign, StandaloneStyle};
+        use raikiri_html::RunSource;
+        use rayon::prelude::*;
+        let initial = raikiri_html::computed::ComputedValues::initial();
+        let fonts = self.resources.inline_engine_fonts();
+        let mut queue = std::collections::VecDeque::new();
+        let mut consumed = 0usize;
+        let mut index = 0u32;
+        let last = ending.page(1).unwrap();
+        let row_count = |p: &raikiri_html::Page<'_>| {
+            let dom = p.dom();
+            p.fragments()
+                .filter(|f| {
+                    dom.local_name(f.node()) == Some("tr")
+                        && dom.parent(f.node()).and_then(|p| dom.local_name(p)) == Some("tbody")
+                })
+                .count()
+        };
+        let pages = [sample.page(0).unwrap(), sample.page(1).unwrap(), last];
+        let frames = pages.each_ref().map(|page| {
+            let dom = page.dom();
+            let originals = page.text_runs();
+            let mut cell_runs = std::collections::HashMap::new();
+            for (i, run) in originals.iter().enumerate() {
+                let RunSource::Text(node) = run.source else {
+                    return None;
+                };
+                let cell = dom.parent(node)?;
+                let row = dom.parent(cell)?;
+                let section = dom.parent(row)?;
+                match (
+                    dom.local_name(section),
+                    dom.local_name(row),
+                    dom.local_name(cell),
+                ) {
+                    (Some("thead"), Some("tr"), Some("th" | "td")) => {}
+                    (Some("tbody"), Some("tr"), Some("td")) => {
+                        if cell_runs.insert(cell, i).is_some() {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            let widths: std::collections::HashMap<_, _> = page
+                .fragments()
+                .filter(|f| cell_runs.contains_key(&f.node()))
+                .filter_map(|f| Some((f.node(), f.content_rect()?.width)))
+                .collect();
+            let mut slots = Vec::with_capacity(cell_runs.len());
+            for row in page.fragments().map(|f| f.node()).filter(|&node| {
+                dom.local_name(node) == Some("tr")
+                    && dom.parent(node).and_then(|p| dom.local_name(p)) == Some("tbody")
+            }) {
+                for cell in dom
+                    .children(row)
+                    .filter(|&node| dom.local_name(node).is_some())
+                {
+                    slots.push((cell_runs.remove(&cell)?, cell, *widths.get(&cell)?));
+                }
+            }
+            if !cell_runs.is_empty() {
+                return None;
+            }
+            let mut styles = Vec::with_capacity(slots.len());
+            for (i, parent, _) in &slots {
+                let run = &originals[*i];
+                let Some(cv) = page.computed(*parent) else {
+                    return None;
+                };
+                if cv.text_align != initial.text_align
+                    || cv.direction != initial.direction
+                    || cv.writing_mode != initial.writing_mode
+                    || cv.font_weight != initial.font_weight
+                    || cv.line_height != initial.line_height
+                    || !run.decorations.is_empty()
+                    || !run.shadows.is_empty()
+                    || run.transform.is_some()
+                {
+                    return None;
+                }
+                let style = StandaloneStyle {
+                    families: cv.font_family.to_vec(),
+                    font_size: run.font_size,
+                    ..Default::default()
+                };
+                styles.push(style);
+            }
+            Some((row_count(page), originals, slots, styles))
+        });
+        let [Some(first), Some(middle), Some(final_page)] = &frames else {
+            return Ok(None);
+        };
+        while consumed < rows.row_count() {
+            let (page, frame) = if index == 0 {
+                (pages[0], first)
+            } else if rows.row_count() - consumed == final_page.0 {
+                (pages[2], final_page)
+            } else {
+                (pages[1], middle)
+            };
+            let (count, originals, slots, styles) = frame;
+            let count = *count;
+            if count == 0 || count > rows.row_count() - consumed {
+                return Ok(None);
+            }
+            while queue.len() < count {
+                let batch = rows.read_batch()?;
+                if batch.is_empty() {
+                    return Ok(None);
+                }
+                queue.extend(batch);
+            }
+            let columns = queue.front().map(Vec::len).unwrap_or(0);
+            if columns == 0 || queue.iter().take(count).any(|row| row.len() != columns) {
+                return Ok(None);
+            }
+            let cells: Vec<_> = queue.drain(..count).flatten().collect();
+            if cells.iter().any(|cell| {
+                let text = cell.text.as_bytes();
+                text.is_empty()
+                    || text.first() == Some(&b' ')
+                    || text.last() == Some(&b' ')
+                    || !text.iter().all(|byte| (0x20..=0x7e).contains(byte))
+                    || text.windows(2).any(|pair| pair == b"  ")
+            }) {
+                return Ok(None);
+            }
+            if slots.len() != cells.len() {
+                return Ok(None);
+            }
+            let shaped: Option<Vec<_>> = cells
+                .par_iter()
+                .zip(styles)
+                .zip(slots)
+                .with_min_len(24)
+                .map_init(
+                    || {
+                        let mut doc = Document::new();
+                        doc.set_font_collection(fonts.clone());
+                        doc
+                    },
+                    |doc, ((cell, style), (_, _, width))| {
+                        let shape = doc.shape_standalone_text(
+                            &cell.text,
+                            style,
+                            Some(*width),
+                            StandaloneAlign::Start,
+                        )?;
+                        (shape.lines().len() == 1 && shape.width() <= *width).then_some(shape)
+                    },
+                )
+                .collect();
+            let Some(shaped) = shaped else {
+                return Ok(None);
+            };
+            let mut runs = originals.clone();
+            for ((i, _, _), shape) in slots.iter().zip(&shaped) {
+                let old = &originals[*i];
+                let RunSource::Text(node) = old.source else {
+                    return Ok(None);
+                };
+                let mut replacement = Vec::new();
+                if !shape.append_cell_runs(
+                    (0.0, 0.0),
+                    old.color,
+                    old.line.root,
+                    node,
+                    &mut replacement,
+                ) || replacement.len() != 1
+                {
+                    return Ok(None);
+                }
+                let mut run = replacement.pop().unwrap();
+                if run.font.id != old.font.id
+                    || run.synthesis != old.synthesis
+                    || run.ascent != old.ascent
+                    || run.descent != old.descent
+                    || run.normalized_coords != old.normalized_coords
+                {
+                    return Ok(None);
+                }
+                run.origin = old.origin;
+                run.line = old.line;
+                runs[*i] = run;
+            }
+            if self.painter.is_none() {
+                self.start(Some(&page), self.document_url.clone())
+                    .map_err(std::io::Error::other)?;
+            }
+            let targets = LinkTargets {
+                base_url: Some(self.document_url),
+                document_url: self.document_url,
+                anchors: None,
+            };
+            let links = self
+                .painter
+                .as_mut()
+                .unwrap()
+                .page_with_runs(&page, &[], &targets, &runs)
+                .map_err(std::io::Error::other)?;
+            self.pages.push(PendingPage {
+                page_box: page.geometry().page_box,
+                margin_boxes: false,
+                internal_links: links,
+                space: RootSpace::of_page(&page),
+            });
+            consumed += count;
+            index += 1;
+        }
+        Ok(Some(index))
+    }
+
     fn discard_staged_table_pages(&mut self) {
         self.painter = None;
         self.lang = None;

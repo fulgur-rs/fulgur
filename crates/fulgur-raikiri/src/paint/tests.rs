@@ -366,3 +366,145 @@ fn the_root_transform_wrapper_of_a_paint_order_is_left_to_the_caller() {
         &bare
     ));
 }
+
+#[test]
+fn measured_cell_lines_paint_their_original_text_and_wrap_positions() {
+    use raikiri_dom::{Document, StandaloneAlign, StandaloneStyle};
+    let fonts = raikiri_html::FontCollectionBuilder::new()
+        .font_bytes(
+            "Probe",
+            include_bytes!("../../../../examples/.fonts/NotoSans-Regular.ttf").as_slice(),
+        )
+        .build()
+        .unwrap();
+    let mut doc = Document::new();
+    doc.set_font_collection(fonts.collection().clone());
+    let style = StandaloneStyle {
+        font_size: 10.0,
+        ..Default::default()
+    };
+    let mut pdf = krilla::Document::new();
+    let mut page = pdf.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
+    let mut fonts = FontCache::default();
+    let mut top = 0.0;
+    draw_page(Surface::new(page.surface()), |surface| {
+        for (i, (value, lines)) in [("ii ii", 1), ("WW WW", 2)].into_iter().enumerate() {
+            let text = doc
+                .shape_standalone_text(value, &style, Some(29.0), StandaloneAlign::Start)
+                .unwrap();
+            assert_eq!(text.lines().len(), lines);
+            let mut runs = Vec::new();
+            let cell = NodeId::new(2 * i as u64 + 1);
+            let node = NodeId::new(2 * i as u64 + 2);
+            assert!(text.append_cell_runs((0.0, top), CssColor::BLACK, cell, node, &mut runs));
+            for run in runs {
+                assert_eq!(run.source, RunSource::Text(node));
+                assert_eq!(run.line.root, cell);
+                paint_glyph_run(surface, &run, &mut fonts);
+            }
+            top += text.height();
+        }
+        Ok(())
+    })
+    .unwrap();
+    page.finish();
+    let bytes = pdf.finish().unwrap();
+    let parsed = lopdf::Document::load_mem(&bytes).unwrap();
+    assert_eq!(
+        parsed
+            .extract_text(&[1])
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>(),
+        ["ii", "ii", "WW", "WW"]
+    );
+}
+
+#[test]
+fn replacement_cell_runs_keep_the_sample_page_borders_and_header() {
+    use raikiri_dom::{Document, StandaloneAlign, StandaloneStyle};
+    let fonts = raikiri_html::FontCollectionBuilder::new()
+        .font_bytes(
+            "Probe",
+            include_bytes!("../../../../examples/.fonts/NotoSans-Regular.ttf").as_slice(),
+        )
+        .build()
+        .unwrap();
+    let mut doc = Document::new();
+    doc.set_font_collection(fonts.collection().clone());
+    let resources = RenderResources::new().fonts(fonts);
+    let layout_of = |value: &str| {
+        let html = format!(
+            "<!doctype html><style>@page{{size:180px 120px;margin:8px}}body{{font:10px Probe;margin:0}}table{{border-collapse:collapse;table-layout:fixed;width:140px}}td,th{{border:1px solid;padding:2px}}</style><table><thead><tr><th>Header</th></tr></thead><tbody>{}</tbody></table>",
+            format!("<tr><td>{value}</td></tr>").repeat(24)
+        );
+        let parsed = raikiri_html::parse_html_with_resources(html.as_bytes(), &resources).unwrap();
+        let LayoutStatus::Completed(layout) = raikiri_html::layout(
+            &parsed,
+            Default::default(),
+            Default::default(),
+            LayoutOptions::new().resources(&resources),
+        )
+        .unwrap() else {
+            panic!("expected layout")
+        };
+        layout
+    };
+    let sample = layout_of("iii");
+    let actual = layout_of("Wide text");
+    let url = url::Url::parse("file:///table.html").unwrap();
+    let targets = LinkTargets {
+        base_url: None,
+        document_url: &url,
+        anchors: None,
+    };
+    let style = StandaloneStyle {
+        font_size: 10.0,
+        ..Default::default()
+    };
+    let shaped = doc
+        .shape_standalone_text("Wide text", &style, Some(130.0), StandaloneAlign::Start)
+        .unwrap();
+    let mut painted = 0;
+    for (name, layout) in [("sample", &sample), ("normal", &actual)] {
+        let mut pdf = Painter::new(
+            &resources,
+            &Default::default(),
+            url.clone(),
+            Tags::disabled(),
+        );
+        for page in layout.pages() {
+            let mut runs = Vec::new();
+            for original in page.text_runs() {
+                if name == "sample" && original.text == "iii" {
+                    let RunSource::Text(node) = original.source else {
+                        panic!("expected text")
+                    };
+                    let begin = runs.len();
+                    assert!(shaped.append_cell_runs(
+                        (0.0, 0.0),
+                        original.color,
+                        original.line.root,
+                        node,
+                        &mut runs
+                    ));
+                    assert_eq!(runs.len(), begin + 1);
+                    runs[begin].origin = original.origin;
+                    runs[begin].line = original.line;
+                    painted += 1;
+                } else {
+                    runs.push(original);
+                }
+            }
+            pdf.page_with_runs(&page, &[], &targets, &runs).unwrap();
+        }
+        let bytes = pdf.finish(None).unwrap();
+        let parsed = lopdf::Document::load_mem(&bytes).unwrap();
+        let pages = parsed.get_pages().keys().copied().collect::<Vec<_>>();
+        assert!(pages.len() > 2);
+        let text = parsed.extract_text(&pages).unwrap();
+        assert_eq!(text.matches("Wide text").count(), 24);
+        assert_eq!(text.matches("Header").count(), pages.len());
+    }
+    assert_eq!(painted, 24);
+}
