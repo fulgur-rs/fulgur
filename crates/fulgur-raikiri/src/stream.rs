@@ -343,9 +343,7 @@ impl PageSink for PdfSink<'_, '_> {
             let mut styles = Vec::with_capacity(slots.len());
             for (i, parent, _) in &slots {
                 let run = &originals[*i];
-                let Some(cv) = page.computed(*parent) else {
-                    return None;
-                };
+                let cv = page.computed(*parent)?;
                 if cv.text_align != initial.text_align
                     || cv.direction != initial.direction
                     || cv.writing_mode != initial.writing_mode
