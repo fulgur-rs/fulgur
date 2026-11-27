@@ -2746,4 +2746,149 @@ mod tests {
         let props = parse_declaration_block("column-rule-color: rgb(255, 0 0);");
         assert!(props.rule.is_none());
     }
+
+    // -------- parse_rgb_args: non-number/percentage g or b channel --------
+
+    #[test]
+    fn parse_rgb_non_number_green_channel_drops_rule() {
+        // `rgb(0, red, 128)` — the green channel is an Ident, not a Number or
+        // Percentage. `parse_rgb_channel(input)?` fails at the g position
+        // (line 349 `?` Err-propagation path), dropping the declaration.
+        let props = parse_declaration_block("column-rule-color: rgb(0, red, 128);");
+        assert!(props.rule.is_none());
+    }
+
+    #[test]
+    fn parse_rgb_non_number_blue_channel_drops_rule() {
+        // `rgb(0, 128, red)` — the blue channel is an Ident. `parse_rgb_channel`
+        // fails at the b position (line 351 `?` Err-propagation path).
+        let props = parse_declaration_block("column-rule-color: rgb(0, 128, red);");
+        assert!(props.rule.is_none());
+    }
+
+    // -------- parse_hsl_args: wrong token types for each component --------
+
+    #[test]
+    fn parse_hsl_non_number_hue_drops_rule() {
+        // Hue must be a Number token. An Ident ("red") is not a Number, so
+        // the `_ =>` arm inside `parse_hsl_args` fires (line 367) and
+        // the declaration is dropped.
+        let props = parse_declaration_block("column-rule-color: hsl(red, 100%, 50%);");
+        assert!(props.rule.is_none());
+    }
+
+    #[test]
+    fn parse_hsl_missing_first_comma_drops_rule() {
+        // After a valid hue, there must be a comma. `hsl(0 100% 50%)` omits it,
+        // causing `expect_comma()?` to fail (line 370 Err path).
+        let props = parse_declaration_block("column-rule-color: hsl(0 100% 50%);");
+        assert!(props.rule.is_none());
+    }
+
+    #[test]
+    fn parse_hsl_non_percentage_saturation_drops_rule() {
+        // Saturation must be a Percentage token. `hsl(0, 100, 50%)` has a bare
+        // Number for saturation — the `_ =>` arm fires (line 374).
+        let props = parse_declaration_block("column-rule-color: hsl(0, 100, 50%);");
+        assert!(props.rule.is_none());
+    }
+
+    #[test]
+    fn parse_hsl_missing_second_comma_drops_rule() {
+        // After saturation the second comma is required. `hsl(0, 100% 50%)` has
+        // no comma between saturation and lightness — `expect_comma()?` fails
+        // (line 375 Err path).
+        let props = parse_declaration_block("column-rule-color: hsl(0, 100% 50%);");
+        assert!(props.rule.is_none());
+    }
+
+    #[test]
+    fn parse_hsl_non_percentage_lightness_drops_rule() {
+        // Lightness must be a Percentage token. `hsl(0, 100%, 50)` has a bare
+        // Number — the `_ =>` arm fires for lightness, dropping the declaration.
+        let props = parse_declaration_block("column-rule-color: hsl(0, 100%, 50);");
+        assert!(props.rule.is_none());
+    }
+
+    #[test]
+    fn parse_hsl_extra_trailing_token_drops_rule() {
+        // After a valid four-argument `hsla(h, s%, l%, a)`, an extra `,extra`
+        // leaves tokens in the buffer. `expect_exhausted()?` fires (line 384),
+        // dropping the declaration.
+        let props = parse_declaration_block("column-rule-color: hsla(0, 100%, 50%, 0.5, extra);");
+        assert!(props.rule.is_none());
+    }
+
+    // -------- column-fill / break-* parsers: non-ident token drops declaration --------
+
+    #[test]
+    fn parse_column_fill_non_ident_value_drops_declaration() {
+        // `column-fill: 1px` supplies a Dimension token. `input.expect_ident()?`
+        // fails (line 453 `?` Err path), so the property is not set.
+        let props = parse_declaration_block("column-fill: 1px;");
+        assert_eq!(props.fill, None);
+    }
+
+    #[test]
+    fn parse_break_inside_non_ident_value_drops_declaration() {
+        // `break-inside: 1px` — a Dimension is not an ident; `expect_ident()?`
+        // fails (line 470 `?` Err path), dropping the declaration.
+        let props = parse_declaration_block("break-inside: 1px;");
+        assert_eq!(props.break_inside, None);
+    }
+
+    #[test]
+    fn parse_break_after_non_ident_value_drops_declaration() {
+        // `break-after: 1px` — Dimension is not an ident; `expect_ident()?`
+        // fails (line 481 `?` Err path), dropping the declaration.
+        let props = parse_declaration_block("break-after: 1px;");
+        assert_eq!(props.break_after, None);
+    }
+
+    #[test]
+    fn parse_break_before_non_ident_value_drops_declaration() {
+        // `break-before: 1px` — Dimension is not an ident; `expect_ident()?`
+        // fails (line 492 `?` Err path), dropping the declaration.
+        let props = parse_declaration_block("break-before: 1px;");
+        assert_eq!(props.break_before, None);
+    }
+
+    // -------- column-rule shorthand: style slot is None (width + color only) --------
+
+    #[test]
+    fn column_rule_shorthand_width_and_color_without_style() {
+        // `column-rule: 2pt #ff0000` — width and color are provided, but no
+        // style token. The `if let Some(s) = style` branch is not taken (line 737
+        // None-arm), and the `if color.is_none()` guard short-circuits the
+        // style `expect_ident()` on `#ff0000` (a Hash token, exercising line 703
+        // `?` Err-propagation on a non-ident token).
+        // The resulting spec has style = None (default: ColumnRuleStyle::None).
+        let props = parse_declaration_block("column-rule: 2pt #ff0000;");
+        let rule = props.rule.expect("shorthand must produce a spec");
+        assert!((rule.width.to_f32() - 2.0).abs() < 1e-3, "width");
+        assert_eq!(
+            rule.style,
+            ColumnRuleStyle::None,
+            "style must default to None"
+        );
+        assert_eq!(rule.color, [255, 0, 0, 255], "color");
+    }
+
+    // -------- selector parser: Token::Hash (non-IDHash) --------
+
+    #[test]
+    fn selector_hash_with_numeric_start_treated_as_id() {
+        // CSS-tokenizer emits `Token::Hash` (not `IDHash`) for `#1abc`
+        // because the content starts with a digit. The selector parser
+        // accepts both via the `Token::IDHash(name) | Token::Hash(name)`
+        // pattern (line 815, `Token::Hash` alternative) and stores it as an
+        // `Id` selector. This test pins that behaviour.
+        let list = parse_selector_list("#1abc");
+        assert_eq!(list.len(), 1, "one selector must be parsed");
+        assert_eq!(
+            list[0].subject.parts,
+            vec![SimpleSelector::Id("1abc".into())],
+            "id must be the numeric-start value"
+        );
+    }
 }
