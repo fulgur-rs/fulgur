@@ -838,4 +838,72 @@ mod tests {
             "landscape(false) override must yield portrait for a custom size"
         );
     }
+
+    // --- selector_matches: unknown selector ---
+
+    /// An unrecognised page selector (not `:first`, `:left`, or `:right`) must
+    /// never match any page and must not change the resolved settings.
+    /// Covers the `_ => false` arm of `selector_matches`.
+    #[test]
+    fn unknown_page_selector_is_never_matched() {
+        let config = Config::default();
+        let rules = vec![
+            PageSettingsRule {
+                page_selector: None,
+                size: None,
+                margin: PartialMargin::from_uniform(20.0),
+            },
+            PageSettingsRule {
+                // `:blank` is not a supported pseudo-selector in this implementation.
+                page_selector: Some(":blank".into()),
+                size: None,
+                margin: PartialMargin::from_uniform(99.0),
+            },
+        ];
+        for page_num in 1..=4 {
+            let (_, margin, _) = resolve_page_settings(&rules, page_num, 10, &config, false);
+            assert!(
+                (margin.top - 20.0).abs() < 0.01,
+                "unrecognised selector :blank must not apply on page {page_num}"
+            );
+        }
+    }
+
+    // --- matched_size path: selector rule with page-size ---
+
+    /// A `:first` rule that also carries a `size` declaration must override
+    /// the default-rule size for page 1.  Pages beyond the first fall back
+    /// to the default rule.
+    /// Covers the `matched_size = rule.size.as_ref()` branch inside
+    /// `resolve_page_settings` when a named-selector rule has a `size` set.
+    #[test]
+    fn selector_matched_rule_with_size_wins_over_default() {
+        let config = Config::default(); // overrides.page_size = false
+        let rules = vec![
+            PageSettingsRule {
+                page_selector: None,
+                size: Some(PageSizeDecl::Keyword("letter".into())),
+                margin: PartialMargin::default(),
+            },
+            PageSettingsRule {
+                page_selector: Some(":first".into()),
+                size: Some(PageSizeDecl::Keyword("a3".into())),
+                margin: PartialMargin::default(),
+            },
+        ];
+        // Page 1: matched by :first → selector-matched A3 wins.
+        let (size_p1, _, _) = resolve_page_settings(&rules, 1, 10, &config, false);
+        assert!(
+            (size_p1.width - PageSize::A3.width).abs() < 0.01,
+            "page 1 (:first) must use the selector-matched A3 size, got width={}",
+            size_p1.width
+        );
+        // Page 2: :first does not match → falls back to the default letter rule.
+        let (size_p2, _, _) = resolve_page_settings(&rules, 2, 10, &config, false);
+        assert!(
+            (size_p2.width - PageSize::LETTER.width).abs() < 0.01,
+            "page 2 (not :first) must use the default letter size, got width={}",
+            size_p2.width
+        );
+    }
 }
